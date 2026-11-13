@@ -40,8 +40,9 @@ export function gymStreak() {
 }
 export function gymBrief(date = today(), short = false) {
   const d = workoutFor(date);
-  const first = d.plan.slice(0, short ? 3 : d.plan.length).map(p => `${EXERCISES[p.ex].name}, ${p.sets} sets of ${String(p.reps).replace("–", " to ")}`);
-  return `Today is ${d.name.toLowerCase()}, ${d.focus}. Warm up with ${GYM_WARMUP.charAt(0).toLowerCase() + GYM_WARMUP.slice(1)} Then: ${first.join(". ")}.` + (short && d.plan.length > 3 ? ` Plus ${d.plan.length - 3} more on your screen.` : "") + ` I've put a video for every exercise in your gym coach.`;
+  if (short) return `Today is ${d.name.toLowerCase()}, ${d.focus}. Start with ${d.plan.slice(0, 3).map(p => EXERCISES[p.ex].name.toLowerCase()).join(", ")}. Videos are on your screen.`;
+  const all = d.plan.map(p => `${EXERCISES[p.ex].name}, ${p.sets} sets of ${String(p.reps).replace("–", " to ")}`);
+  return `Today is ${d.name.toLowerCase()}, ${d.focus}. Warm up with ${GYM_WARMUP.charAt(0).toLowerCase() + GYM_WARMUP.slice(1)} Then: ${all.join(". ")}.`;
 }
 export function exerciseBrief(key) {
   const e = EXERCISES[key]; if (!e) return "";

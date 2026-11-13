@@ -47,6 +47,8 @@ export function normalize(raw) {
   t = t.replace(/(\d+(?:\.\d+)?)\s*(?:hrs?|h)\b/g, "$1 hours").replace(/(\d+)\s*mins?\b/g, "$1 minutes");
   // Common mis-hearings
   t = t.replace(/\bsolid ?works?\b/g, "solidworks");
+  t = t.replace(/\b(?:i'?ve |i have |i got |i'?ll have )?(?:based|base|bassist|bas|bus) (lessons?|practice|class|session|guitar)\b/g, "i have bass $1");
+  t = t.replace(/\bbible study\b|\bbible studies\b/g, "bible study");
   t = t.replace(/\b(?:work|walking|walk|working)\s+(?:back\s+)?(?:to|2)\s+(my\s+|the\s+)?(dorm|room|hostel|apartment|flat|house|home|place|residence|hall)\b/g, "walk to my $2");
   t = t.replace(/\bpool day\b/g, "pull day").replace(/\bpole day\b/g, "pull day").replace(/\bpush they\b/g, "push day");
   t = t.replace(/\bband (?:practise|practice)\b/g, "band practice").replace(/\bpractise\b/g, "practice");
@@ -105,7 +107,11 @@ function extractTimes(seg) {
 const SUBJECT = /^(?:so |and |then |also |well |now |ok |okay |but |plus )*(?:i(?:'m| am)? (?:going|planning|hoping|about) to |i (?:want|need|have|plan|hope|would like|'d like|wish|got|will have|'ll have|should|must|gotta|may|might) to |i(?:'ll| will) (?:be )?|i(?:'ve| have) got |i have |i got |i(?:'m| am) |i |we have |we(?:'re| are) |let me |let's |gonna |going to |want to |need to |have to )+/;
 const ACTIVITY = [
   { cat: "gym",     re: /\b(gym|work ?out|lifting|lift weights|weights|weight training|strength training|leg day|push day|pull day|upper day|lower day|full body)\b/, title: () => "Gym" },
-  { cat: "band",    re: /\b(band|rehears\w*|jam session|jamming|bass practice|guitar practice|drum practice|music practice|practice (?:my |the )?(?:bass|guitar|drums|songs?|instrument|setlist))\b/, title: () => "Band practice" },
+  { cat: "bass",    re: /\b(bass(?: guitar)?(?: lessons?| practice| session| class)?|practi[cs]e (?:my |the )?bass)\b/, title: () => "Bass lesson" },
+  { cat: "bible",   re: /\b(bible(?: study| reading| time)?|scripture|devotions?|devotional|quiet time|read(?:ing)? (?:the |my )?(?:word|bible))\b/, title: () => "Bible study" },
+  { cat: "church",  re: /\b(church|service|prayer meeting|prayer|fellowship|choir|cell group|small group)\b/, title: null },
+  { cat: "band",    re: /\b(band|rehears\w*|jam session|jamming|guitar practice|drum practice|music practice|practice (?:my |the )?(?:guitar|drums|songs?|instrument|setlist))\b/, title: () => "Band practice" },
+  { cat: "learn",   re: /\b(?:learn|learning)\s+(?!(?:the |about )?(?:bass|bible)\b)([a-z][a-z0-9 +#.]{1,40}?)(?=\s+(?:for|from|at|until|till|by|then|and|today|tonight|tomorrow)\b|$)/, title: m => "Learn " + m[1].replace(/^(?:how to|about|the|some|more)\s+/, "").split(" ").map(w => PROPER[w] || w).join(" ") },
   { cat: "commute", re: /\b(walk|drive|commute|ride|bus|train|head|go|going|get|travel)\b.*\b(?:to|back to)\b.*\b(dorm|home|room|campus|class|school|office|hostel|apartment|flat|place|library|house|hall)\b/,
     title: m => { const place = m[2]; return (/walk/.test(m[0]) ? "Walk to " : /drive/.test(m[0]) ? "Drive to " : "Head to ") + (place === "home" ? "home" : place); } },
   { cat: "class",   re: /\b(class(?:es)?|lecture|lab|seminar|tutorial|course|school|lesson)\b/, title: null },
@@ -122,7 +128,7 @@ const PROPER = { solidworks: "SolidWorks", cad: "CAD", matlab: "MATLAB", python:
 function cleanTitle(rest) {
   let t = rest.trim().replace(/[—–-]+/g, " ");
   t = t.replace(SUBJECT, "");
-  t = t.replace(/\b(?:today|tonight|tomorrow|this morning|this afternoon|this evening|on (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/g, " ");
+  t = t.replace(/\b(?:today|tonight|tomorrow|this morning|this afternoon|this evening|(?:on |this |next )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/g, " ");
   t = t.replace(/^\s*(?:do|doing|go to|go|attend|have|be|start|get|some|a|an|the|my)\b\s*/g, " ");
   t = t.replace(/^\s*(?:do|doing|go to|go|attend|have|some|a|an|the|my)\b\s*/g, " ");
   t = t.replace(/\b(?:for|from|at|until|till|by|then|and|so|also|that is|which means|please|right|okay)\s*$/g, " ");
@@ -305,6 +311,30 @@ export function intent(raw) {
   if (/^(?:stop|cancel|never ?mind|nothing|that's all|that is all|no thanks?|no that's it|shut up|be quiet|go to sleep)$/.test(bare)) return { type: "dismiss" };
   if (/^(?:thanks?|thank you|cheers|great|perfect|awesome|nice|cool|good job|got it)(?: (?:pg|so much|man|bro|sir))?$/.test(bare)) return { type: "thanks" };
   if (/\bwhat can you do\b|\bhow do (?:i|you) use\b|\bhelp me\s*$|^help$/.test(bare)) return { type: "help" };
+  // ---- PG's memory: save notes and revelations ----
+  let n;
+  if ((n = raw.match(/^\s*(?:(?:hi|hey|okay|ok)[ ,]+p\.?\s?g[ ,.]*)?(?:(?:pg[ ,]+)?(?:please )?(?:save|remember|note|record|write down|keep|store)(?: (?:this|that|a revelation|my revelation|a note|this revelation|a lesson))?(?: (?:to|in|for) (?:my )?(?:spiritual|church|bible)(?: life)?(?: folder)?)?[:,]?\s+(?:that\s+)?|(?:i\s+)?(?:just\s+)?(?:learned|learnt|realized|realised|discovered|got|received|had)\s+(?:a\s+)?(?:new\s+)?(?:revelation|insight|lesson)(?:\s+today)?(?:\s+(?:that|about|which is|and it is|it's|it is))?[:,]?\s+|(?:a |my |new |today's )?(?:revelation|insight|lesson learned|note to self|note)(?: (?:for )?today)?(?: is)?[:,]\s*|i\s+(?:just\s+)?(?:learned|learnt|realized|realised|discovered)\s+(?:today\s+)?that\s+)(.{6,})$/i))) {
+    const folder = /\b(?:spiritual|church|bible|revelation)\b/i.test(raw.slice(0, raw.length - n[1].length)) ? "spiritual" : null;
+    return { type: "note", text: n[1].trim(), folder };
+  }
+  if (/\b(?:what (?:did|have) i (?:learn|learned|learnt|say|said|note|noted|save|saved|write|written)|what do i know|remind me (?:of )?what i (?:learned|learnt|said)|my (?:revelations|notes|lessons)|what (?:revelations?|notes) do i have)\b/.test(bare)) return { type: "recall", q: bare };
+  // ---- Bible ----
+  const bk = bare.match(/\b(?:(?:my |the )?plan is to|i (?:want|need|plan|am going|'m going|will|would like|'d like) to|i(?:'m| am) (?:going to )?|let's|start|starting|begin|beginning)\s*(?:read|reading|study|studying|go through|going through|finish)\s+(?:through\s+)?(?:the\s+)?(?:whole\s+)?(?:book of\s+)?([1-3]?\s?[a-z]+(?: of [a-z]+)?)/);
+  const mx = bare.match(/\b(?:max(?:imum)?|up to|at most|only)?\s*(?:of\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+chapters? (?:a|per|each|every) day\b/);
+  if (bk && /\b(?:book|plan)\b|\bread(?:ing)? (?:the book of )?[1-3]?\s?[a-z]+(?:\s|$)/.test(bare) && !/\b(?:chapter|verse)s? \d/.test(bare)) return { type: "bible_plan", book: bk[1], max: mx ? (+mx[1] || NUMW[mx[1]]) : null, text: bare };
+  if (mx && /\bcan|max|most|only|want|per|a day/.test(bare) && !/\b(?:i read|i've read|i have read)\b/.test(bare)) return { type: "bible_max", max: +mx[1] || NUMW[mx[1]] };
+  if (/\b(?:i(?:'ve| have)? (?:read|finished|completed|done)|i(?:'m| am) (?:on|at|up to)|i got (?:to|up to)|read up to)\b/.test(bare) && /\b(?:chapters?|verses?|\d+:\d+|today's reading|my reading|the book|bible)\b|\b(?:read|finished) [1-3]?\s?[a-z]+ \d/.test(bare)) return { type: "bible_read", text: bare };
+  if (/\b(?:what(?:'s| is| am i| should i)?(?: be)? (?:my )?(?:bible )?(?:reading|read)(?: plan)?(?: today| for today)?|(?:bible|reading) (?:plan|progress)|how far (?:am i|have i read))\b/.test(bare) && !/\b(?:at|from) \d/.test(bare)) return { type: "bible_info" };
+  // ---- Bass ----
+  if (/\b(?:what(?:'s| is| am i)? (?:my |today's )?(?:bass )?lesson|what am i (?:learning|practicing|practising) (?:today|on bass|tonight)|bass (?:plan|progress|lesson today))\b/.test(bare) && !/\b(?:at|from) \d/.test(bare)) return { type: "bass_info" };
+  if (/^(?:(?:the |my |this )?(?:lesson|session|step|reading|it|that) )?(?:is )?(?:complete|completed|done|finished)(?: (?:it|the lesson|this lesson|today's lesson|the step|this step))?$|^(?:i )?(?:completed|finished|mastered|nailed|got) (?:it|the lesson|this lesson|today's lesson|the step|this step|that)$|^(?:lesson|step) (?:complete|completed|done)$|^i(?:'m| am)? done with (?:the |this |today's )?(?:lesson|step|bass lesson)$|^mark (?:it |the lesson )?(?:as )?complete$/.test(bare)) return { type: "complete" };
+  if (/^(?:not yet|repeat(?: (?:it|the lesson|this lesson))?|i need more (?:time|practice)|same lesson(?: again)?|again tomorrow)$/.test(bare)) return { type: "repeat" };
+  // ---- Learning anything ----
+  const lr = bare.match(/^(?:i(?:'m| am) (?:now )?(?:learning|studying|trying to learn)|i (?:want|need|would like|'d like|wanna|plan) to (?:learn|study|get good at)|teach me|help me learn|i(?:'m| am) starting to learn|i(?:'ve| have) started learning)\s+(?:how to\s+|about\s+)?(.{2,60}?)$/);
+  if (lr && !/\b(?:at|from|until|till) \d|\b\d+ (?:minutes|hours)\b/.test(bare)) {
+    if (/^(?:the )?bass(?: guitar)?\b/.test(lr[1])) return { type: "bass_info" };
+    if (!findExercise(lr[1])) return { type: "learn", topic: lr[1] };
+  }
   if (/\b(?:how did i do|review (?:my|of|the)? ?day|daily review|day review|how was my day|give me (?:a |my )?review)\b/.test(bare)) return { type: "review" };
   if (/\bwhat(?:'s| is| am i| should i be)? (?:doing |happening |on )?(?:right )?now\b|\bwhat should i (?:be )?do(?:ing)? (?:right )?now\b/.test(bare)) return { type: "now" };
   if (/\bwhat(?:'s| is| do i have)? (?:coming )?(?:up )?next\b|\bwhat(?:'s| is) after (?:this|that)\b|\bwhat's coming up\b/.test(bare)) return { type: "next" };
@@ -328,8 +358,10 @@ export function intent(raw) {
   if ((m = bare.match(/\b(?:make|change|set|extend|shorten|cut) (?:the |my )?(.+?) (?:to |for )?(\d+(?:\.\d+)?) (hours?|minutes?)(?: long)?$/))) return { type: "resize", target: m[1], min: Math.round(/^h/.test(m[3]) ? +m[2] * 60 : +m[2]) };
   if ((m = bare.match(/\b(?:i(?:'m| am)? (?:done|finished) with|i (?:finished|completed|did)|mark|check off) (?:the |my )?(.+?)(?: (?:as )?(?:done|complete|completed|finished))?$/))) return { type: "done", target: m[1] };
   if ((m = bare.match(/^(?:i(?:'m| am) )?(?:done|finished)$/))) return { type: "done", target: "" };
+  if (/\?\s*$/.test(raw) || /^(?:what|how|why|should|can|could|is|are|do|does|when|where|who|which|give me|tell me|remind me)\b/.test(bare)) return { type: "ask", q: bare, text: raw };
   return { type: "schedule", text: raw };
 }
+const NUMW = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
 
 // Fuzzy-match a spoken name against blocks
 export function matchBlock(target, blocks) {
@@ -342,6 +374,8 @@ export function matchBlock(target, blocks) {
     words.forEach(w => { if (title.includes(w)) sc += 2; else if (title.includes(w.slice(0, 4))) sc += 1; });
     if (/gym|workout/.test(t) && b.cat === "gym") sc += 3;
     if (/band|practice/.test(t) && b.cat === "band") sc += 3;
+    if (/bass|lesson/.test(t) && b.cat === "bass") sc += 3;
+    if (/bible|reading|devotion/.test(t) && b.cat === "bible") sc += 3;
     if (/study/.test(t) && b.cat === "study") sc += 2;
     if (/class/.test(t) && b.cat === "class") sc += 2;
     if (sc > bs) { bs = sc; best = b; }

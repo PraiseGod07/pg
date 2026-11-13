@@ -1,34 +1,36 @@
 // PG — app controller: views, command handling, reminders.
 import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1 } from "./store.js";
-import { CATS, EXERCISES, SPLITS, INSTRUMENTS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
+import { CATS, EXERCISES, SPLITS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
 import { intent, parseSchedule, matchBlock, parseClock } from "./nlu.js";
-import { placeItems, conflicts, gaps, firstGap } from "./scheduler.js";
+import { placeItems, conflicts, firstGap } from "./scheduler.js";
 import { Voice, chime } from "./voice.js";
 import * as C from "./coach.js";
-import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, cap, pad } from "./util.js";
+import * as BS from "./bass.js";
+import * as B from "./bible.js";
+import * as M from "./brain.js";
+import * as LN from "./learn.js";
+import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
-const ui = { view: "today", date: today(), openEx: null, playing: new Set(), sheetOpen: false, autoClose: false };
+const ui = { view: "today", date: today(), openEx: null, playing: new Set(), autoClose: false, topic: null, folder: "all", q: "" };
 
 await hydrate();
 load();
+BS.bass(); B.bible(); M.notes(); LN.tracks();
 const addr = () => S.profile.address || "sir";
+const hello = () => `Hi, ${addr()}. What can I do for you today?`;
 
 // ================= Voice wiring =================
 const voice = new Voice({
   onState: m => paintVoice(m),
   onHeard: t => { $("#heard").textContent = t ? "“" + t + "”" : ""; },
   onWake: () => { openAssistant(true); $("#heard").textContent = ""; },
-  onGreet: () => {
-    const g = `Hi. What can I do for you, ${addr()}?`;
-    pushMsg("pg", g);
-    voice.say(g, () => voice.listen("command"));
-  },
-  onIdle: () => { voice.stop(); voice.afterReply(); setStatus("I'm here when you need me."); },
+  onGreet: () => { const g = hello(); pushMsg("pg", g); voice.say(g, () => voice.listen("command")); },
+  onIdle: () => { voice.stop(); voice.afterReply(); setStatus("Say “Hi PG”"); },
   onCommand: text => { $("#heard").textContent = ""; run(text, true); },
   onError: code => {
-    const msg = { unsupported: "Voice input isn't supported in this browser. Use Chrome, Edge or Safari, or type below.", blocked: "Microphone access is blocked. Allow it in your browser settings, then tap the mic.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found." }[code];
+    const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found." }[code];
     if (msg) toast(msg);
     if (code === "blocked" || code === "nomic") { S.voice.handsFree = false; save(); if (ui.view === "settings") render(); }
   }
@@ -37,8 +39,7 @@ voice.voiceURI = S.voice.voiceURI; voice.rate = S.voice.rate; voice.pickVoice();
 
 function paintVoice(m) {
   $("#orb").dataset.state = m; $("#dockOrb").dataset.state = m;
-  const label = { off: voice.supported ? "Tap to talk" : "Type below to talk to PG", wake: "Say “Hi PG”", command: "Listening…", thinking: "Thinking…", speaking: "Speaking…" }[m];
-  setStatus(label);
+  setStatus({ off: voice.supported ? "Tap to talk" : "Type to PG", wake: "Say “Hi PG”", command: "Listening…", thinking: "Thinking…", speaking: "Speaking…" }[m]);
   $("#listenPill").textContent = m === "wake" ? "Listening for “Hi PG”" : m === "command" ? "Listening…" : "";
   if (m === "command" || m === "speaking" || m === "thinking") openAssistant(false);
   if ((m === "wake" || m === "off") && ui.autoClose) { ui.autoClose = false; setTimeout(() => { if (voice.mode === "wake" || voice.mode === "off") closeAssistant(); }, 1800); }
@@ -57,22 +58,27 @@ function pushMsg(who, text, html) {
 }
 function paintChat() {
   const el = $("#chat");
-  if (!S.chat.length) {
-    el.innerHTML = `<div class="chat-empty">${voice.supported ? "Say “Hi PG” or tap the mic, then tell me about your day." : "Type your day below and I'll build your timetable."}</div>`;
-  } else {
-    el.innerHTML = S.chat.slice(-30).map(m => `<div class="msg ${m.who}">${m.html || esc(m.text)}</div>`).join("");
-  }
+  el.innerHTML = S.chat.length ? S.chat.slice(-30).map(m => `<div class="msg ${m.who}">${m.html || esc(m.text)}</div>`).join("") : "";
   el.scrollTop = el.scrollHeight;
 }
+const SUGGEST = {
+  today: ["What's next?", "Read my schedule", "Today's Bible reading"],
+  bass: ["What's my lesson?", "Lesson complete", "Not yet"],
+  bible: ["Today's reading", "I read today's reading", "What did I learn?"],
+  gym: ["What's today's workout?", "How do I do a squat?", "Switch to leg day"],
+  notes: ["What have I learned?", "Save a revelation: ", "I'm learning SolidWorks"],
+  settings: ["Hi PG", "What's next?", "Read my schedule"]
+};
 function paintSuggest() {
-  const sug = ["What's next?", "I'm going to the gym", "I want to do band practice", "Read my schedule", "How do I do a squat?"];
-  $("#suggest").innerHTML = sug.map(s => `<button class="chip" data-say="${esc(s)}">${esc(s)}</button>`).join("");
+  $("#suggest").innerHTML = (SUGGEST[ui.view] || SUGGEST.today).map(s => s.endsWith(": ")
+    ? `<button class="chip" data-fill="${esc(s)}">${esc(s.replace(/: $/, ""))}</button>`
+    : `<button class="chip" data-say="${esc(s)}">${esc(s)}</button>`).join("");
 }
-
+const speakable = t => t.replace(/(\d)–(\d)/g, "$1 to $2").replace(/“|”/g, "");
 function reply(text, opts = {}) {
   pushMsg("pg", text, opts.html);
   if (opts.view) { go(opts.view, opts.date); if (opts.spoken) ui.autoClose = isMobile(); }
-  if (S.voice.speak !== false) voice.say(text, opts.then);
+  if (S.voice.speak !== false) voice.say(speakable(text), opts.then);
   else voice.afterReply();
 }
 
@@ -82,7 +88,7 @@ async function run(text, spoken = false) {
   if (!text) { voice.afterReply(); return; }
   pushMsg("me", text);
   try { await handle(text, spoken); }
-  catch (e) { console.error(e); reply("Sorry, something went wrong on my side. Please try that again."); }
+  catch (e) { console.error(e); reply("Sorry, something went wrong. Please try that again."); }
 }
 
 const blocksOf = d => sortedBlocks(d);
@@ -95,36 +101,49 @@ function undoable(snap, msg) {
   toast(msg, "Undo", () => { list.forEach(sn => { day(sn.d).blocks = sn.blocks; }); save(); render(); toast("Undone."); });
 }
 const say = b => `${b.title}, ${sayTime(b.start)} to ${sayTime(b.end)}`;
+const markCat = cat => { day(today()).blocks.filter(b => b.cat === cat && !b.done).forEach(b => b.done = true); save(); };
+const minsFor = (cat, dflt) => { const b = blocksOf(today()).find(x => x.cat === cat && !x.done); return b ? b.end - b.start : dflt; };
+const bibleRef = () => { const td = B.todays(); return td && !td.done ? B.refText(td) : ""; };
+
+// Which coach does "complete" refer to?
+function context() {
+  const n = nowMin(), bl = blocksOf(today());
+  const c = bl.find(b => b.start <= n && n < b.end + 30 && !b.done && ["bass", "bible", "learn", "gym"].includes(b.cat));
+  if (c) return c.cat;
+  if (["bass", "bible", "gym"].includes(ui.view)) return ui.view;
+  if (ui.topic) return ui.topic;
+  const r = bl.filter(b => b.start <= n && !b.done && ["bass", "bible", "learn", "gym"].includes(b.cat)).pop();
+  return r ? r.cat : null;
+}
 
 async function handle(text, spoken) {
   const it = intent(text);
   const d = ui.view === "today" ? ui.date : today();
   switch (it.type) {
     case "greet": {
-      const g = `Hi. What can I do for you, ${addr()}?`;
-      pushMsg("pg", g);
+      const g = hello(); pushMsg("pg", g);
       if (S.voice.speak !== false) voice.say(g, () => voice.supported && spoken !== "typed" ? voice.listen("command") : voice.afterReply());
       return;
     }
     case "dismiss": return reply("Okay.");
     case "thanks": return reply(`Anytime, ${addr()}.`);
-    case "help": return reply(`I build your timetable from what you tell me. Say something like: today I have class from 8:30 to 11, then I'll study until 5. I can also coach your gym and band sessions, tell you what's next, and move, resize or delete anything on your day.`);
+    case "help": return reply("Tell me your day and I'll plan it. I also teach you bass, keep your Bible plan, coach the gym, and remember what you learn.");
     case "now": {
       const c = current(), nx = upcoming()[0];
-      if (c) return reply(`Right now it's ${c.title}, until ${sayTime(c.end)}. That's ${sayDur(c.end - nowMin())} left.` + (nx ? ` After that, ${nx.title} at ${sayTime(nx.start)}.` : ""), { view: "today", date: today(), spoken });
-      if (nx) return reply(`Nothing scheduled right now. Next up is ${nx.title} at ${sayTime(nx.start)}, in ${sayDur(nx.start - nowMin())}.`, { view: "today", date: today(), spoken });
-      return reply(`Your schedule is clear right now, ${addr()}.`);
+      if (c) return reply(`Right now it's ${c.title}, until ${sayTime(c.end)}.` + (nx ? ` Then ${nx.title} at ${sayTime(nx.start)}.` : ""), { view: "today", date: today(), spoken });
+      if (nx) return reply(`Nothing right now. Next is ${nx.title} at ${sayTime(nx.start)}.`, { view: "today", date: today(), spoken });
+      return reply(`Your schedule is clear, ${addr()}.`);
     }
     case "next": {
       const nx = upcoming()[0];
-      if (!nx) return reply(`Nothing else is scheduled today, ${addr()}.`);
-      return reply(`Next is ${nx.title} at ${sayTime(nx.start)}, in ${sayDur(nx.start - nowMin())}. It runs until ${sayTime(nx.end)}.`, { view: "today", date: today(), spoken });
+      if (!nx) return reply(`Nothing else today, ${addr()}.`);
+      return reply(`Next is ${nx.title} at ${sayTime(nx.start)}, in ${sayDur(nx.start - nowMin())}.`, { view: "today", date: today(), spoken });
     }
     case "day": {
       const dd = it.tomorrow ? addDays(today(), 1) : d;
       const bl = live(dd);
-      if (!bl.length) return reply(`${fmtDay(dd)} is open. Tell me what you have and I'll plan it.`, { view: "today", date: dd, spoken });
-      return reply(`${fmtDay(dd)} you have ${bl.length} ${bl.length === 1 ? "thing" : "things"}. ` + bl.slice(0, 8).map(say).join(". ") + ".", { view: "today", date: dd, spoken });
+      if (!bl.length) return reply(`${fmtDay(dd)} is open.`, { view: "today", date: dd, spoken });
+      return reply(`${fmtDay(dd)}: ` + bl.slice(0, 8).map(say).join(". ") + ".", { view: "today", date: dd, spoken });
     }
     case "clear": {
       const dd = it.tomorrow ? addDays(today(), 1) : d;
@@ -136,38 +155,141 @@ async function handle(text, spoken) {
     case "delete": case "move": case "shift": case "resize": case "done": {
       const pool = blocksOf(d);
       const b = it.target ? matchBlock(it.target, pool) : current(d);
-      if (!b) return reply(`I couldn't find ${it.target ? "“" + it.target + "”" : "anything running now"} on ${fmtDay(d).toLowerCase()}'s schedule.`);
+      if (!b) return reply(`I couldn't find ${it.target ? "“" + it.target + "”" : "anything running now"} on your schedule.`);
+      if (it.type === "done" && ["bass", "bible", "learn", "gym"].includes(b.cat)) return completeCoach(b.cat, spoken);
       const snap = snapshot(d);
       let msg = "";
       if (it.type === "delete") { day(d).blocks = day(d).blocks.filter(x => x.id !== b.id); msg = `Removed ${b.title}.`; }
-      if (it.type === "move") { const t = parseClock(it.time); const len = b.end - b.start; b.start = t; b.end = Math.min(1440, t + len); b.flex = false; msg = `Moved ${b.title} to ${sayTime(b.start)}. It now ends at ${sayTime(b.end)}.`; }
-      if (it.type === "shift") { b.start += it.min; b.end = Math.min(1440, b.end + it.min); msg = `Pushed ${b.title} back ${sayDur(it.min)}. It now starts at ${sayTime(b.start)}.`; }
-      if (it.type === "resize") { b.end = Math.min(1440, b.start + it.min); msg = `${b.title} is now ${sayDur(it.min)}, ${sayTime(b.start)} to ${sayTime(b.end)}.`; }
+      if (it.type === "move") { const t = parseClock(it.time); const len = b.end - b.start; b.start = t; b.end = Math.min(1440, t + len); b.flex = false; msg = `Moved ${b.title} to ${sayTime(b.start)}.`; }
+      if (it.type === "shift") { b.start += it.min; b.end = Math.min(1440, b.end + it.min); msg = `${b.title} now starts at ${sayTime(b.start)}.`; }
+      if (it.type === "resize") { b.end = Math.min(1440, b.start + it.min); msg = `${b.title} is now ${sayTime(b.start)} to ${sayTime(b.end)}.`; }
       if (it.type === "done") { b.done = true; msg = `Nice work. ${b.title} is done.`; const nx = upcoming(d).find(x => x.id !== b.id); if (nx) msg += ` Next is ${nx.title} at ${sayTime(nx.start)}.`; }
       save(); render(); undoable(snap, msg.split(".")[0] + ".");
       return reply(msg, { view: "today", date: d, spoken });
     }
+    // ---- Memory ----
+    case "note": {
+      const inBible = context() === "bible" || ui.view === "bible";
+      const n = M.add(it.text, { folder: it.folder || (inBible ? "spiritual" : null), ctx: inBible && B.bible().plan ? bibleRef() || B.stats()?.book : "" });
+      if (ui.view === "notes" || ui.view === "bible") render();
+      return reply(`Saved to ${M.FOLDERS[n.folder].label}${n.refs.length ? `, linked to ${n.refs[0]}` : ""}.`);
+    }
+    case "recall": return recall(it.q, spoken);
+    case "ask": {
+      const ev = parseSchedule(text, { date: d, today: today(), now: nowMin() }).filter(i => i.kind === "event" && (i.s != null || i.e != null));
+      if (ev.length) return scheduleFrom(text, spoken);
+      return recall(it.q, spoken, true);
+    }
+    // ---- Bible ----
+    case "bible_plan": {
+      const i = B.findBook(it.book);
+      if (i < 0) return reply("Which book of the Bible? For example: my plan is to read Ephesians.");
+      B.setPlan(i, it.max); ui.topic = "bible"; renameCoachBlocks(today());
+      const s = B.stats();
+      return reply(`Plan set: ${s.book}, ${s.nCh} chapters at up to ${B.bible().max} a day. That's ${s.daysLeft} ${s.daysLeft === 1 ? "day" : "days"}. Today's reading is ${bibleRef()}.`, { view: "bible", spoken });
+    }
+    case "bible_max": {
+      B.setMax(it.max); renameCoachBlocks(today());
+      return reply(`Got it, up to ${it.max} ${it.max === 1 ? "chapter" : "chapters"} a day.` + (B.bible().plan ? " " + B.brief() : " Which book do you want to read?"), { view: "bible", spoken });
+    }
+    case "bible_read": {
+      let bi = B.findBook(text);
+      if (!B.bible().plan || (bi >= 0 && bi !== B.bible().plan.book)) {
+        if (bi < 0) return reply("Which book are you reading? Say: my plan is to read Ephesians.");
+        B.setPlan(bi);
+      }
+      const r = B.parseRead(text);
+      if (!r) return reply("How far did you get? For example: up to chapter 2 verse 10.");
+      const s = B.record(r); ui.topic = "bible";
+      const td = B.todays();
+      let msg = `Got it. ${s.read} of ${s.tot} verses in ${s.book}, ${s.pct}%.`;
+      if (s.finished) { msg = `You finished ${s.book}. Well done, ${addr()}. Which book is next?`; markCat("bible"); }
+      else if (td.doneToday) { msg += ` Today's reading is done. ${s.chLeft} ${s.chLeft === 1 ? "chapter" : "chapters"} left, about ${s.daysLeft} ${s.daysLeft === 1 ? "day" : "days"}.`; markCat("bible"); }
+      else msg += ` ${td.left} verses left for today.`;
+      return reply(msg, { view: "bible", spoken });
+    }
+    case "bible_info": ui.topic = "bible"; return reply(B.brief(), { view: "bible", spoken });
+    // ---- Bass ----
+    case "bass_info": ui.topic = "bass"; return reply(BS.brief(minsFor("bass", 30)), { view: "bass", spoken });
+    case "complete": {
+      const c = context();
+      if (c) return completeCoach(c, spoken);
+      const b = current(d);
+      if (b) { b.done = true; save(); render(); return reply(`Nice work. ${b.title} is done.`); }
+      return reply("What did you complete? Your bass lesson, Bible reading, or something on your schedule?");
+    }
+    case "repeat": {
+      if ((context() || "bass") === "bass") { BS.logTry(); return reply(`No problem. We'll stay on ${BS.lesson().t.toLowerCase()} next time. Repetition is how it sticks.`, { view: "bass", spoken }); }
+      return reply("Okay, we'll pick it up next time.");
+    }
+    // ---- Learning anything ----
+    case "learn": {
+      setStatus("Thinking…");
+      const steps = S.ai.provider !== "none" && S.ai.key ? await aiLearn(it.topic).catch(() => null) : null;
+      const tr = LN.create(it.topic, steps); ui.topic = "learn";
+      return reply(LN.brief(tr), { view: "notes", spoken });
+    }
     case "gym_switch": {
       const w = C.switchDay(it.day);
-      if (!w) return reply("I don't have that workout. Try push, pull, legs, upper or lower day.");
-      renameCoachBlocks(today());
+      if (!w) return reply("Try push, pull, legs, upper or lower day.");
+      renameCoachBlocks(today()); ui.topic = "gym";
       return reply(`Switched. ${C.gymBrief(today(), true)}`, { view: "gym", spoken });
     }
-    case "gym_info": return reply(C.gymBrief(today(), true), { view: "gym", spoken });
-    case "band_info": return reply(C.bandBrief(bandMinutes()), { view: "band", spoken });
-    case "song_add": { const s = C.addSong(it.name); return reply(`Added ${s.name} to your setlist.`, { view: "band", spoken }); }
+    case "gym_info": ui.topic = "gym"; return reply(C.gymBrief(today(), true), { view: "gym", spoken });
+    case "band_info": return reply(C.bandBrief(minsFor("band", 60)), { view: "bass", spoken });
+    case "song_add": { const s = C.addSong(it.name); return reply(`Added ${s.name} to your songs.`, { view: "bass", spoken }); }
     case "howto": {
       ui.openEx = it.ex; ui.playing.add(EXERCISES[it.ex].video.id);
-      return reply(C.exerciseBrief(it.ex), { view: "gym", spoken, then: () => { voice.afterReply(); } });
+      return reply(C.exerciseBrief(it.ex), { view: "gym", spoken });
     }
-    case "review": return reply(reviewText(), { view: "review", spoken });
+    case "review": return reply(reviewText(), { view: "today", date: today(), spoken });
     default: return scheduleFrom(text, spoken);
   }
 }
 
-function bandMinutes(d = today()) { const b = blocksOf(d).find(x => x.cat === "band" && !x.done); return b ? b.end - b.start : 60; }
+function completeCoach(cat, spoken) {
+  if (cat === "bass") {
+    const r = BS.complete(); markCat("bass"); renameCoachBlocks(today()); ui.topic = "bass";
+    if (!r) return reply("You've already finished the whole course.", { view: "bass", spoken });
+    return reply(r.next ? `Lesson complete: ${r.done.t}. Next session you'll learn ${r.next.t.toLowerCase()}.` : `That's the last lesson. You've finished the course, ${addr()}.`, { view: "bass", spoken });
+  }
+  if (cat === "bible") {
+    if (!B.bible().plan) return reply("You don't have a reading plan yet. Which book do you want to read?");
+    const s = B.record({ kind: "today" }); markCat("bible"); ui.topic = "bible";
+    return reply(s.finished ? `You finished ${s.book}. Which book is next?` : `Today's reading is done. ${s.pct}% through ${s.book}, ${s.chLeft} ${s.chLeft === 1 ? "chapter" : "chapters"} left.`, { view: "bible", spoken });
+  }
+  if (cat === "learn") {
+    const r = LN.complete(); markCat("learn");
+    if (!r) return reply("Nothing left on that plan.");
+    return reply(r.next ? `Step done. Next for ${r.tr.topic}: ${r.next.t}.` : `You finished every step of ${r.tr.topic}.`, { view: "notes", spoken });
+  }
+  if (cat === "gym") {
+    C.completeWorkout(today(), gymProgress().sets); markCat("gym");
+    return reply(`Workout logged. Next time is ${C.workoutFor(addDays(today(), 1)).name.toLowerCase()}.`, { view: "gym", spoken });
+  }
+}
+
+async function recall(q, spoken, open) {
+  const general = !/\babout\b|\bin [a-z]/.test(q) && /\b(?:what (?:have|did) i (?:learn|learned|learnt)|my (?:revelations|notes|lessons)|what revelations)\b/.test(q);
+  let found = general ? M.notes().slice(0, 3) : M.search(q, 3);
+  if (S.ai.provider !== "none" && S.ai.key && (open || found.length)) {
+    setStatus("Thinking…");
+    const ans = await aiChat(q, found.length ? found : M.search(q, 6)).catch(() => null);
+    if (ans) return reply(ans);
+  }
+  if (general && found.length) return reply(`Your latest: ` + found.map(n => `“${n.text}”`).join(" "), { view: "notes", spoken });
+  const a = M.answer(q, found);
+  if (a) return reply(a);
+  if (open) return reply(`I don't have anything on that yet, ${addr()}. When you learn something, say: save this, then tell me.`);
+  return reply("You haven't taught me anything about that yet.");
+}
+
 function renameCoachBlocks(d) {
-  day(d).blocks.forEach(b => { if (b.cat === "gym" && /^gym\b/i.test(b.title)) b.title = "Gym · " + C.workoutFor(d).name; });
+  day(d).blocks.forEach(b => {
+    if (b.cat === "gym" && /^gym\b/i.test(b.title)) b.title = "Gym · " + C.workoutFor(d).name;
+    if (b.cat === "bass" && /^bass\b/i.test(b.title) && d === today()) b.title = BS.finished() ? "Bass practice" : `Bass · ${BS.lesson().t}`;
+    if (b.cat === "bible" && /^bible\b/i.test(b.title) && d === today()) { const r = bibleRef(); b.title = r ? `Bible · ${r}` : "Bible study"; }
+  });
   save();
 }
 
@@ -179,36 +301,45 @@ async function scheduleFrom(text, spoken) {
     setStatus("Thinking…");
     const ai = await aiExtract(text, ctx).catch(() => null);
     if (ai && ai.length) { items = ai; events = ai; }
-    else {
-      const ans = await aiChat(text).catch(() => null);
-      if (ans) return reply(ans);
-    }
+    else { const ans = await aiChat(text, M.search(text, 4)).catch(() => null); if (ans) return reply(ans); }
   }
   if (!events.length) {
-    return reply(`I didn't catch a task in that. You can say things like: today I have class from 8:30 to 11. Or: I'm going to the gym at 6. Or ask me what's next.`);
+    const a = M.answer(text, M.search(text, 2));
+    if (a) return reply(a);
+    return reply(`Sorry, ${addr()}, I didn't catch that. Try: bass lesson at 6:30, or what's next?`);
   }
   const dates = [...new Set(events.map(e => e.date))];
   const snaps = dates.map(snapshot);
   const res = placeItems(items, day, { today: today(), now: nowMin(), dayStart: S.profile.dayStart, dayEnd: S.profile.dayEnd });
   dates.forEach(renameCoachBlocks);
   res.unplaced.forEach(u => S.inbox.push({ id: uid(), title: u.title, cat: u.cat, dur: u.dur, date: u.date }));
+  // "Learn X" blocks get a learning plan
+  for (const b of [...res.added]) if (b.cat === "learn") { const topic = b.title.replace(/^learn\s+/i, ""); if (!LN.findTrack(topic)) LN.create(topic); }
   save();
   const all = [...res.added, ...res.updated].sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start);
   const d0 = dates[0];
-  let parts = [];
-  if (all.length) {
-    const lead = all.length > 1 ? `Done, ${addr()}. Here's ${d0 === today() ? "your day" : fmtDay(d0).toLowerCase()}. ` : `Done. `;
-    parts.push(lead + all.slice(0, 8).map(say).join(". ") + ".");
-    if (items.some(i => i.corrected)) { const c = items.find(i => i.corrected); parts.push(`I set ${c.title} to ${sayDur(c.dur)}.`); }
-  }
-  if (res.unplaced.length) parts.push(`I couldn't fit ${res.unplaced.map(u => u.title).join(" and ")} today, so it's in your to-do list.`);
+  const parts = [];
+  if (all.length) parts.push((all.length > 1 ? `Done, ${addr()}. ` : "Done. ") + all.slice(0, 8).map(say).join(". ") + ".");
+  if (res.unplaced.length) parts.push(`${res.unplaced.map(u => u.title).join(" and ")} didn't fit, so it's in your to-do list.`);
   const cf = conflicts(day(d0).blocks);
   const clash = all.find(b => cf.has(b.id));
-  if (clash) { const other = day(d0).blocks.find(b => b.id !== clash.id && cf.has(b.id) && b.start < clash.end && clash.start < b.end); if (other) parts.push(`Heads up: ${clash.title} overlaps ${other.title}.`); }
-  const gym = all.find(b => b.cat === "gym"), band = all.find(b => b.cat === "band");
+  if (clash) { const other = day(d0).blocks.find(b => b.id !== clash.id && cf.has(b.id) && b.start < clash.end && clash.start < b.end); if (other) parts.push(`Heads up: it overlaps ${other.title}.`); }
+  const first = cat => all.find(b => b.cat === cat);
   let view = "today";
-  if (gym) { parts.push(C.gymBrief(gym.date, true)); if (all.length === 1) view = "gym"; }
-  if (band) { parts.push(C.bandBrief(band.end - band.start)); if (all.length === 1) view = "band"; }
+  const solo = all.length === 1;
+  if (first("bass")) { ui.topic = "bass"; parts.push(BS.brief(first("bass").end - first("bass").start)); if (solo) view = "bass"; }
+  if (first("bible")) {
+    ui.topic = "bible";
+    if (B.bible().plan) {
+      parts.push(B.brief());
+      const rel = M.search(B.stats().book, 1, "spiritual")[0];
+      if (rel) parts.push(`Last time you learned: “${rel.text}”`);
+    } else parts.push("Which book are we reading? Say: my plan is to read Ephesians.");
+    if (solo) view = "bible";
+  }
+  if (first("gym")) { ui.topic = "gym"; parts.push(C.gymBrief(first("gym").date, true)); if (solo) view = "gym"; }
+  if (first("band")) parts.push(C.bandBrief(first("band").end - first("band").start));
+  if (first("learn")) { const tr = LN.findTrack(first("learn").title.replace(/^learn\s+/i, "")); if (tr) { ui.topic = "learn"; parts.push(LN.brief(tr)); if (solo) view = "notes"; } }
   render();
   undoable(snaps, `${res.added.length} added${res.updated.length ? ", " + res.updated.length + " updated" : ""}.`);
   const html = `<div>${esc(parts[0] || "")}</div>` + (all.length > 1 ? `<ul>${all.map(b => `<li>${esc(fmtTime(b.start))}–${esc(fmtTime(b.end))} · ${esc(b.title)}</li>`).join("")}</ul>` : "") + parts.slice(1).map(p => `<div style="margin-top:6px">${esc(p)}</div>`).join("");
@@ -217,16 +348,12 @@ async function scheduleFrom(text, spoken) {
 
 function reviewText() {
   const bl = blocksOf(today());
-  if (!bl.length) return `There's nothing on today's schedule to review yet, ${addr()}.`;
+  if (!bl.length) return `Nothing on today's schedule yet, ${addr()}.`;
   const done = bl.filter(b => b.done), open = bl.filter(b => !b.done && b.end <= nowMin());
-  const mins = done.reduce((a, b) => a + (b.end - b.start), 0);
-  let t = `You planned ${bl.length} ${bl.length === 1 ? "block" : "blocks"} today and finished ${done.length}, about ${sayDur(mins)} of work.`;
-  if (open.length) t += ` Not checked off yet: ${open.slice(0, 3).map(b => b.title).join(", ")}.`;
-  if (S.gym.log.find(l => l.date === today())) t += " Gym session logged.";
-  if (S.band.log.find(l => l.date === today())) t += " Band practice logged.";
+  let t = `You finished ${done.length} of ${bl.length} today.`;
+  if (open.length) t += ` Still open: ${open.slice(0, 3).map(b => b.title).join(", ")}.`;
   const tm = live(addDays(today(), 1))[0];
   if (tm) t += ` Tomorrow starts with ${tm.title} at ${sayTime(tm.start)}.`;
-  t += done.length >= bl.length * 0.7 ? " Strong day." : " Pick the one thing that matters most tomorrow and do it first.";
   return t;
 }
 
@@ -247,106 +374,96 @@ async function callAI(system, user, json) {
   return "";
 }
 async function aiExtract(text, ctx) {
-  const sys = `Extract schedule items from speech. Today is ${ctx.today}. Fix speech-to-text errors (e.g. "solid work" = SolidWorks, "work to my dorm" = walk to dorm, wrong AM/PM). Return JSON {"items":[{"title":"","category":"class|study|work|commute|gym|band|meal|meeting|social|rest|other","date":"YYYY-MM-DD","start":"HH:MM or null","end":"HH:MM or null","minutes":number or null}]} in the order spoken. Return {"items":[]} if none.`;
+  const sys = `Extract schedule items from speech. Today is ${ctx.today}. Fix speech-to-text errors (e.g. "solid work" = SolidWorks, "based lessons" = bass lessons, wrong AM/PM). Return JSON {"items":[{"title":"","category":"class|study|work|commute|gym|bass|bible|church|learn|band|meal|meeting|social|rest|other","date":"YYYY-MM-DD","start":"HH:MM or null","end":"HH:MM or null","minutes":number or null}]} in the order spoken. Return {"items":[]} if none.`;
   const raw = await callAI(sys, text, true);
   const o = JSON.parse(raw.replace(/^```json\s*|```$/g, ""));
   const toM = s => { if (!s) return null; const [h, m] = s.split(":").map(Number); return h * 60 + m; };
   return (o.items || []).map(x => { const s = toM(x.start), e = toM(x.end); const cat = CATS[x.category] ? x.category : "other"; return { kind: "event", title: x.title || "Task", cat, date: x.date || ctx.date, s, e, dur: x.minutes || (s != null && e != null ? e - s : DEFAULT_MIN[cat]) }; });
 }
-async function aiChat(text) {
-  const sys = `You are PG, a concise, polite personal assistant. Address the user as "${addr()}". Answer in 1–3 short spoken sentences.`;
+async function aiChat(text, notes = []) {
+  const mem = notes.length ? `\nThings the user taught you (use these first, mention the date):\n${notes.map(n => `- ${n.date}${n.refs.length ? " (" + n.refs.join(", ") + ")" : ""}: ${n.text}`).join("\n")}` : "";
+  const sys = `You are PG, a warm, concise personal assistant. The user is a Christian student who plays bass. Address him as "${addr()}". Answer in 1–3 short spoken sentences. If his own notes apply, remind him of them and say how to apply them.${mem}`;
   return (await callAI(sys, text, false)).trim();
+}
+async function aiLearn(topic) {
+  const raw = await callAI(`Make a beginner-to-advanced learning plan. Return JSON {"steps":[{"t":"short step title","d":"one sentence","q":"a YouTube search query for this step"}]} with 6 to 8 steps.`, topic, true);
+  const o = JSON.parse(raw.replace(/^```json\s*|```$/g, ""));
+  return (o.steps || []).filter(s => s.t).slice(0, 8);
 }
 
 // ================= Views =================
 function go(view, date) { ui.view = view; if (date) ui.date = date; render(); $("#main").scrollTo?.(0, 0); if (isMobile()) window.scrollTo(0, 0); }
+const TITLES = { today: "Today", bass: "Bass", bible: "Bible", gym: "Gym", notes: "Notes", settings: "Settings" };
 function render() {
+  if (!TITLES[ui.view]) ui.view = "today";
   $$("[data-view]").forEach(b => b.classList.toggle("on", b.dataset.view === ui.view));
-  const v = { today: viewToday, gym: viewGym, band: viewBand, review: viewReview, settings: viewSettings }[ui.view] || viewToday;
-  $("#view").innerHTML = v();
-  document.title = { today: "Today", gym: "Gym coach", band: "Band coach", review: "Review", settings: "Settings" }[ui.view] + " · PG";
+  $("#view").innerHTML = { today: viewToday, bass: viewBass, bible: viewBible, gym: viewGym, notes: viewNotes, settings: viewSettings }[ui.view]();
+  document.title = TITLES[ui.view] + " · PG";
+  paintSuggest();
 }
 function greeting() { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"; }
 const catVar = c => `--c:${(CATS[c] || CATS.other).color}`;
+const bar = p => `<div class="bar"><i style="width:${p}%"></i></div>`;
 
 function viewToday() {
   const d = ui.date, isT = d === today(), bl = blocksOf(d), n = nowMin();
   const cf = conflicts(bl);
-  const planned = bl.reduce((a, b) => a + (b.end - b.start), 0);
-  const done = bl.filter(b => b.done).length;
   const cur = isT ? current() : null, nx = isT ? upcoming()[0] : null;
   let h = `<div class="spread"><div class="eyebrow">${esc(fmtDay(d, true))}</div>
     <div class="day-nav"><button class="icon-btn" data-act="day" data-n="-1" aria-label="Previous day"><svg><use href="#i-left"/></svg></button>
     ${isT ? "" : `<button class="chip" data-act="day" data-n="0">Today</button>`}
     <button class="icon-btn" data-act="day" data-n="1" aria-label="Next day"><svg><use href="#i-right"/></svg></button></div></div>
-    <h1 class="title">${isT ? `${greeting()}, <em>${esc(addr())}</em>.` : esc(fmtDay(d))}</h1>
-    <p class="lede">${bl.length ? `${bl.length} ${bl.length === 1 ? "block" : "blocks"} planned${done ? `, ${done} done` : ""}.` : (isT ? "Your day is open. Tell PG what you have on." : "Nothing planned yet.")}</p>`;
-  if (bl.length) h += `<div class="stats"><div class="stat"><b>${fmtDur(planned)}</b><span>Planned</span></div><div class="stat"><b>${done}/${bl.length}</b><span>Done</span></div>${isT ? `<div class="stat"><b>${nx ? fmtTime(nx.start) : "—"}</b><span>Next start</span></div>` : ""}</div>`;
-  if (isT && (cur || nx)) {
-    if (cur) {
-      const pct = Math.round((n - cur.start) / (cur.end - cur.start) * 100);
-      h += `<section class="now" aria-label="Happening now"><div class="eyebrow">Now · ${fmtTime(cur.start)} – ${fmtTime(cur.end)}</div><div class="now-title">${esc(cur.title)}</div>
-        <div class="now-meta">${fmtDur(cur.end - n)} left</div><div class="bar"><i style="width:${pct}%"></i></div>
-        <div class="now-next"><span>${nx ? `Next · <b>${esc(nx.title)}</b> at ${fmtTime(nx.start)}` : "Last block of the day"}</span>${coachLink(cur)}</div></section>`;
-    } else {
-      h += `<section class="now" aria-label="Up next"><div class="eyebrow">Up next · in ${fmtDur(nx.start - n)}</div><div class="now-title">${esc(nx.title)}</div>
-        <div class="now-meta">${fmtTime(nx.start)} – ${fmtTime(nx.end)}</div><div class="now-next"><span>Free until then</span>${coachLink(nx)}</div></section>`;
-    }
+    <h1 class="title">${isT ? `${greeting()}, <em>${esc(addr())}</em>.` : esc(fmtDay(d))}</h1>`;
+  if (cur) {
+    const pct = Math.round((n - cur.start) / (cur.end - cur.start) * 100);
+    h += `<section class="now" aria-label="Happening now"><div class="eyebrow">Now · until ${fmtTime(cur.end)}</div><div class="now-title">${esc(cur.title)}</div>${bar(pct)}
+      <div class="now-next"><span>${nx ? `Next · ${esc(nx.title)} at ${fmtTime(nx.start)}` : "Last one today"}</span>${coachLink(cur)}</div></section>`;
+  } else if (nx) {
+    h += `<section class="now" aria-label="Up next"><div class="eyebrow">Next · in ${fmtDur(nx.start - n)}</div><div class="now-title">${esc(nx.title)}</div>
+      <div class="now-next"><span>${fmtTime(nx.start)} – ${fmtTime(nx.end)}</span>${coachLink(nx)}</div></section>`;
   }
   if (!bl.length) {
-    h += `<div class="empty"><h3>Tell PG about your day.</h3><p>${voice.supported ? "Say “Hi PG”, or tap the mic, and describe your day in your own words. PG fills in the timetable." : "Type your day to PG in your own words. PG fills in the timetable."}</p>
-      <div class="try">${[
-        "Today I have class from 8:30 to 11, then I'll walk to my dorm for 30 minutes. I want to study from 11:30 to 5 PM, then do SolidWorks for an hour.",
-        "I'm going to the gym at 6",
-        "I want to do band practice after dinner at 7"
-      ].map(s => `<button data-say="${esc(s)}"><b>Try</b> · ${esc(s)}</button>`).join("")}</div>
-      <div class="row" style="justify-content:center;margin-top:var(--space-5)"><button class="btn" data-act="add"><svg><use href="#i-plus"/></svg>Add a block</button></div></div>`;
+    h += `<div class="empty"><p>${isT ? "Your day is open." : "Nothing planned."}</p><button class="btn" data-act="add"><svg><use href="#i-plus"/></svg>Add</button></div>`;
   } else {
-    h += `<h2 class="sec"><span>Timetable</span><button class="btn sm" data-act="add"><svg><use href="#i-plus"/></svg>Add</button></h2><div class="timeline">`;
-    const from = Math.min(S.profile.dayStart, bl[0].start), to = Math.max(S.profile.dayEnd, bl[bl.length - 1].end);
-    const free = gaps(bl, from, to, 30);
-    const rows = [...bl.map(b => ({ t: b.start, b })), ...free.map(g => ({ t: g.start, g }))].sort((a, b) => a.t - b.t || (a.g ? 1 : -1));
+    h += `<h2 class="sec"><span>Schedule</span><button class="btn sm ghost" data-act="add" aria-label="Add a block"><svg><use href="#i-plus"/></svg>Add</button></h2><div class="timeline">`;
     let nowDrawn = !isT;
-    for (const r of rows) {
-      if (!nowDrawn && n < r.t) { h += nowLine(n); nowDrawn = true; }
-      if (r.b) {
-        const b = r.b, isLive = isT && b.start <= n && n < b.end && !b.done;
-        h += `<div class="tl-row"><div class="tl-time">${fmtTime(b.start)}<small>${fmtTime(b.end)}</small></div>
-          <div><div class="blk ${b.done ? "done" : ""} ${isLive ? "live" : ""}" style="${catVar(b.cat)}" role="button" tabindex="0" data-act="edit" data-id="${b.id}" aria-label="${esc(b.title)}, ${fmtTime(b.start)} to ${fmtTime(b.end)}">
-            <div class="blk-title">${esc(b.title)}</div>
-            <button class="check" data-act="toggle" data-id="${b.id}" aria-label="${b.done ? "Mark not done" : "Mark done"}"><svg><use href="#i-check"/></svg></button>
-            <div class="blk-meta"><span class="tag cat" style="${catVar(b.cat)}">${esc((CATS[b.cat] || CATS.other).label)}</span><span class="tnum">${fmtDur(b.end - b.start)}</span>
-              ${b.flex ? `<span class="tag">Auto-placed</span>` : ""}${cf.has(b.id) ? `<span class="tag warn">Overlaps</span>` : ""}${coachLink(b)}</div>
-          </div></div></div>`;
-      } else {
-        const g = r.g;
-        h += `<div class="tl-row gap-row"><div class="tl-time"></div><div class="gap"><span>Free · ${fmtDur(g.end - g.start)}</span><span class="tnum">${fmtTime(g.start)} – ${fmtTime(g.end)}</span></div></div>`;
-      }
+    for (const b of bl) {
+      if (!nowDrawn && n < b.start) { h += nowLine(n); nowDrawn = true; }
+      const isLive = isT && b.start <= n && n < b.end && !b.done;
+      h += `<div class="tl-row"><div class="tl-time">${fmtTime(b.start)}<small>${fmtTime(b.end)}</small></div>
+        <div><div class="blk ${b.done ? "done" : ""} ${isLive ? "live" : ""}" style="${catVar(b.cat)}" role="button" tabindex="0" data-act="edit" data-id="${b.id}" aria-label="${esc(b.title)}, ${fmtTime(b.start)} to ${fmtTime(b.end)}">
+          <div class="blk-title">${esc(b.title)}</div>
+          <button class="check" data-act="toggle" data-id="${b.id}" aria-label="${b.done ? "Mark not done" : "Mark done"}"><svg><use href="#i-check"/></svg></button>
+          <div class="blk-meta"><span class="tag cat" style="${catVar(b.cat)}">${esc((CATS[b.cat] || CATS.other).label)}</span><span class="tnum">${fmtDur(b.end - b.start)}</span>${cf.has(b.id) ? `<span class="tag warn">Overlaps</span>` : ""}${coachLink(b)}</div>
+        </div></div></div>`;
     }
     if (!nowDrawn && n < 1440) h += nowLine(n);
     h += `</div>`;
   }
-  const inbox = S.inbox;
-  if (inbox.length) {
-    h += `<h2 class="sec"><span>To-do · not scheduled</span></h2><div class="card">${inbox.map(t => `<div class="set-row"><div><div class="lbl">${esc(t.title)}</div><div class="sub">${fmtDur(t.dur || 30)}${t.date ? " · " + esc(fmtDay(t.date)) : ""}</div></div>
-      <div class="row"><button class="btn sm" data-act="fit" data-id="${t.id}">Fit into ${esc(fmtDay(d).toLowerCase())}</button><button class="btn sm ghost" data-act="inbox-del" data-id="${t.id}" aria-label="Remove">Remove</button></div></div>`).join("")}</div>`;
+  if (isT) {
+    const st = B.stats(), ls = BS.lesson();
+    h += `<div class="tiles">
+      <button class="tile" data-view="bass" style="${catVar("bass")}"><span class="eyebrow">Bass · ${BS.finished() ? "Done" : "Lesson " + BS.lessonNo()}</span><b>${esc(BS.finished() ? "Course complete" : ls.t)}</b>${bar(BS.pct())}</button>
+      <button class="tile" data-view="bible" style="${catVar("bible")}"><span class="eyebrow">Bible${st ? " · " + st.pct + "%" : ""}</span><b>${esc(st ? (B.todays().doneToday ? "Done for today" : bibleRef()) : "Choose a book")}</b>${bar(st ? st.pct : 0)}</button></div>`;
+  }
+  if (S.inbox.length) {
+    h += `<h2 class="sec"><span>To-do</span></h2><div class="card">${S.inbox.map(t => `<div class="set-row"><div><div class="lbl">${esc(t.title)}</div><div class="sub">${fmtDur(t.dur || 30)}</div></div>
+      <div class="row"><button class="btn sm" data-act="fit" data-id="${t.id}">Fit in</button><button class="btn sm ghost" data-act="inbox-del" data-id="${t.id}">Remove</button></div></div>`).join("")}</div>`;
   }
   return h;
 }
 const nowLine = n => `<div class="now-line" aria-hidden="true"><span>${fmtTime(n)}</span><i></i></div>`;
 function coachLink(b) {
-  if (b.cat === "gym") return `<button class="tag link" data-act="go" data-v="gym">Open gym coach</button>`;
-  if (b.cat === "band") return `<button class="tag link" data-act="go" data-v="band">Open band coach</button>`;
-  return "";
+  const v = { gym: ["gym", "Workout"], bass: ["bass", "Lesson"], band: ["bass", "Songs"], bible: ["bible", "Reading"], learn: ["notes", "Plan"] }[b.cat];
+  return v ? `<button class="tag link" data-act="go" data-v="${v[0]}">${v[1]}</button>` : "";
 }
 
 function videoHTML(v, title) {
   const playing = ui.playing.has(v.id);
-  const q = encodeURIComponent(title + " proper form");
   return `<div class="video">${playing
-    ? `<iframe src="https://www.youtube-nocookie.com/embed/${v.id}?autoplay=1&rel=0&playsinline=1&modestbranding=1" title="${esc(title)} demo video" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen loading="lazy"></iframe>`
-    : `<button data-act="play" data-vid="${v.id}" aria-label="Play ${esc(title)} video"><img src="https://i.ytimg.com/vi/${v.id}/hqdefault.jpg" alt="" loading="lazy" width="480" height="360"><span class="play" style="position:absolute"><svg><use href="#i-play"/></svg></span></button>`}</div>
-    <div class="video-cap"><span>Demo · ${esc(v.by)}</span><span class="row"><a href="https://www.youtube.com/watch?v=${v.id}" target="_blank" rel="noopener">YouTube <svg><use href="#i-ext"/></svg></a><a href="https://www.youtube.com/results?search_query=${q}" target="_blank" rel="noopener">More videos <svg><use href="#i-ext"/></svg></a></span></div>`;
+    ? `<iframe src="https://www.youtube-nocookie.com/embed/${v.id}?autoplay=1&rel=0&playsinline=1&modestbranding=1" title="${esc(title)}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen loading="lazy"></iframe>`
+    : `<button data-act="play" data-vid="${v.id}" aria-label="Play ${esc(title)}"><img src="https://i.ytimg.com/vi/${v.id}/hqdefault.jpg" alt="" loading="lazy" width="480" height="360"><span class="play" style="position:absolute"><svg><use href="#i-play"/></svg></span></button>`}</div>
+    <div class="video-cap"><span>${esc(v.by)}</span><a href="https://www.youtube.com/watch?v=${v.id}" target="_blank" rel="noopener">YouTube <svg><use href="#i-ext"/></svg></a></div>`;
 }
 
 function gymProgress() {
@@ -356,19 +473,12 @@ function gymProgress() {
 function viewGym() {
   const sp = C.split(), w = C.workoutFor(today()), prog = gymProgress();
   const logged = S.gym.log.find(l => l.date === today());
-  const est = Math.round(w.plan.reduce((a, p) => a + p.sets * (45 + p.rest), 0) / 60 + 8);
-  const totalSets = w.plan.reduce((a, p) => a + p.sets, 0);
-  const doneSets = Object.values(prog.sets).reduce((a, arr) => a + arr.filter(Boolean).length, 0);
-  const nextDay = sp.days[(sp.days.indexOf(w) + 1) % sp.days.length];
-  let h = `<div class="eyebrow">Gym coach · ${esc(sp.label)}</div>
+  let h = `<div class="eyebrow">Gym · ${esc(sp.label)}</div>
     <h1 class="title">Today is <em>${esc(w.name.toLowerCase())}</em>.</h1>
-    <p class="lede">${esc(cap(w.focus))}. About ${est} minutes · ${w.plan.length} exercises · ${totalSets} sets.${logged ? " Logged today." : ""}</p>
-    <div class="stats"><div class="stat"><b>${doneSets}/${totalSets}</b><span>Sets done</span></div><div class="stat"><b>${C.gymStreak()}</b><span>Sessions, last 7 days</span></div><div class="stat"><b>${esc(nextDay.name)}</b><span>Up next time</span></div></div>
-    <div class="hero-coach"><div class="split-chips" role="group" aria-label="Choose workout">${sp.days.map(x => `<button class="chip ${x === w ? "on" : ""}" data-act="gymday" data-k="${x.key}">${esc(x.name)}</button>`).join("")}</div>
-    <div class="row"><button class="btn" data-act="speak-gym"><svg><use href="#i-speaker"/></svg>Talk me through it</button>
-    <button class="btn primary" data-act="gym-finish" ${logged ? "disabled" : ""}>${logged ? "Workout logged" : "Finish workout"}</button></div></div>
-    <h2 class="sec"><span>Warm-up</span></h2><div class="card"><div class="lbl">${esc(GYM_WARMUP)}</div></div>
-    <h2 class="sec"><span>Exercises</span><span class="faint" style="font-weight:400">Tap one for cues and a video</span></h2>`;
+    <div class="split-chips" role="group" aria-label="Choose workout">${sp.days.map(x => `<button class="chip ${x === w ? "on" : ""}" data-act="gymday" data-k="${x.key}">${esc(x.name)}</button>`).join("")}</div>
+    <div class="row act-row"><button class="btn" data-act="speak-gym"><svg><use href="#i-speaker"/></svg>Talk me through it</button>
+    <button class="btn primary" data-act="gym-finish" ${logged ? "disabled" : ""}>${logged ? "Logged" : "Finish workout"}</button></div>
+    <p class="note" style="margin-bottom:var(--space-5)">${esc(GYM_WARMUP)}</p>`;
   w.plan.forEach((p, i) => {
     const e = EXERCISES[p.ex], open = ui.openEx === p.ex;
     const sets = prog.sets[p.ex] || [];
@@ -377,89 +487,115 @@ function viewGym() {
     h += `<article class="ex ${open ? "open" : ""} ${comp ? "complete" : ""}" id="ex-${p.ex}">
       <button class="ex-head" data-act="ex" data-k="${p.ex}" aria-expanded="${open}">
         <span class="ex-num">${comp ? `<svg style="width:14px;height:14px"><use href="#i-check"/></svg>` : i + 1}</span>
-        <span><span class="ex-name">${esc(e.name)}</span><br><span class="ex-sub">${esc(e.muscles)}</span></span>
-        <span class="ex-dose">${p.sets} × ${esc(p.reps)}<small>Rest ${p.rest >= 60 ? Math.round(p.rest / 60 * 10) / 10 + " min" : p.rest + "s"}</small></span>
+        <span class="ex-name">${esc(e.name)}</span>
+        <span class="ex-dose">${p.sets} × ${esc(p.reps)}</span>
       </button>
       ${open ? `<div class="ex-body"><div>${videoHTML(e.video, e.name)}</div><div>
         <ol class="cues">${e.cues.map(c => `<li>${esc(c)}</li>`).join("")}</ol>
         <div class="sets" role="group" aria-label="Sets">${Array.from({ length: p.sets }, (_, k) => `<button class="set ${sets[k] ? "on" : ""}" data-act="set" data-k="${p.ex}" data-i="${k}" aria-pressed="${!!sets[k]}">Set ${k + 1}</button>`).join("")}</div>
-        <div class="weight"><label class="row" style="gap:6px">Weight <input class="input tnum" type="number" inputmode="decimal" min="0" step="0.5" data-act="w" data-k="${p.ex}" value="${last ? esc(last.w) : ""}" placeholder="kg"></label>
-          <span>${last ? `Last · ${esc(last.w)} kg (${esc(fmtDay(last.date))})` : "Log a weight to track progress"}</span></div>
-        <div class="row" style="margin-top:var(--space-4)"><button class="btn sm" data-act="speak-ex" data-k="${p.ex}"><svg><use href="#i-speaker"/></svg>Explain it</button></div>
+        <div class="weight"><label class="row" style="gap:6px">kg <input class="input tnum" type="number" inputmode="decimal" min="0" step="0.5" data-act="w" data-k="${p.ex}" value="${last ? esc(last.w) : ""}" aria-label="Weight in kg"></label>
+          <span>${last ? `Last · ${esc(last.w)} kg` : ""}</span><span>Rest ${p.rest >= 60 ? Math.round(p.rest / 60 * 10) / 10 + " min" : p.rest + "s"}</span></div>
       </div></div>` : ""}
     </article>`;
   });
   return h;
 }
 
-function viewBand() {
-  const ins = C.inst(), mins = bandMinutes(), p = C.bandPlan(mins);
-  let h = `<div class="spread"><div class="eyebrow">Band coach · ${esc(ins.label)}</div>
-    <select class="input" style="width:auto" data-act="instrument" aria-label="Instrument">${Object.entries(INSTRUMENTS).map(([k, v]) => `<option value="${k}" ${k === S.band.instrument ? "selected" : ""}>${v.label}</option>`).join("")}</select></div>
-    <h1 class="title">${p.focus ? `Today's focus: <em>${esc(p.focus.name)}</em>.` : `Band practice, <em>${mins} minutes</em>.`}</h1>
-    <p class="lede">${p.focus ? `${p.focus.progress}% · ${stageOf(p.focus.progress).label}. PG picks the song that needs the most work.` : "Add your setlist and PG will track each song and choose what to work on."}</p>
-    <div class="stats"><div class="stat"><b>${S.band.songs.length}</b><span>Songs</span></div><div class="stat"><b>${S.band.songs.length ? Math.round(S.band.songs.reduce((a, s) => a + s.progress, 0) / S.band.songs.length) + "%" : "—"}</b><span>Setlist ready</span></div><div class="stat"><b>${C.bandStreak()}</b><span>Practices, last 7 days</span></div></div>
-    <div class="hero-coach"><div class="row"><button class="btn" data-act="speak-band"><svg><use href="#i-speaker"/></svg>Talk me through it</button><button class="btn primary" data-act="band-log">Log practice</button></div></div>
-    <h2 class="sec"><span>Today's plan · ${mins} min</span></h2><div class="card"><div class="steps">${p.steps.map((s, i) => `<div class="step"><div class="step-min">${s.min} min</div><div><div class="step-t">${esc(s.t)}</div><div class="step-d">${esc(s.d)}</div>${i === 0 && s.video ? `<div style="margin-top:var(--space-3);max-width:420px">${videoHTML(s.video, ins.label + " warm up")}</div>` : ""}</div></div>`).join("")}</div></div>
-    <h2 class="sec"><span>Setlist progress</span></h2><div class="card">`;
-  if (S.band.songs.length) h += S.band.songs.map(s => { const st = stageOf(s.progress); return `<div class="song"><div><div class="song-name">${esc(s.name)}${p.focus && p.focus.id === s.id ? ` <span class="tag link">Focus</span>` : ""}</div><div class="song-stage ${st.tone}"><span class="tnum">${s.progress}%</span> · ${st.label}${s.last ? ` · practiced ${esc(fmtDay(s.last).toLowerCase())}` : ""}</div></div>
+function viewBass() {
+  const st = BS.bass(), mins = minsFor("bass", 30);
+  let h = "";
+  if (BS.finished()) {
+    h += `<div class="eyebrow">Bass · Course complete</div><h1 class="title">You finished all <em>26 lessons</em>.</h1>${bar(100)}
+      <h2 class="sec"><span>Keep growing</span></h2><div class="card list">${BS.EXTRAS.map(x => `<div class="li"><span>${esc(x.t)}</span><a class="tag link" href="https://www.youtube.com/watch?v=${x.video.id}" target="_blank" rel="noopener">${esc(x.video.by)}</a></div>`).join("")}</div>`;
+  } else {
+    const p = BS.plan(mins);
+    h += `<div class="eyebrow">Bass · Lesson ${p.n} of ${BS.CURRICULUM.length} · ${esc(BS.LEVELS[p.lesson.lvl])}</div>
+      <h1 class="title">${esc(p.lesson.t)}</h1>${bar(BS.pct())}
+      <div class="lesson"><div>${videoHTML(p.lesson.video, p.lesson.t)}</div>
+      <div><div class="steps">${p.steps.map(s => `<div class="step"><div class="step-min">${s.min} min</div><div><div class="step-t">${esc(s.t)}</div><div class="step-d">${esc(s.d)}</div></div></div>`).join("")}</div>
+      <p class="note"><b>Move on when:</b> ${esc(p.pass)}</p>
+      <div class="row act-row"><button class="btn primary" data-act="bass-done"><svg><use href="#i-check"/></svg>Complete</button><button class="btn" data-act="bass-repeat">Not yet</button><button class="btn ghost" data-act="speak-bass" aria-label="Talk me through it"><svg><use href="#i-speaker"/></svg></button></div></div></div>`;
+  }
+  h += `<details class="fold"><summary>All lessons</summary>${BS.LEVELS.map((lv, li) => `<div class="lv"><div class="eyebrow">${esc(lv)}</div>${BS.CURRICULUM.map((l, i) => l.lvl !== li ? "" : `<button class="li ${i === st.idx ? "on" : ""} ${st.done[i] ? "done" : ""}" data-act="bass-jump" data-i="${i}"><span class="n">${st.done[i] ? `<svg><use href="#i-check"/></svg>` : i + 1}</span><span>${esc(l.t)}</span></button>`).join("")}</div>`).join("")}</details>
+    <details class="fold"><summary>Songs${S.band.songs.length ? ` · ${S.band.songs.length}` : ""}</summary><div class="card">`;
+  h += S.band.songs.map(s => { const sg = stageOf(s.progress); return `<div class="song"><div><div class="song-name">${esc(s.name)}</div><div class="song-stage ${sg.tone}"><span class="tnum">${s.progress}%</span> · ${sg.label}</div></div>
       <button class="x" data-act="song-del" data-id="${s.id}" aria-label="Remove ${esc(s.name)}"><svg><use href="#i-x"/></svg></button>
       <input type="range" min="0" max="100" step="5" value="${s.progress}" data-act="song-p" data-id="${s.id}" aria-label="${esc(s.name)} progress"></div>`; }).join("");
-  else h += `<p class="muted" style="margin:0 0 var(--space-4);font-size:var(--text-sm)">No songs yet. Add the songs your band is rehearsing.</p>`;
-  h += `<form class="row" data-form="song" style="margin-top:var(--space-4);flex-wrap:nowrap"><input class="input" name="song" placeholder="Add a song, e.g. Seven Nation Army" aria-label="Song name"><button class="btn">Add</button></form></div>`;
+  h += `<form class="row" data-form="song" style="flex-wrap:nowrap"><input class="input" name="song" placeholder="Add a song" aria-label="Song name"><button class="btn">Add</button></form></div></details>`;
   return h;
 }
 
-function viewReview() {
-  const bl = blocksOf(today()), done = bl.filter(b => b.done);
-  const planned = bl.reduce((a, b) => a + (b.end - b.start), 0), doneMin = done.reduce((a, b) => a + (b.end - b.start), 0);
-  const byCat = {}; bl.forEach(b => { byCat[b.cat] = (byCat[b.cat] || 0) + (b.end - b.start); });
-  const max = Math.max(1, ...Object.values(byCat));
-  const week = Array.from({ length: 7 }, (_, i) => addDays(today(), -6 + i)).map(d => { const b = S.days[d]?.blocks || []; return { d, n: b.length, done: b.filter(x => x.done).length }; });
-  let h = `<div class="eyebrow">Review · ${esc(fmtDay(today(), true))}</div><h1 class="title">How today <em>went</em>.</h1>
-    <p class="lede">${esc(reviewText())}</p>
-    <div class="row" style="margin-top:var(--space-5)"><button class="btn" data-act="speak-review"><svg><use href="#i-speaker"/></svg>Read it to me</button></div>
-    <div class="kpis"><div class="kpi"><b>${done.length}/${bl.length}</b><span>Blocks done</span></div><div class="kpi"><b>${fmtDur(doneMin)}</b><span>Completed</span></div><div class="kpi"><b>${fmtDur(planned)}</b><span>Planned</span></div><div class="kpi"><b>${bl.length ? Math.round(done.length / bl.length * 100) : 0}%</b><span>Follow-through</span></div></div>
-    <h2 class="sec"><span>Where your time is going</span></h2><div class="card">`;
-  h += Object.keys(byCat).length ? Object.entries(byCat).sort((a, b) => b[1] - a[1]).map(([c, m]) => `<div class="hbar" style="${catVar(c)}"><span>${esc(CATS[c]?.label || c)}</span><span class="track"><i style="width:${m / max * 100}%"></i></span><span class="v">${fmtDur(m)}</span></div>`).join("") : `<p class="muted" style="margin:0;font-size:var(--text-sm)">Plan your day to see a breakdown.</p>`;
-  h += `</div><h2 class="sec"><span>Last 7 days</span></h2><div class="card">${week.map(w => `<div class="hbar" style="--c:var(--accent)"><span>${esc(new Date(w.d + "T00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric" }))}</span><span class="track"><i style="width:${w.n ? w.done / w.n * 100 : 0}%"></i></span><span class="v">${w.n ? `${w.done}/${w.n}` : "—"}</span></div>`).join("")}</div>`;
+function viewBible() {
+  const b = B.bible();
+  const opts = sel => B.BOOKS.map(([n], i) => `<option value="${i}" ${i === sel ? "selected" : ""}>${esc(n)}</option>`).join("");
+  const maxSel = `<select class="input" name="max" aria-label="Chapters a day">${[1, 2, 3, 4, 5, 10].map(n => `<option value="${n}" ${b.max === n ? "selected" : ""}>${n} a day</option>`).join("")}</select>`;
+  if (!b.plan) {
+    return `<div class="eyebrow">Bible</div><h1 class="title">What are you <em>reading</em>?</h1>
+      <form class="row plan-form" data-form="bible-plan"><select class="input" name="book" aria-label="Book">${opts(B.findBook("ephesians"))}</select>${maxSel}<button class="btn primary">Start</button></form>`;
+  }
+  const s = B.stats(), td = B.todays(), ref = bibleRef();
+  const rel = M.notes().filter(n => n.refs.some(r => r.startsWith(s.book))).slice(0, 4);
+  let h = `<div class="eyebrow">Bible · ${esc(s.book)} · ${s.pct}%</div>
+    <h1 class="title">${s.finished ? `You finished <em>${esc(s.book)}</em>.` : td.doneToday ? "Done for <em>today</em>." : esc(ref)}</h1>${bar(s.pct)}
+    <p class="note tnum">${s.read} of ${s.tot} verses · ${s.chLeft} ${s.chLeft === 1 ? "chapter" : "chapters"} left${s.chLeft ? ` · about ${s.daysLeft} ${s.daysLeft === 1 ? "day" : "days"}` : ""}</p>`;
+  if (!s.finished && !td.doneToday) h += `<div class="row act-row"><a class="btn" href="${B.link(ref)}" target="_blank" rel="noopener">Open reading <svg><use href="#i-ext"/></svg></a><button class="btn primary" data-act="bible-done"><svg><use href="#i-check"/></svg>I read it</button></div>
+    <form class="row upto" data-form="bible-upto"><span class="faint">Read up to</span><input class="input tnum" name="ch" type="number" min="1" max="${s.nCh}" placeholder="Ch" aria-label="Chapter"><input class="input tnum" name="v" type="number" min="1" placeholder="Verse" aria-label="Verse"><button class="btn sm">Save</button></form>`;
+  h += `<h2 class="sec"><span>Study</span></h2><div class="card"><div class="steps">${B.STUDY.map((x, i) => `<div class="step"><div class="step-min">${i + 1}</div><div><div class="step-t">${esc(x.t)}</div><div class="step-d">${esc(x.d)}</div></div></div>`).join("")}</div></div>`;
+  if (rel.length) h += `<h2 class="sec"><span>What you learned in ${esc(s.book)}</span></h2>${rel.map(noteCard).join("")}`;
+  h += `<details class="fold"><summary>Change plan</summary><form class="row plan-form" data-form="bible-plan"><select class="input" name="book" aria-label="Book">${opts(b.plan.book)}</select>${maxSel}<button class="btn">Save</button></form></details>`;
+  return h;
+}
+
+const noteCard = n => `<article class="note-card" style="--c:${M.FOLDERS[n.folder].color}"><p>${esc(n.text)}</p><div class="nmeta"><span>${esc(M.fmtDate(n.date))}</span><span class="tag cat">${esc(M.FOLDERS[n.folder].label)}</span>${n.refs.slice(0, 2).map(r => `<span class="tag">${esc(r)}</span>`).join("")}<button class="x" data-act="note-del" data-id="${n.id}" aria-label="Delete note"><svg><use href="#i-x"/></svg></button></div></article>`;
+function viewNotes() {
+  const c = M.counts(), all = M.notes();
+  let list = ui.q ? M.search(ui.q, 50) : all;
+  if (ui.folder !== "all") list = list.filter(n => n.folder === ui.folder);
+  const trs = LN.tracks();
+  let h = `<div class="eyebrow">What PG knows about you</div><h1 class="title">Notes</h1>
+    <form class="row add-note" data-form="note"><input class="input" name="t" placeholder="Save a revelation or lesson" aria-label="New note"><button class="btn primary">Save</button></form>`;
+  if (trs.length) {
+    h += `<h2 class="sec"><span>Learning</span></h2>`;
+    h += trs.map(t => { const s = t.steps[t.idx]; const pc = Math.round(t.idx / t.steps.length * 100); return `<div class="card track"><div class="spread"><b>${esc(t.topic)}</b><span class="faint tnum">${Math.min(t.idx + 1, t.steps.length)}/${t.steps.length}</span></div>${bar(pc)}
+      ${s ? `<div class="step-t">${esc(s.t)}</div><div class="step-d">${esc(s.d)}</div><div class="row">${s.links.map(l => `<a class="tag link" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} <svg><use href="#i-ext"/></svg></a>`).join("")}<span class="grow"></span><button class="btn sm primary" data-act="learn-done" data-id="${t.id}">Complete</button><button class="x" data-act="learn-del" data-id="${t.id}" aria-label="Remove ${esc(t.topic)}"><svg><use href="#i-x"/></svg></button></div>` : `<div class="step-d">All steps done.</div>`}</div>`; }).join("");
+  }
+  h += `<h2 class="sec"><span>Folders</span></h2><div class="split-chips">${[["all", "All", all.length], ...Object.entries(M.FOLDERS).map(([k, v]) => [k, v.label, c[k] || 0])].map(([k, l, n]) => `<button class="chip ${ui.folder === k ? "on" : ""}" data-act="folder" data-k="${k}">${esc(l)} <span class="faint">${n}</span></button>`).join("")}</div>
+    <input class="input search" data-act="note-q" type="search" placeholder="Search" value="${esc(ui.q)}" aria-label="Search notes">`;
+  h += list.length ? list.map(noteCard).join("") : `<p class="note">${all.length ? "Nothing here." : "Nothing saved yet."}</p>`;
   return h;
 }
 
 function viewSettings() {
   const vs = voice.voices();
   const tm = m => pad(Math.floor(m / 60)) + ":" + pad(m % 60);
-  return `<div class="eyebrow">Settings</div><h1 class="title">Make PG <em>yours</em>.</h1>
-  <p class="lede">Everything is stored on this device only.</p>
+  const sw = (act, on, label, dis) => `<label class="switch"><input type="checkbox" data-act="${act}" ${on ? "checked" : ""} ${dis ? "disabled" : ""} aria-label="${label}"><i></i></label>`;
+  return `<h1 class="title">Settings</h1>
   <h2 class="sec"><span>Voice</span></h2><div class="card">
-    <div class="set-row"><div><div class="lbl">Hands-free “Hi PG”</div><div class="sub">PG listens for its name while this app is open. ${voice.supported ? `<span class="status-dot ok"></span>Supported in this browser` : `<span class="status-dot bad"></span>Not supported here. Use Chrome, Edge or Safari.`}</div></div>
-      <label class="switch"><input type="checkbox" data-act="handsfree" ${S.voice.handsFree ? "checked" : ""} ${voice.supported ? "" : "disabled"} aria-label="Hands-free wake word"><i></i></label></div>
-    <div class="set-row"><div><div class="lbl">Speak replies</div><div class="sub">PG answers out loud.</div></div><label class="switch"><input type="checkbox" data-act="speak" ${S.voice.speak !== false ? "checked" : ""} aria-label="Speak replies"><i></i></label></div>
-    <div class="set-row"><div><div class="lbl">Spoken reminders</div><div class="sub">PG tells you when each block starts.</div></div><label class="switch"><input type="checkbox" data-act="alerts" ${S.voice.alerts ? "checked" : ""} aria-label="Spoken reminders"><i></i></label></div>
-    <div class="set-row"><div><div class="lbl">Heads-up before each block</div></div><select class="input" style="width:auto" data-act="heads" aria-label="Heads-up minutes">${[0, 5, 10, 15].map(m => `<option value="${m}" ${S.voice.heads === m ? "selected" : ""}>${m ? m + " min" : "Off"}</option>`).join("")}</select></div>
-    <div class="set-row"><div><div class="lbl">Keep screen awake</div><div class="sub">Useful when PG sits on your desk in hands-free mode.</div></div><label class="switch"><input type="checkbox" data-act="awake" ${S.voice.keepAwake ? "checked" : ""} aria-label="Keep screen awake"><i></i></label></div>
-    <div class="set-row" style="display:block"><div class="grid2" style="margin-top:var(--space-2)">
-      <label class="field"><span>PG's voice</span><select class="input" data-act="voice">${vs.length ? vs.map(v => `<option value="${esc(v.voiceURI)}" ${voice.voice && voice.voice.voiceURI === v.voiceURI ? "selected" : ""}>${esc(v.name)}</option>`).join("") : `<option>System default</option>`}</select></label>
+    <div class="set-row"><div class="lbl">Hands-free “Hi PG”${voice.supported ? "" : ` <span class="faint">· not supported here</span>`}</div>${sw("handsfree", S.voice.handsFree, "Hands-free wake word", !voice.supported)}</div>
+    <div class="set-row"><div class="lbl">Speak replies</div>${sw("speak", S.voice.speak !== false, "Speak replies")}</div>
+    <div class="set-row"><div class="lbl">Spoken reminders</div>${sw("alerts", S.voice.alerts, "Spoken reminders")}</div>
+    <div class="set-row"><div class="lbl">Heads-up</div><select class="input" style="width:auto" data-act="heads" aria-label="Heads-up minutes">${[0, 5, 10, 15].map(m => `<option value="${m}" ${S.voice.heads === m ? "selected" : ""}>${m ? m + " min before" : "Off"}</option>`).join("")}</select></div>
+    <div class="set-row"><div class="lbl">Keep screen awake</div>${sw("awake", S.voice.keepAwake, "Keep screen awake")}</div>
+    <div class="grid2" style="margin-top:var(--space-3)">
+      <label class="field"><span>Voice</span><select class="input" data-act="voice">${vs.length ? vs.map(v => `<option value="${esc(v.voiceURI)}" ${voice.voice && voice.voice.voiceURI === v.voiceURI ? "selected" : ""}>${esc(v.name)}</option>`).join("") : `<option>System default</option>`}</select></label>
       <label class="field"><span>Speed</span><select class="input" data-act="rate">${[0.9, 1, 1.1, 1.2].map(r => `<option value="${r}" ${S.voice.rate === r ? "selected" : ""}>${r}×</option>`).join("")}</select></label></div>
-      <button class="btn sm" data-act="test-voice"><svg><use href="#i-speaker"/></svg>Test voice</button></div>
+    <button class="btn sm" data-act="test-voice"><svg><use href="#i-speaker"/></svg>Test</button>
   </div>
-  <h2 class="sec"><span>You</span></h2><div class="card">
-    <div class="grid3"><label class="field"><span>PG calls you</span><input class="input" data-act="address" value="${esc(addr())}" placeholder="sir"></label>
+  <h2 class="sec"><span>You</span></h2><div class="card"><div class="grid3">
+    <label class="field"><span>PG calls you</span><input class="input" data-act="address" value="${esc(addr())}"></label>
     <label class="field"><span>Day starts</span><input class="input" type="time" data-act="daystart" value="${tm(S.profile.dayStart)}"></label>
     <label class="field"><span>Day ends</span><input class="input" type="time" data-act="dayend" value="${tm(S.profile.dayEnd)}"></label></div>
-  </div>
-  <h2 class="sec"><span>Coaching</span></h2><div class="card"><div class="grid2">
-    <label class="field"><span>Gym split</span><select class="input" data-act="split">${Object.entries(SPLITS).map(([k, v]) => `<option value="${k}" ${S.gym.split === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
-    <label class="field"><span>Your instrument</span><select class="input" data-act="instrument">${Object.entries(INSTRUMENTS).map(([k, v]) => `<option value="${k}" ${S.band.instrument === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label></div></div>
-  <h2 class="sec"><span>Smarter understanding (optional)</span></h2><div class="card">
-    <p class="muted" style="margin:0 0 var(--space-4);font-size:var(--text-sm)">PG works fully without this. Add your own AI key and PG will use it as a backup for unusual requests and general questions. The key stays on this device.</p>
+    <div class="grid2"><label class="field"><span>Gym split</span><select class="input" data-act="split">${Object.entries(SPLITS).map(([k, v]) => `<option value="${k}" ${S.gym.split === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
+    <label class="field"><span>Bible version</span><select class="input" data-act="version">${["NKJV", "KJV", "NIV", "ESV", "NLT", "AMP"].map(v => `<option ${B.bible().version === v ? "selected" : ""}>${v}</option>`).join("")}</select></label></div></div>
+  <h2 class="sec"><span>Smarter answers (optional)</span></h2><div class="card">
+    <p class="note" style="margin-top:0">Add your own AI key for richer answers from your notes. It stays on this device.</p>
     <div class="grid3"><label class="field"><span>Provider</span><select class="input" data-act="ai-provider"><option value="none" ${S.ai.provider === "none" ? "selected" : ""}>Off</option><option value="gemini" ${S.ai.provider === "gemini" ? "selected" : ""}>Google Gemini</option><option value="openai" ${S.ai.provider === "openai" ? "selected" : ""}>OpenAI</option></select></label>
-    <label class="field"><span>API key</span><input class="input" type="password" data-act="ai-key" value="${esc(S.ai.key)}" placeholder="Paste key" autocomplete="off"></label>
-    <label class="field"><span>Model (optional)</span><input class="input" data-act="ai-model" value="${esc(S.ai.model)}" placeholder="${S.ai.provider === "openai" ? "gpt-4o-mini" : "gemini-2.5-flash"}"></label></div></div>
+    <label class="field"><span>API key</span><input class="input" type="password" data-act="ai-key" value="${esc(S.ai.key)}" autocomplete="off"></label>
+    <label class="field"><span>Model</span><input class="input" data-act="ai-model" value="${esc(S.ai.model)}" placeholder="${S.ai.provider === "openai" ? "gpt-4o-mini" : "gemini-2.5-flash"}"></label></div></div>
   <h2 class="sec"><span>Data</span></h2><div class="card"><div class="row">
-    <button class="btn sm" data-act="backup">Back up</button><button class="btn sm" data-act="restore">Restore</button><button class="btn sm" data-act="clear-chat">Clear conversation</button><button class="btn sm danger" data-act="reset">Erase everything</button>
-    <input type="file" id="restoreFile" accept="application/json,.json" hidden></div></div>
-  <h2 class="sec"><span>Install on your phone</span></h2><div class="card"><p class="muted" style="margin:0;font-size:var(--text-sm)">iPhone: open in Safari, tap Share, then Add to Home Screen. Android: open in Chrome, tap the menu, then Install app. PG then opens full-screen like a native app.</p></div>`;
+    <button class="btn sm" data-act="backup">Back up</button><button class="btn sm" data-act="restore">Restore</button><button class="btn sm" data-act="clear-chat">Clear chat</button><button class="btn sm danger" data-act="reset">Erase all</button>
+    <input type="file" id="restoreFile" accept="application/json,.json" hidden></div>
+    <p class="note">Install: Safari › Share › Add to Home Screen, or Chrome › Install app.</p></div>`;
 }
 
 // ================= Edit sheet =================
@@ -471,8 +607,8 @@ function openEditor(id) {
   const end = b ? b.end : start + 60;
   const tm = m => pad(Math.floor(m / 60) % 24) + ":" + pad(m % 60);
   const sh = $("#sheet");
-  sh.innerHTML = `<form method="dialog" data-form="block" data-id="${b ? b.id : ""}"><h3>${b ? "Edit block" : "New block"}</h3>
-    <label class="field"><span>Title</span><input class="input" name="title" value="${esc(b ? b.title : "")}" required placeholder="e.g. Study"></label>
+  sh.innerHTML = `<form method="dialog" data-form="block" data-id="${b ? b.id : ""}"><h3>${b ? "Edit" : "New"}</h3>
+    <label class="field"><span>Title</span><input class="input" name="title" value="${esc(b ? b.title : "")}" required></label>
     <div class="grid3"><label class="field"><span>Start</span><input class="input" type="time" name="start" value="${tm(start)}" required></label>
     <label class="field"><span>End</span><input class="input" type="time" name="end" value="${tm(Math.min(end, 1439))}" required></label>
     <label class="field"><span>Type</span><select class="input" name="cat">${Object.entries(CATS).map(([k, v]) => `<option value="${k}" ${(b ? b.cat : "other") === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label></div>
@@ -484,8 +620,9 @@ function openEditor(id) {
 
 // ================= Events =================
 document.addEventListener("click", e => {
-  const el = e.target.closest("[data-act],[data-view],[data-say]");
+  const el = e.target.closest("[data-act],[data-view],[data-say],[data-fill]");
   if (!el) return;
+  if (el.dataset.fill != null) { openAssistant(); const a = $("#ask"); a.value = el.dataset.fill; a.focus(); return; }
   if (el.dataset.say != null && !el.dataset.act) { run(el.dataset.say, false); return; }
   if (el.dataset.view && !el.dataset.act) { go(el.dataset.view); return; }
   const a = el.dataset.act, id = el.dataset.id;
@@ -497,14 +634,14 @@ document.addEventListener("click", e => {
     case "toggle": { e.stopPropagation(); const b = day(d).blocks.find(x => x.id === id); if (b) { b.done = !b.done; save(); render(); if (b.done) chime("ok"); } break; }
     case "go": e.stopPropagation(); go(el.dataset.v); break;
     case "close-sheet": $("#sheet").close(); break;
-    case "del-block": { const snap = snapshot(d); day(d).blocks = day(d).blocks.filter(x => x.id !== id); save(); $("#sheet").close(); render(); undoable(snap, "Block deleted."); break; }
+    case "del-block": { const snap = snapshot(d); day(d).blocks = day(d).blocks.filter(x => x.id !== id); save(); $("#sheet").close(); render(); undoable(snap, "Deleted."); break; }
     case "fit": {
       const t = S.inbox.find(x => x.id === id); if (!t) break;
       const n = nowMin(); const from = d === today() ? Math.max(S.profile.dayStart, Math.ceil(n / 15) * 15) : S.profile.dayStart;
       const s = firstGap(day(d).blocks, from, t.dur || 30, 1440);
-      if (s == null) { toast("No free slot left on that day."); break; }
+      if (s == null) { toast("No free slot left that day."); break; }
       day(d).blocks.push({ id: uid(), title: t.title, cat: t.cat, start: s, end: s + (t.dur || 30), flex: true, done: false, date: d, src: "inbox" });
-      S.inbox = S.inbox.filter(x => x.id !== id); save(); render(); toast(`${t.title} placed at ${fmtTime(s)}.`); break;
+      S.inbox = S.inbox.filter(x => x.id !== id); save(); render(); toast(`${t.title} at ${fmtTime(s)}.`); break;
     }
     case "inbox-del": S.inbox = S.inbox.filter(x => x.id !== id); save(); render(); break;
     case "ex": ui.openEx = ui.openEx === el.dataset.k ? null : el.dataset.k; render(); break;
@@ -512,30 +649,26 @@ document.addEventListener("click", e => {
     case "set": { const p = gymProgress(); const k = el.dataset.k, i = +el.dataset.i; p.sets[k] = p.sets[k] || []; p.sets[k][i] = !p.sets[k][i]; save(); render(); if (p.sets[k][i]) chime("ok"); break; }
     case "gymday": S.gym.override = el.dataset.k; S.gym.overrideDate = today(); save(); renameCoachBlocks(today()); render(); break;
     case "speak-gym": reply(C.gymBrief(today(), false)); break;
-    case "speak-ex": reply(C.exerciseBrief(el.dataset.k)); break;
-    case "gym-finish": {
-      const w = C.completeWorkout(today(), gymProgress().sets);
-      day(today()).blocks.filter(b => b.cat === "gym").forEach(b => b.done = true); save();
-      const nx = C.workoutFor(addDays(today(), 1));
-      render(); reply(`Workout logged. Good work, ${addr()}. Next session is ${nx.name.toLowerCase()}.`); break;
-    }
-    case "speak-band": reply(C.bandBrief(bandMinutes())); break;
-    case "band-log": {
-      C.completeBand({}, bandMinutes());
-      day(today()).blocks.filter(b => b.cat === "band").forEach(b => b.done = true); save();
-      render(); reply(`Practice logged. Keep the sliders honest and tomorrow's plan will adapt.`); break;
-    }
+    case "gym-finish": completeCoach("gym"); break;
+    case "bass-done": chime("ok"); completeCoach("bass"); break;
+    case "bass-repeat": BS.logTry(); reply(`No problem. We'll stay on ${BS.lesson().t.toLowerCase()} next time.`); break;
+    case "speak-bass": reply(BS.brief(minsFor("bass", 30))); break;
+    case "bass-jump": BS.jump(+el.dataset.i); renameCoachBlocks(today()); render(); toast(`Lesson ${+el.dataset.i + 1} is up next.`); break;
+    case "bible-done": chime("ok"); completeCoach("bible"); break;
+    case "note-del": M.remove(id); render(); break;
+    case "folder": ui.folder = el.dataset.k; render(); break;
+    case "learn-done": { const tr = LN.tracks().find(t => t.id === id); const r = LN.complete(tr); render(); if (r) { chime("ok"); toast(r.next ? `Next: ${r.next.t}` : `${tr.topic} complete.`); } break; }
+    case "learn-del": confirmSheet("Remove this learning plan?", "", "Remove", () => { LN.remove(id); render(); }); break;
     case "song-del": S.band.songs = S.band.songs.filter(s => s.id !== id); save(); render(); break;
-    case "speak-review": reply(reviewText()); break;
-    case "test-voice": voice.say(`Hi. What can I do for you, ${addr()}?`); break;
+    case "test-voice": voice.say(hello()); break;
     case "backup": {
       const a2 = document.createElement("a");
       a2.href = URL.createObjectURL(new Blob([JSON.stringify(S, null, 1)], { type: "application/json" }));
       a2.download = `pg-backup-${today()}.json`; document.body.appendChild(a2); a2.click(); a2.remove(); toast("Backup downloaded."); break;
     }
     case "restore": $("#restoreFile").click(); break;
-    case "clear-chat": S.chat = []; save(); paintChat(); toast("Conversation cleared."); break;
-    case "reset": confirmSheet("Erase everything?", "This removes your schedule, coaching progress and settings from this device.", "Erase", () => { reset(); load(); paintChat(); render(); toast("Everything erased."); }); break;
+    case "clear-chat": S.chat = []; save(); paintChat(); toast("Chat cleared."); break;
+    case "reset": confirmSheet("Erase everything?", "This removes your schedule, progress, notes and settings from this device.", "Erase", () => { reset(); load(); paintChat(); render(); toast("Everything erased."); }); break;
   }
 });
 document.addEventListener("keydown", e => {
@@ -546,7 +679,7 @@ document.addEventListener("change", e => {
   if (!a) { if (el.id === "restoreFile") restoreFrom(el.files[0]); return; }
   const v = el.value;
   switch (a) {
-    case "handsfree": S.voice.handsFree = el.checked; save(); voice.enableHandsFree(el.checked); if (el.checked) toast("Say “Hi PG” any time this app is open."); break;
+    case "handsfree": S.voice.handsFree = el.checked; save(); voice.enableHandsFree(el.checked); if (el.checked) toast("Say “Hi PG” any time."); break;
     case "speak": S.voice.speak = el.checked; save(); break;
     case "alerts": S.voice.alerts = el.checked; save(); if (el.checked && "Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {}); break;
     case "heads": S.voice.heads = +v; save(); break;
@@ -557,7 +690,7 @@ document.addEventListener("change", e => {
     case "daystart": { const [h, m] = v.split(":").map(Number); S.profile.dayStart = h * 60 + m; save(); break; }
     case "dayend": { const [h, m] = v.split(":").map(Number); S.profile.dayEnd = h * 60 + m; save(); break; }
     case "split": S.gym.split = v; S.gym.idx = 0; S.gym.override = null; save(); renameCoachBlocks(today()); break;
-    case "instrument": S.band.instrument = v; save(); render(); break;
+    case "version": B.bible().version = v; save(); break;
     case "ai-provider": S.ai.provider = v; save(); render(); break;
     case "ai-key": S.ai.key = v.trim(); save(); break;
     case "ai-model": S.ai.model = v.trim(); save(); break;
@@ -565,13 +698,24 @@ document.addEventListener("change", e => {
     case "w": C.setWeight(el.dataset.k, v, ""); break;
   }
 });
+let qT;
 document.addEventListener("input", e => {
-  if (e.target.dataset.act === "song-p") { const row = e.target.closest(".song"); const st = stageOf(+e.target.value); const lab = row.querySelector(".song-stage"); lab.className = "song-stage " + st.tone; lab.innerHTML = `<span class="tnum">${e.target.value}%</span> · ${st.label}`; }
+  const el = e.target;
+  if (el.dataset.act === "song-p") { const row = el.closest(".song"); const st = stageOf(+el.value); const lab = row.querySelector(".song-stage"); lab.className = "song-stage " + st.tone; lab.innerHTML = `<span class="tnum">${el.value}%</span> · ${st.label}`; }
+  if (el.dataset.act === "note-q") { clearTimeout(qT); qT = setTimeout(() => { ui.q = el.value; render(); const s = $(".search"); s.focus(); s.setSelectionRange(s.value.length, s.value.length); }, 250); }
 });
 document.addEventListener("submit", e => {
   const f = e.target;
   if (f.id === "composer") { e.preventDefault(); const t = $("#ask").value; $("#ask").value = ""; voice.kill(); run(t, "typed"); return; }
   if (f.dataset.form === "song") { e.preventDefault(); const n = f.song.value.trim(); if (n) { C.addSong(n); render(); } return; }
+  if (f.dataset.form === "note") { e.preventDefault(); const t = f.t.value.trim(); if (t) { const n = M.add(t); ui.folder = "all"; ui.q = ""; render(); toast(`Saved to ${M.FOLDERS[n.folder].label}.`); } return; }
+  if (f.dataset.form === "bible-plan") { e.preventDefault(); B.setPlan(+f.book.value, +f.max.value); renameCoachBlocks(today()); render(); toast(`Reading ${B.stats().book}.`); return; }
+  if (f.dataset.form === "bible-upto") {
+    e.preventDefault(); const ch = +f.ch.value, v = +f.v.value; if (!ch) return;
+    B.record(v ? { kind: "to", ch, v } : { kind: "toCh", ch });
+    if (B.todays().doneToday) markCat("bible");
+    render(); toast(`Saved. ${B.stats().pct}% through ${B.stats().book}.`); return;
+  }
   if (f.dataset.form === "block") {
     e.preventDefault();
     const d = ui.date, fd = new FormData(f);
@@ -580,7 +724,7 @@ document.addEventListener("submit", e => {
     const data = { title: String(fd.get("title")).trim() || "Untitled", cat: fd.get("cat"), start: s, end: en };
     if (f.dataset.id) Object.assign(day(d).blocks.find(x => x.id === f.dataset.id), data, { flex: false });
     else day(d).blocks.push({ id: uid(), ...data, flex: false, done: false, date: d, src: "manual" });
-    save(); $("#sheet").close(); render(); toast(f.dataset.id ? "Saved." : "Block added.");
+    save(); $("#sheet").close(); render(); toast(f.dataset.id ? "Saved." : "Added.");
   }
 });
 $("#orb").addEventListener("click", () => orbTap());
@@ -588,20 +732,20 @@ $("#dockOrb").addEventListener("click", () => { openAssistant(); orbTap(); });
 $("#asClose").addEventListener("click", closeAssistant);
 $("#scrim").addEventListener("click", closeAssistant);
 function orbTap() {
-  if (!voice.supported) { openAssistant(); $("#ask").focus(); toast("Voice input isn't available in this browser. Type to PG instead."); return; }
+  if (!voice.supported) { openAssistant(); $("#ask").focus(); toast("Voice isn't available in this browser. Type to PG instead."); return; }
   voice.tap();
 }
 
 function confirmSheet(title, body, cta, fn) {
   const sh = $("#sheet");
-  sh.innerHTML = `<h3>${esc(title)}</h3><p class="muted" style="margin:0;font-size:var(--text-sm)">${esc(body)}</p><div class="sheet-actions"><span></span><span class="row"><button class="btn ghost" data-act="close-sheet">Cancel</button><button class="btn danger" id="cfm">${esc(cta)}</button></span></div>`;
+  sh.innerHTML = `<h3>${esc(title)}</h3>${body ? `<p class="note" style="margin:0">${esc(body)}</p>` : ""}<div class="sheet-actions"><span></span><span class="row"><button class="btn ghost" data-act="close-sheet">Cancel</button><button class="btn danger" id="cfm">${esc(cta)}</button></span></div>`;
   sh.showModal();
   $("#cfm").onclick = () => { sh.close(); fn(); };
 }
 function restoreFrom(file) {
   if (!file) return;
   const r = new FileReader();
-  r.onload = () => { try { const o = JSON.parse(r.result); if (!o.days && Array.isArray(o.tasks)) { confirmSheet("Import PG Planner tasks?", "Your open tasks from the old app will be added to your days and to-do list.", "Import", () => { importV1(o); render(); toast("Old tasks imported."); }); return; } if (!o.days) throw 0; confirmSheet("Restore this backup?", "It replaces everything currently on this device.", "Restore", () => { replace(o); load(); paintChat(); render(); toast("Backup restored."); }); } catch { toast("That file isn't a PG backup."); } };
+  r.onload = () => { try { const o = JSON.parse(r.result); if (!o.days && Array.isArray(o.tasks)) { confirmSheet("Import PG Planner tasks?", "Open tasks from the old app will be added.", "Import", () => { importV1(o); render(); toast("Imported."); }); return; } if (!o.days) throw 0; confirmSheet("Restore this backup?", "It replaces everything on this device.", "Restore", () => { replace(o); load(); paintChat(); render(); toast("Restored."); }); } catch { toast("That file isn't a PG backup."); } };
   r.readAsText(file);
 }
 
@@ -618,23 +762,22 @@ function toast(msg, action, fn) {
 const alerted = new Set();
 function tick() {
   const n = nowMin(), d = today();
-  if (ui.view === "today" && ui.date === d && !$("#sheet").open) {
+  if (ui.view === "today" && ui.date === d && !$("#sheet").open && !document.activeElement?.matches("input,select,textarea")) {
     const y = window.scrollY, m = $("#main").scrollTop;
     render(); window.scrollTo(0, y); $("#main").scrollTop = m;
   }
   if (!S.voice.alerts) return;
   for (const b of live(d)) {
     const kH = b.id + ":h", kS = b.id + ":s";
-    if (S.voice.heads && n >= b.start - S.voice.heads && n < b.start && !alerted.has(kH)) {
-      if (voice.mode === "command" || voice.mode === "speaking") continue;
-      alerted.add(kH); notify(`${b.title} starts in ${sayDur(b.start - n)}, ${addr()}.`);
-    }
+    if (voice.mode === "command" || voice.mode === "speaking") continue;
+    if (S.voice.heads && n >= b.start - S.voice.heads && n < b.start && !alerted.has(kH)) { alerted.add(kH); notify(`${b.title} starts in ${sayDur(b.start - n)}, ${addr()}.`); }
     if (n >= b.start && n < b.start + 3 && !alerted.has(kS)) {
-      if (voice.mode === "command" || voice.mode === "speaking") continue;
       alerted.add(kS);
-      let msg = `It's ${sayTime(b.start)}. Time for ${b.title}, until ${sayTime(b.end)}.`;
+      let msg = `It's time for ${b.title}, until ${sayTime(b.end)}.`;
       if (b.cat === "gym") msg += " " + C.gymBrief(d, true);
-      if (b.cat === "band") msg += " " + C.bandBrief(b.end - b.start);
+      if (b.cat === "bass") { ui.topic = "bass"; msg += " " + BS.brief(b.end - b.start); }
+      if (b.cat === "bible") { ui.topic = "bible"; msg += " " + B.brief(); }
+      if (b.cat === "learn") { ui.topic = "learn"; const tr = LN.findTrack(b.title.replace(/^learn\s+/i, "")); if (tr) msg += " " + LN.brief(tr); }
       notify(msg);
     }
   }
@@ -642,7 +785,7 @@ function tick() {
 function notify(msg) {
   chime("ok");
   pushMsg("pg", msg);
-  if (S.voice.speak !== false) voice.say(msg);
+  if (S.voice.speak !== false) voice.say(speakable(msg));
   if (document.hidden && "Notification" in window && Notification.permission === "granted") { try { new Notification("PG", { body: msg, icon: "icon-192.png" }); } catch {} }
 }
 let lock = null;
@@ -656,8 +799,9 @@ async function keepAwake() {
 document.addEventListener("visibilitychange", () => { keepAwake(); if (!document.hidden && S.voice.handsFree && voice.mode === "off") voice.listen("wake"); });
 
 // ================= Boot =================
-paintChat(); paintSuggest(); render(); paintVoice("off");
+renameCoachBlocks(today());
+paintChat(); render(); paintVoice("off");
 setInterval(tick, 20000);
 if (S.voice.handsFree && voice.supported) { voice.handsFree = true; voice.listen("wake"); }
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
-window.PG = { run, S, voice }; // handy for debugging
+window.PG = { run, S, voice };

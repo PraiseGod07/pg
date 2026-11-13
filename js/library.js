@@ -6,7 +6,11 @@ export const CATS = {
   work:    { label: "Project",  color: "#C9A86A" },
   commute: { label: "Travel",   color: "#8E96A8" },
   gym:     { label: "Gym",      color: "#E08A6D" },
-  band:    { label: "Band",     color: "#B592E0" },
+  bass:    { label: "Bass",     color: "#B592E0" },
+  bible:   { label: "Bible",    color: "#C9A45C" },
+  church:  { label: "Church",   color: "#D9B98A" },
+  learn:   { label: "Learning", color: "#7CC4A4" },
+  band:    { label: "Band",     color: "#9F8BD6" },
   meal:    { label: "Meal",     color: "#D9B65C" },
   meeting: { label: "Meeting",  color: "#6FB7C9" },
   social:  { label: "Social",   color: "#E39BB6" },
@@ -15,7 +19,7 @@ export const CATS = {
 };
 
 // Default minutes when the user doesn't give a length.
-export const DEFAULT_MIN = { class: 60, study: 60, work: 60, commute: 20, gym: 75, band: 60, meal: 30, meeting: 45, social: 90, rest: 30, other: 30 };
+export const DEFAULT_MIN = { class: 60, study: 60, work: 60, commute: 20, gym: 75, band: 60, bass: 30, bible: 30, church: 90, learn: 45, meal: 30, meeting: 45, social: 90, rest: 30, other: 30 };
 
 const yt = (id, by) => ({ id, by });
 

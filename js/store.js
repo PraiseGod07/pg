@@ -33,6 +33,10 @@ export const DEFAULTS = () => ({
   inbox: [],           // unscheduled tasks
   gym: { split: "ppl", idx: 0, override: null, overrideDate: null, log: [] , weights: {} },
   band: { instrument: "bass", songs: [], log: [], techIdx: 0 },
+  bass: { idx: 0, done: {}, log: [] },
+  bible: { plan: null, max: 3, version: "NKJV", history: [] },
+  notes: [],
+  learn: { tracks: [], active: null },
   chat: [],
   ai: { provider: "none", key: "", model: "" }
 });
