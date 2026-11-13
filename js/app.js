@@ -16,6 +16,8 @@ import * as AI from "./ai.js";
 import * as AG from "./agent.js";
 import * as SY from "./sync.js";
 import { PG_CLOUD } from "./config.js";
+import * as D from "./daily.js";
+import { cloudApi, VOICES as CLOUD_VOICES } from "./cloudvoice.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
 
 const $ = s => document.querySelector(s);
@@ -54,6 +56,16 @@ const voice = new Voice({
   }
 });
 voice.voiceURI = S.voice.voiceURI; voice.rate = S.voice.rate; voice.pickVoice();
+// PG's natural voice and hearing run on PG Cloud once its code is version 2 or newer.
+const CV = { v: 0 };
+voice.cloudVoice = S.voice.cloudVoice || "apollo";
+voice.cloud = { ...cloudApi(() => SY.url(), () => S.dev.cloud?.token || ""), ok: () => SY.on() && CV.v >= 2 && S.voice.natural !== false };
+async function probeCloud() {
+  if (!SY.on()) { CV.v = 0; return; }
+  try { const j = await (await fetch(SY.url() + "/", { cache: "no-store" })).json(); CV.v = +j.v || 1; } catch { return; }
+  if (ui.view === "settings") render();
+}
+probeCloud();
 
 function paintVoice(m) {
   $("#orb").dataset.state = m; $("#dockOrb").dataset.state = m;
@@ -99,9 +111,15 @@ function paintSuggest() {
 // speakable() lives in speech.js
 function reply(text, opts = {}) {
   if (ui.quiet) { ui.quiet.push(text); if (opts.view) go(opts.view, opts.date); return; }
+  // He told PG new plans: remind him of plans he already had and may have forgotten.
+  if (ui.turn && !ui.turn.used && !opts.then) {
+    ui.turn.used = true;
+    const ex = D.forgotten(ui.turn.before, ui.turn.dates);
+    if (ex) { text += " " + ex; if (opts.html) opts.html += `<div style="margin-top:6px">${esc(ex)}</div>`; if (opts.speak) opts.speak += " " + ex; }
+  }
   pushMsg("pg", text, opts.html);
   if (opts.view) { go(opts.view, opts.date); if (opts.spoken) ui.autoClose = isMobile(); }
-  if (S.voice.speak !== false) voice.say(speakable(text), opts.then);
+  if (S.voice.speak !== false) voice.say(opts.speak || speakable(text, opts.full), opts.then);
   else voice.afterReply();
 }
 
@@ -110,8 +128,11 @@ async function run(text, spoken = false) {
   text = String(text || "").trim();
   if (!text) { voice.afterReply(); return; }
   pushMsg("me", text);
+  const dates = [...Array(8)].map((_, i) => addDays(today(), i));
+  ui.turn = { before: new Set(dates.flatMap(d => (S.days[d]?.blocks || []).map(b => b.id))), dates };
   try { await handle(text, spoken); }
   catch (e) { console.error(e); reply("Sorry, something went wrong. Please try that again."); }
+  finally { ui.turn = null; }
 }
 
 const blocksOf = d => sortedBlocks(d);
@@ -143,7 +164,139 @@ function context() {
 const YES = /^(?:yes|yeah|yea|yep|yup|ya|sure|ok|okay|alright|all right|sounds good|that sounds good|sounds great|good|perfect|great|let's do (?:it|that)|do it|go ahead|please|fine|cool|that works|works for me|i like (?:it|that)|love it|deal|better|much better|that's better)(?: pg| sir| please| thanks?| thank you| then)*$/;
 const NO = /^(?:no|nah|nope|not really|no thanks?|no thank you|don't|do not|not now|maybe later|leave it|i'm good|it's fine|keep it)(?: pg| sir| thanks?)*$/;
 // Answers that only make sense after PG asked something
+// ================= Daily companion =================
+const zhSay = z => `⟦yue:${z}⟧`;
+// Ending the call: a verse in the morning, two Cantonese sentences in the evening.
+function endCall() {
+  const h = new Date().getHours(), hang = { then: () => voice.hangUp() };
+  if (h >= 4 && h < 12) {
+    const v = D.verse();
+    const t = `Before you go, ${addr()}, here's a verse for your day. ${v.ref}: ${v.text} ${pickOne(["Have a blessed day.", "Go well today.", "Have a great day."])}`;
+    return reply(t, { ...hang, full: true });
+  }
+  if (h >= 17 || h < 4) {
+    const two = D.teachTwo(), bye = h >= 21 || h < 4 ? "Good night" : "Have a good evening";
+    const text = `Before you go, ${addr()}, here are two Cantonese sentences for tonight. 1. ${two[0].zh} (${two[0].jp}) means "${two[0].en}" 2. ${two[1].zh} (${two[1].jp}) means "${two[1].en}" I saved them under Cantonese in More. ${bye}.`;
+    const html = `<div>Before you go, ${esc(addr())}, here are two Cantonese sentences for tonight.</div><ol class="canto-list">${two.map(c => `<li><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">${esc(c.jp)}</span><span>${esc(c.en)}</span></li>`).join("")}</ol><div>I saved them under Cantonese in More. ${bye}.</div>`;
+    const sp = `Before you go, ${addr()}, here are two Cantonese sentences for tonight. The first one. ${zhSay(two[0].zh)} It means: ${two[0].en.replace(/\(.*?\)/g, "")} Once more. ${zhSay(two[0].zh)} The second one. ${zhSay(two[1].zh)} It means: ${two[1].en.replace(/\(.*?\)/g, "")} Once more. ${zhSay(two[1].zh)} I saved them for you under Cantonese. ${bye}, ${addr()}.`;
+    return reply(text, { ...hang, html, speak: speakable(sp, true) });
+  }
+  return reply(pickOne([`You're welcome, ${addr()}. Talk soon.`, `Anytime, ${addr()}. Ending the call.`, `My pleasure, ${addr()}. Bye for now.`]), hang);
+}
+function doReport(spoken) {
+  const r = D.report();
+  let t = `Here's your update, ${addr()}. ${r.text}`;
+  if (r.missed.length) {
+    const b = r.missed[0];
+    t += ` ${r.missed.length === 1 ? "One thing isn't" : r.missed.length + " things aren't"} checked off yet. Did you do ${b.title}? It was at ${sayTime(b.start)}.`;
+    ui.pending = { type: "didyou", ids: r.missed.map(x => x.id) };
+  } else t += " " + D.goalsLine();
+  return reply(t, { view: "today", date: today(), spoken, full: true });
+}
+const REPORT_RE = /\b(?:what (?:have|did) i (?:do|done|get done|finish(?:ed)?|accomplish(?:ed)?)|what i(?:'ve| have)? (?:done|did|got done)|how (?:am i|have i been|did i) do(?:ing)?(?: today| so far)?|how was my day|(?:progress|daily) (?:report|update)|(?:give me |can i (?:get|have) |i (?:want|need) )?(?:an? |my |the )?(?:quick |full |detailed )?(?:update|report|recap|rundown|summary)(?: (?:of|on|for) (?:what i(?:'ve| have)? (?:done|did)|my day|today|everything|my progress))?$)/;
+async function daily(text, bare, spoken) {
+  const b = bare.replace(/^(?:(?:ok(?:ay)?|so|hey|pg|please|and|also)[ ,]+)+/, "");
+  if (REPORT_RE.test(b) && b.split(" ").length <= 14) return doReport(spoken), true;
+  let m;
+  if ((m = text.match(/^\s*(?:(?:ok(?:ay)?|so|pg|and|also)[ ,]+)*(?:(?:one of )?my (?:new |main |big |biggest )?goals?(?: for (?:this|the) (?:year|month|week|semester|term))? (?:is|are|will be)|(?:add|set|save|make) (?:a |another |new )*goal(?: for me)?(?: to| that| of|:)?|i(?:'ve| have) (?:a|got a) (?:new )?goal(?: to| of|:)?)\s*(?:to\s+)?(.{3,})$/i))) {
+    const g = D.addGoal(m[1]);
+    return reply(`Got it, ${addr()}. Your goal: ${g.text}. I'll remind you of it when you ask for an update.`), true;
+  }
+  if ((m = b.match(/^(?:remove|delete|drop|take off|i finished|i achieved|i reached) (?:the |my )?goal(?: to| about| of)? (.+)$/))) {
+    const g = D.removeGoal(m[1]);
+    return reply(g ? `Done. I took off ${g.text}.` : `I couldn't find that goal. Your goals are: ${D.goals().map(x => x.text).join(", ") || "none yet"}.`), true;
+  }
+  if (/\b(?:what are my goals|(?:remind me of|tell me|list|read) my goals|my goals\??$)/.test(b)) {
+    const g = D.goals();
+    return reply(g.length ? `Your goals are: ${g.map(x => x.text).join(". ")}.` : "You haven't told me any goals yet. Say, my goal is, and I'll save it."), true;
+  }
+  if (/\bteach me (?:some |two |2 |a few |more )?(?:cantonese|canto)\b|\bcantonese (?:lesson|sentences?) (?:now|please)\b/.test(b)) {
+    const two = D.teachTwo();
+    const text = `Here are two. 1. ${two[0].zh} (${two[0].jp}) means "${two[0].en}" 2. ${two[1].zh} (${two[1].jp}) means "${two[1].en}" I saved them under Cantonese.`;
+    const sp = `Here are two. ${zhSay(two[0].zh)} It means: ${two[0].en.replace(/\(.*?\)/g, "")} ${zhSay(two[1].zh)} It means: ${two[1].en.replace(/\(.*?\)/g, "")} I saved them under Cantonese.`;
+    return reply(text, { speak: speakable(sp, true), html: `<ol class="canto-list">${two.map(c => `<li><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">${esc(c.jp)}</span><span>${esc(c.en)}</span></li>`).join("")}</ol>` }), true;
+  }
+  if (/\b(?:what|which) cantonese (?:have i|did i) (?:learn|learned|learnt)|\b(?:show|open|read) (?:me )?my cantonese\b|\bmy cantonese (?:sentences|words|list)\b/.test(b)) {
+    const l = D.learned();
+    openCanto();
+    if (!l.length) return reply("You haven't learned any yet. In the evening, when you end the call, I'll teach you two."), true;
+    return reply(`You've learned ${l.length} sentence${l.length === 1 ? "" : "s"}. The latest: ${l[0].zh} means "${l[0].en}"`, { speak: speakable(`You've learned ${l.length}. The latest one. ${zhSay(l[0].zh)} It means: ${l[0].en}`, true) }), true;
+  }
+  return false;
+}
+function openCanto() {
+  const l = D.learned(), sh = $("#sheet");
+  sh.innerHTML = `<h3>Cantonese</h3><p class="note" style="margin:0 0 8px">${l.length} of ${D.CANTO_N} learned. Tap a sentence to hear it.</p>
+    ${l.length ? `<ol class="canto-list">${l.map(c => `<li><button class="canto-play" data-act="canto-play" data-zh="${esc(c.zh)}" aria-label="Play ${esc(c.en)}"><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">${esc(c.jp)}</span><span>${esc(c.en)}</span></button></li>`).join("")}</ol>` : `<p class="note">Nothing yet. In the evening, say end the call and PG teaches you two sentences.</p>`}
+    <div class="sheet-actions"><button class="btn" data-act="canto-more">Teach me two now</button><button class="btn ghost" data-act="close-sheet">Close</button></div>`;
+  if (!sh.open) sh.showModal();
+}
+function openGoals() {
+  const g = D.goals(), sh = $("#sheet");
+  sh.innerHTML = `<h3>Your goals</h3><p class="note" style="margin:0 0 8px">PG reminds you of these when you ask for an update.</p>
+    ${g.length ? `<ul class="goal-list">${g.map(x => `<li><span>${esc(x.text)}</span><button class="btn sm ghost" data-act="goal-del" data-id="${x.id}">Remove</button></li>`).join("")}</ul>` : ""}
+    <form data-form="goal" class="row"><input class="input" name="g" placeholder="Add a goal" aria-label="New goal" autocomplete="off"><button class="btn primary" type="submit">Add</button></form>
+    <div class="sheet-actions"><span></span><button class="btn ghost" data-act="close-sheet">Close</button></div>`;
+  if (!sh.open) sh.showModal();
+}
+function sayCanto(zh) {
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(zh), v = voice.yueVoice();
+    u.lang = v ? v.lang : "zh-HK"; if (v) u.voice = v; u.rate = 0.85;
+    speechSynthesis.speak(u);
+  } catch { toast("This browser can't speak Cantonese."); }
+}
+
+// Ask for what's missing before adding anything to the timetable.
+function missingOf(it) { return { time: it.s == null && it.b == null, len: it.e == null && !!it.durDefault }; }
+function askLine(it) {
+  const m = missingOf(it), name = it.title;
+  if (m.time && m.len) return `What time should I put ${name}, and for how long?`;
+  if (m.time) return `What time should I put ${name}?`;
+  return `How long should ${name} be? It starts at ${sayTime(it.s)}.`;
+}
+function needsAsk(items) { return items.find(i => i.kind === "event" && !i.ok && (missingOf(i).time || missingOf(i).len)); }
+
 async function followUp(p, bare, text, spoken) {
+  if (p.type === "didyou") {
+    const [id, ...rest] = p.ids, f = Object.keys(S.days).map(d => (S.days[d].blocks || []).find(x => x.id === id)).find(Boolean);
+    let head = "";
+    if (YES.test(bare) || /^(?:i did|did it|done|yep i did|already did)/.test(bare)) { if (f) { f.done = true; save(); render(); } head = "Nice, I checked it off."; }
+    else if (NO.test(bare) || /^(?:i didn'?t|not yet|didn'?t)/.test(bare)) head = "Okay, I'll leave it open.";
+    else return false;
+    const nx = rest.map(x => Object.keys(S.days).map(d => (S.days[d].blocks || []).find(b => b.id === x)).find(Boolean)).find(Boolean);
+    if (nx) { ui.pending = { type: "didyou", ids: rest.slice(rest.indexOf(nx.id)) }; return reply(`${head} Did you do ${nx.title}? It was at ${sayTime(nx.start)}.`), true; }
+    return reply(`${head} ${D.goalsLine()}`, { full: true }), true;
+  }
+  if (p.type === "clarify") {
+    const it = p.items.find(i => i.kind === "event" && !i.ok && (missingOf(i).time || missingOf(i).len));
+    if (!it) return false;
+    const m = missingOf(it);
+    if (/^(?:any ?time|whenever|you (?:can )?(?:choose|decide|pick)|doesn'?t matter|it doesn'?t matter|up to you|i don'?t (?:know|mind)|not sure|flexible|wherever it fits|just fit it in|your choice)\b/.test(bare)) it.ok = true;
+    else if (!/\d|\b(?:noon|midday|midnight|morning|afternoon|evening|tonight|night|half|quarter|hour|hours|minutes?|mins?|until|till)\b/.test(bare) || (!/\d/.test(bare) && bare.split(/\s+/).length > 6) || /\b(?:can you|could you|please|add|remove|delete|change|move|what|how|why|who|tell me|show)\b/.test(bare) && !/\d/.test(bare)) return false;   // a new request, not an answer
+    else {
+      const ans = text.trim().replace(/[.?!]+$/, "");
+      const lead = /^\d/.test(ans) ? (m.time ? "at " : "for ") : "";
+      let got = parseSchedule(`${it.title} ${lead}${ans}`, { date: it.date, today: today(), now: nowMin() }).find(x => x.kind === "event");
+      if (got && m.len && !m.time && got.s != null && got.e == null && got.durDefault) got = null;   // "5" meant minutes? ask again
+      const minOnly = !m.time && m.len ? SC.estIn(bare) : null;
+      if (got && got.s != null && m.time) { it.s = got.s; if (got.e != null) it.e = got.e; if (!got.durDefault) { it.dur = got.dur; it.durDefault = false; if (it.e == null) it.e = it.s + it.dur; } }
+      else if (got && m.len && !got.durDefault) { it.dur = got.dur; it.durDefault = false; if (it.s != null) it.e = it.s + it.dur; }
+      else if (minOnly) { it.dur = minOnly; it.durDefault = false; if (it.s != null) it.e = it.s + it.dur; }
+      else if (got && m.len && got.e != null && got.s == null) { it.e = got.e; it.dur = it.s != null ? it.e - it.s : it.dur; it.durDefault = false; }
+      else if (p.tries >= 1) return false;
+      else { ui.pending = { ...p, tries: (p.tries || 0) + 1 }; return reply(`Sorry, ${addr()}, I didn't get that. ${askLine(it)}`), true; }
+      if (it.s != null && it.e != null) it.dur = it.e - it.s;
+      const still = missingOf(it);
+      if ((still.time || still.len) && it.asked) it.ok = true;   // asked twice already: he only gave part, so fit the rest
+      it.asked = true;
+    }
+    const next = needsAsk(p.items);
+    if (next) { ui.pending = { ...p, tries: 0 }; return reply(askLine(next)), true; }
+    await commitSchedule(p.items, spoken);
+    return true;
+  }
   if (p.type === "food") {
     if (YES.test(bare)) { F.like(p.k); ui.pending = { type: "food_list", k: p.k }; return reply(pickOne(["Great choice.", "Good one.", "Nice."]) + " Want me to add what you need to your shopping list?"), true; }
     return false;
@@ -205,9 +358,10 @@ function schoolReply(res, head, spoken) { render(); return reply((head ? head + 
 
 async function handle(text, spoken) {
   const bare0 = normalize(text).replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
-  if (isEndCall(bare0)) { ui.pending = null; return reply(pickOne([`You're welcome, ${addr()}. Talk soon.`, `Anytime, ${addr()}. Ending the call.`, `My pleasure, ${addr()}. Bye for now.`]), { then: () => voice.hangUp() }); }
+  if (isEndCall(bare0)) { ui.pending = null; return endCall(); }
   const pend = ui.pending; ui.pending = null;
   if (pend && await followUp(pend, bare0, text, spoken)) return;
+  if (await daily(text, bare0, spoken)) return;
   const it = intent(text);
   const d = ui.view === "today" && ui.pinDate ? ui.date : today();
   // Add / delete / replace things on the timetable, in plain words
@@ -389,7 +543,7 @@ async function handle(text, spoken) {
       ui.openEx = it.ex; if (EXERCISES[it.ex].video) ui.playing.add(EXERCISES[it.ex].video.id);
       return reply(C.exerciseBrief(it.ex), { view: "gym", spoken });
     }
-    case "review": return reply(reviewText(), { view: "today", date: today(), spoken });
+    case "review": return doReport(spoken);
     // ---- School ----
     case "school_add": {
       const list = SC.parse(text);
@@ -511,6 +665,13 @@ async function scheduleFrom(text, spoken) {
     if (a) return reply(a);
     return reply(`Sorry, ${addr()}, I didn't catch that. Try: bass lesson at 6:30, or what's next?`);
   }
+  // Don't guess: ask for any missing time or length first.
+  const gap = needsAsk(items);
+  if (gap) { ui.pending = { type: "clarify", items, tries: 0 }; return reply(askLine(gap), { spoken }); }
+  return commitSchedule(items, spoken);
+}
+async function commitSchedule(items, spoken) {
+  const events = items.filter(i => i.kind === "event");
   const dates = [...new Set(events.map(e => e.date))];
   const snaps = dates.map(snapshot);
   const res = placeItems(items, day, { today: today(), now: nowMin(), dayStart: S.profile.dayStart, dayEnd: S.profile.dayEnd });
@@ -582,6 +743,7 @@ function aiContext(notes = []) {
 Today's timetable: ${sched}.
 Assignments: ${due}.
 Today's suggested meals: ${meals || "none"}.
+His goals: ${D.goals().map(g => g.text).join("; ") || "none saved yet"}.
 Learned things about PraiseGod:
 ${facts}${mem ? `\nHis saved notes that may apply:\n${mem}` : ""}`;
 }
@@ -599,12 +761,16 @@ He is a Christian student who plays bass, goes to the gym and wants high-protein
 
 ${aiContext(notes)}
 
-You are fully in control of his app and you CAN change anything in it: timetable, gym exercises, Bible plan, bass, songs, shopping list, notes, food, school and settings. The only thing you can't touch is API keys and private settings. When he asks for any change, always do it with "ops" (or "do") in this same reply and say briefly what you did. Never tell him you can't change the app or that he should do it himself. If he asks for something you need to look up (like an exercise for a muscle), choose a well-known, safe option from your knowledge and add it. If a request is unclear, ask one short question instead of guessing.
+You are fully in control of his app and you CAN change anything in it: timetable, gym exercises, Bible plan, bass, songs, shopping list, notes, food, school and settings. The only thing you can't touch is API keys and private settings. Never tell him you can't change the app or that he should do it himself.
+NEVER ASSUME. Before you change anything, make sure you know every detail the change needs: which day, what time it starts, how long it lasts or when it ends, which exact item he means, names, amounts, sets and reps. If any detail is missing or unclear, make no change yet ("ops" and "do" empty) and ask for ALL the missing details in one short question. Don't fill gaps with defaults or your own picks. Use the conversation so far: if he already gave a detail, don't ask for it again, and once he has answered, make the change with "ops" (or "do") in that reply and say briefly what you did. Only when he says "you choose", "anything" or "up to you" may you pick a sensible option yourself, and then tell him what you picked. If you need knowledge (like which exercise works a muscle), you may suggest one, but still ask him to confirm the details before adding it. Asking is not refusing.
+When he tells you his plans for the day, add each one he gave full details for, and ask about the ones missing a time or length.
+When he tells you a goal, save it with {"op":"push","path":"goals","value":{"text":"...","made":"${today()}"}}.
 
 APP DATA (today is ${today()}):
 ${AG.snapshot()}
 
-Example: he says "add an exercise for my lower chest" -> {"say":"Done, sir. I put decline push-ups on push day.","ops":[{"op":"add_exercise","day":"push","name":"Decline push-up","muscles":"Lower chest, triceps","cues":["Feet up on a bench","Lower your chest to the floor slowly","Push up hard and squeeze"],"search":"decline push up proper form","sets":3,"reps":"10-15","rest":60}]}
+Example: he says "add an exercise for my lower chest" -> {"say":"Sure, sir. Decline push-ups are great for the lower chest. Which gym day should they go on, and how many sets and reps?","ops":[],"do":[],"remember":[]}
+Then he says "push day, 3 sets of 10 to 15" -> {"say":"Done, sir. Decline push-ups are on push day, 3 sets of 10 to 15.","ops":[{"op":"add_exercise","day":"push","name":"Decline push-up","muscles":"Lower chest, triceps","cues":["Feet up on a bench","Lower your chest to the floor slowly","Push up hard and squeeze"],"search":"decline push up proper form","sets":3,"reps":"10-15","rest":60}]}
 Reply ONLY with JSON: {"say": "what you say out loud", "ops": [direct changes], "do": ["plain commands for the app"], "remember": ["new lasting facts about him"]}.
 ${AG.TOOLS}
 "do" is for when he clearly wants the app to act. Write each as a short command the app understands, for example "gym at 5pm", "bass lesson tomorrow at 6:30pm", "I have a history essay due Friday", "add eggs to my shopping list", "I don't eat pork", "is my plan realistic", "move gym to 7pm", "clear today". Leave it empty otherwise.
@@ -616,16 +782,17 @@ For homework, assignments, essays, projects and tests, put his words in "do" (fo
   // He asked for a change but the AI only talked (or said it couldn't): ask again, just for the changes.
   if (!r.ops.length && !r.do.length && (REFUSE.test(r.say) || (ACTION.test(text) && !/\?\s*$/.test(r.say)))) {
     try {
-      const raw2 = await AI.call(`You turn PraiseGod's request into changes to his PG app. You CAN change everything in the app below, so never refuse. If he asks for something you need to know (like an exercise for a muscle, a recipe or a song), pick a well-known, safe option yourself.
+      const raw2 = await AI.call(`You turn PraiseGod's request into changes to his PG app. You CAN change everything in the app below, so never refuse. Never assume: if the request is missing a detail the change needs (which day, start time, length, which item, amounts, sets and reps), make no change and put one short question asking for all the missing details in "say". Use the earlier conversation for details he already gave.
 APP DATA (today is ${today()}):
 ${AG.snapshot()}
 
 ${AG.TOOLS}
 "do" is a list of short plain commands for the app, like "gym at 5pm" or "add eggs to my shopping list".
-Reply ONLY with JSON: {"say": "one short spoken sentence saying what you did, calling him ${addr()}", "ops": [...], "do": [...]}. If it is not a change request at all, reply {"say": "", "ops": [], "do": []}.`, [{ role: "user", content: text }], { json: true, max: 900 });
+Reply ONLY with JSON: {"say": "one short spoken sentence saying what you did, calling him ${addr()}", "ops": [...], "do": [...]}. If it is not a change request at all, reply {"say": "", "ops": [], "do": []}.`, [...history(6), { role: "user", content: text }], { json: true, max: 900 });
       const o2 = AI.parseJSON(raw2) || {};
       const ops = Array.isArray(o2.ops) ? o2.ops : [], dos = (Array.isArray(o2.do) ? o2.do : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3);
       if (ops.length || dos.length) Object.assign(r, { ops, do: dos, say: String(o2.say || "").trim() || (REFUSE.test(r.say) ? "" : r.say) });
+      else if (/\?\s*$/.test(String(o2.say || "")) && !REFUSE.test(o2.say)) r.say = String(o2.say).trim();
     } catch (e) { console.warn(e); }
   }
   if (!r.ops.length && !r.do.length && REFUSE.test(r.say) && ACTION.test(text)) r.say = `I didn't catch exactly what to change, ${addr()}. Say it once more, like "add cable crossovers to push day".`;
@@ -1087,6 +1254,14 @@ function cloudSettings() {
       <div class="row"><button class="btn primary" type="submit">Connect</button></div>
     </form>${cloudSteps(!SY.url())}</div>`;
 }
+function naturalVoice() {
+  if (!SY.on()) return `<p class="note">Connect PG Cloud to give PG a natural, human-sounding voice.</p>`;
+  if (CV.v && CV.v < 2) return `<div class="update-box"><b>Update PG Cloud for PG's natural voice</b><p class="note" style="margin:4px 0 8px">Your PG Cloud code is the older version. Press Copy, open your pg-cloud Worker in Cloudflare, press Edit code, replace everything with the copy, then press Deploy.</p><div class="row"><button class="btn primary sm" data-act="cloud-copy">Copy PG Cloud code</button><a class="btn sm" href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener">Open Cloudflare</a></div></div>`;
+  if (!CV.v) return "";
+  const cur = S.voice.cloudVoice || "apollo";
+  return `<div class="set-row"><div class="lbl">Natural voice<span class="faint" style="display:block;font-weight:400;font-size:var(--text-xs)">Speaks and listens through your PG Cloud. No beeps on your phone.</span></div>${`<label class="switch"><input type="checkbox" data-act="natural" ${S.voice.natural !== false ? "checked" : ""} aria-label="Natural voice"><i></i></label>`}</div>
+    ${S.voice.natural !== false ? `<label class="field" style="margin-top:var(--space-3)"><span>PG's voice</span><select class="input" data-act="cvoice">${CLOUD_VOICES.map(v => `<option value="${v.id}" ${cur === v.id ? "selected" : ""}>${v.name} · ${v.kind}</option>`).join("")}</select></label>` : ""}`;
+}
 function copyCloud() { navigator.clipboard?.writeText(AI.CLOUD_CODE).then(() => toast("PG Cloud code copied. Paste it in Cloudflare."), () => toast("Couldn't copy. Open worker/pg-worker.js in the PG GitHub repo.")); }
 async function connectCloud(address, code, done) {
   try {
@@ -1097,7 +1272,7 @@ async function connectCloud(address, code, done) {
     if (S.ai.provider === "cloudflare") connectAI();
   } catch (e) { done?.(e); }
 }
-function afterSync() { C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); ui.date = today(); paintLock(); render(); }
+function afterSync() { if (CV.v < 2) probeCloud(); C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); ui.date = today(); paintLock(); render(); }
 function paintLock() {
   let el = $("#lock");
   if (!SY.locked()) { el?.remove(); document.body.classList.remove("locked"); return; }
@@ -1147,7 +1322,7 @@ function viewSettings() {
   const tm = m => pad(Math.floor(m / 60)) + ":" + pad(m % 60);
   const sw = (act, on, label, dis) => `<label class="switch"><input type="checkbox" data-act="${act}" ${on ? "checked" : ""} ${dis ? "disabled" : ""} aria-label="${label}"><i></i></label>`;
   return `<h1 class="title">More</h1>
-  <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} things PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button></div>
+  <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} things PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button><button class="tile" data-act="goals-open" style="${catVar("gym")}"><span class="eyebrow">Goals</span><b>${D.goals().length ? D.goals().length + " goal" + (D.goals().length > 1 ? "s" : "") : "Add your goals"}</b></button><button class="tile" data-act="canto-open" style="${catVar("social")}"><span class="eyebrow">Cantonese</span><b>${D.learned().length} learned</b></button></div>
   ${cloudSettings()}
   ${aiSettings()}
   <h2 class="sec"><span>Voice</span></h2><div class="card">
@@ -1156,7 +1331,8 @@ function viewSettings() {
     <div class="set-row"><div class="lbl">Spoken reminders</div>${sw("alerts", S.voice.alerts, "Spoken reminders")}</div>
     <div class="set-row"><div class="lbl">Heads-up</div><select class="input" style="width:auto" data-act="heads" aria-label="Heads-up minutes">${[0, 5, 10, 15].map(m => `<option value="${m}" ${S.voice.heads === m ? "selected" : ""}>${m ? m + " min before" : "Off"}</option>`).join("")}</select></div>
     <div class="set-row"><div class="lbl">Keep screen awake</div>${sw("awake", S.voice.keepAwake, "Keep screen awake")}</div>
-    <div class="grid2" style="margin-top:var(--space-3)">
+    ${naturalVoice()}
+    <div class="grid2" style="margin-top:var(--space-3)" ${voice.cloud.ok() ? "hidden" : ""}>
       <label class="field"><span>Voice</span><select class="input" data-act="voice">${vs.length ? vs.map(v => `<option value="${esc(v.voiceURI)}" ${voice.voice && voice.voice.voiceURI === v.voiceURI ? "selected" : ""}>${esc(v.name)}${isNatural(v) ? " (natural)" : ""}</option>`).join("") : `<option>System default</option>`}</select></label>
       <label class="field"><span>Speed</span><select class="input" data-act="rate">${[0.9, 1, 1.1, 1.2].map(r => `<option value="${r}" ${S.voice.rate === r ? "selected" : ""}>${r}×</option>`).join("")}</select></label></div>
     <button class="btn sm" data-act="test-voice"><svg><use href="#i-speaker"/></svg>Test</button>
@@ -1212,6 +1388,12 @@ document.addEventListener("click", e => {
     case "replan": { const r = SC.plan(); render(); toast(`${r.placed.length} study sessions planned.`); break; }
     case "go": e.stopPropagation(); go(el.dataset.v); break;
     case "close-sheet": $("#sheet").close(); break;
+    case "goals-open": openGoals(); break;
+    case "goal-del": D.removeGoal(el.dataset.id); openGoals(); render(); break;
+    case "canto-open": openCanto(); break;
+    case "canto-play": sayCanto(el.dataset.zh); break;
+    case "canto-more": D.teachTwo(); openCanto(); render(); break;
+    case "cv-test": voice.cloudVoice = S.voice.cloudVoice || "apollo"; voice.player.unlock(); voice.say(hello()); break;
     case "del-block": { const snap = snapshot(d); day(d).blocks = day(d).blocks.filter(x => x.id !== id); save(); $("#sheet").close(); render(); undoable(snap, "Deleted."); break; }
     case "fit": {
       const t = S.inbox.find(x => x.id === id); if (!t) break;
@@ -1253,7 +1435,7 @@ document.addEventListener("click", e => {
     case "learn-done": { const tr = LN.tracks().find(t => t.id === id); const r = LN.complete(tr); render(); if (r) { chime("ok"); toast(r.next ? `Next: ${r.next.t}` : `${tr.topic} complete.`); } break; }
     case "learn-del": confirmSheet("Remove this learning plan?", "", "Remove", () => { LN.remove(id); render(); }); break;
     case "song-del": S.band.songs = S.band.songs.filter(s => s.id !== id); save(); render(); break;
-    case "test-voice": voice.say(hello()); break;
+    case "test-voice": voice.player.unlock(); voice.say(hello()); break;
     case "backup": {
       const a2 = document.createElement("a");
       a2.href = URL.createObjectURL(new Blob([JSON.stringify({ ...S, ai: { provider: "none", key: "", model: "" } }, null, 1)], { type: "application/json" }));
@@ -1277,6 +1459,8 @@ document.addEventListener("change", e => {
     case "alerts": S.voice.alerts = el.checked; save(); if (el.checked && "Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {}); break;
     case "heads": S.voice.heads = +v; save(); break;
     case "awake": S.voice.keepAwake = el.checked; save(); keepAwake(); break;
+    case "cvoice": S.voice.cloudVoice = v; voice.cloudVoice = v; save(); voice.player.unlock(); voice.say(`Hi ${addr()}. This is how I sound now.`); break;
+    case "natural": S.voice.natural = el.checked; save(); render(); break;
     case "voice": S.voice.voiceURI = v; voice.voiceURI = v; voice.pickVoice(); save(); break;
     case "rate": S.voice.rate = +v; voice.rate = +v; save(); break;
     case "address": S.profile.address = v.trim() || "sir"; save(); break;
@@ -1331,6 +1515,7 @@ document.addEventListener("submit", e => {
     S.ai = { provider: prov, key, model: f.model.value.trim(), base, ok: false }; save();
     connectAI(); return;
   }
+  if (f.dataset.form === "goal") { e.preventDefault(); const t = f.g.value.trim(); if (t) { D.addGoal(t); openGoals(); render(); } return; }
   if (f.dataset.form === "song") { e.preventDefault(); const n = f.song.value.trim(); if (n) { C.addSong(n); render(); } return; }
   if (f.dataset.form === "note") { e.preventDefault(); const t = f.t.value.trim(); if (t) { const n = M.add(t); ui.folder = "all"; ui.q = ""; render(); toast(`Saved to ${M.FOLDERS[n.folder].label}.`); } return; }
   if (f.dataset.form === "task") { e.preventDefault(); const t = f.t.value.trim(); if (!t) return; const list = SC.parse(/\b(?:essay|report|test|exam|quiz|project|presentation|homework|assignment|paper|lab|reading|worksheet)\b/i.test(t) ? t : t + " assignment"); if (!list.length) { toast("Try: History essay due Friday 5pm."); return; } const added = SC.add(list); const r = SC.plan(); render(); toast(added.some(x => !x.due) ? "Added. When is it due? Tell PG." : `${r.placed.length} study sessions planned.`); return; }
@@ -1360,6 +1545,7 @@ $("#asClose").addEventListener("click", closeAssistant);
 $("#endCall").addEventListener("click", () => { voice.hush(); voice.hangUp(); toast("Call ended."); });
 $("#scrim").addEventListener("click", closeAssistant);
 function orbTap() {
+  voice.player.unlock();
   if (!voice.supported) { openAssistant(); $("#ask").focus(); toast("Voice isn't available in this browser. Type to PG instead."); return; }
   // Press to talk: PG greets you, then listens. Nothing listens in the background.
   if (voice.mode === "off" || voice.mode === "wake") {
@@ -1447,6 +1633,6 @@ function needTap() {
 }
 if (S.voice.handsFree && voice.supported) { voice.handsFree = true; voice.listen("wake"); }
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
-window.PG = { run, S, voice };
+window.PG = { run, S, voice, probeCloud };
 
 function andWords(a) { return a.length < 2 ? (a[0] || "") : a.slice(0, -1).join(", ") + " and your " + a.at(-1); }

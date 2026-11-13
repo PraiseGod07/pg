@@ -47,6 +47,8 @@ export function snapshot() {
     learn: strip((S.learn?.tracks || []).map(t => ({ id: t.id, topic: t.topic || t.title, step: t.idx }))),
     food: strip({ kg: S.food?.kg, prefs: S.food?.prefs, list: (S.food?.list || []).slice(0, 40).map(i => ({ id: i.id, name: i.name || i.t, got: i.got })) }),
     school: strip({ tasks: (S.school?.tasks || []).filter(t => !t.done).slice(0, 15).map(t => ({ id: t.id, title: t.title, due: t.due, est: t.est })), pref: S.school?.pref, cap: S.school?.cap }),
+    goals: (S.goals || []).map(g => ({ id: g.id, text: g.text })),
+    cantonese_learned: (S.canto?.learned || []).length,
     notes: (S.notes || []).slice(-30).map(n => ({ id: n.id, folder: n.folder, text: String(n.text).slice(0, 160) }))
   };
   let j = JSON.stringify(out);
@@ -62,7 +64,7 @@ export const TOOLS = `"ops" is a list of direct changes to the app. Use the ids 
 - {"op":"clear_day","date":"YYYY-MM-DD"}
 - {"op":"add_exercise","day":"<gym day key>","name":"Cable crossover","muscles":"Inner chest, front delts","cues":["cue 1","cue 2","cue 3"],"search":"cable crossover proper form","sets":3,"reps":"12-15","rest":60}
 - {"op":"remove_exercise","day":"<gym day key, optional>","exercise":"<ex key or name>"}
-- {"op":"set","path":"dot.path","value":...}, {"op":"push","path":"dot.path","value":...}, {"op":"remove","path":"dot.path","id":"..."}  (for anything else in APP DATA, e.g. "profile.address", "voice.rate", "bible.max", "band.songs", "food.kg")
+- {"op":"set","path":"dot.path","value":...}, {"op":"push","path":"dot.path","value":...}, {"op":"remove","path":"dot.path","id":"..."}  (for anything else in APP DATA, e.g. "profile.address", "voice.rate", "bible.max", "band.songs", "food.kg"; goals are {"op":"push","path":"goals","value":{"text":"...","made":"YYYY-MM-DD"}} and {"op":"remove","path":"goals","id":"..."})
 - {"op":"note","text":"...","folder":"spiritual|about|bass|fitness|learning|life"}
 Never use paths for API keys or private settings; they are not available.`;
 

@@ -6,8 +6,10 @@ const h12 = (h, m) => {
   const ap = h < 12 || h === 24 ? "AM" : "PM", hh = h % 12 || 12;
   return m ? `${hh}:${String(m).padStart(2, "0")} ${ap}` : `${hh} ${ap}`;
 };
-export function speakable(t) {
-  let s = String(t || "");
+export function speakable(t, full) {
+  // Keep Cantonese marked for the Hong Kong voice: ⟦yue:…⟧
+  const yue = [];
+  let s = String(t || "").replace(/⟦yue:([^⟧]*)⟧/g, (_, z) => { yue.push(z); return ` qqyue${yue.length - 1}qq `; });
   s = s.replace(/<[^>]+>/g, " ")                                   // stray html
     .replace(/https?:\/\/\S+/g, "")                                // links
     .replace(/\s*\([^)]*[\u3400-\u9fff][^)]*\)/g, "")              // (Chinese names)
@@ -36,7 +38,8 @@ export function speakable(t) {
     .replace(/[“”"]/g, "").replace(/:\s+(?=[A-Z])/g, ", ")
     .replace(/\s*\n+\s*/g, ". ").replace(/\.\s*\./g, ".")
     .replace(/\s+([,.?])/g, "$1").replace(/\s{2,}/g, " ").trim();
-  return trimForVoice(s);
+  s = yue.length || full ? s : trimForVoice(s);
+  return s.replace(/\s*qqyue(\d+)qq\s*/g, (_, i) => ` ⟦yue:${yue[+i]}⟧ `).trim();
 }
 // Long replies: say the first part, then point to the screen like a person would.
 function trimForVoice(s, max = 420) {
