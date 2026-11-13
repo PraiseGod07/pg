@@ -2,7 +2,7 @@
 import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1 } from "./store.js";
 import { speakable, isNatural } from "./speech.js";
 import { CATS, EXERCISES, SPLITS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
-import { intent, parseSchedule, matchBlock, parseClock, normalize } from "./nlu.js";
+import { intent, parseSchedule, matchBlock, parseClock, normalize, isEndCall } from "./nlu.js";
 import { placeItems, conflicts, firstGap } from "./scheduler.js";
 import { Voice, chime } from "./voice.js";
 import * as C from "./coach.js";
@@ -12,6 +12,7 @@ import * as M from "./brain.js";
 import * as LN from "./learn.js";
 import * as F from "./food.js";
 import * as SC from "./school.js";
+import * as AI from "./ai.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
 
 const $ = s => document.querySelector(s);
@@ -22,7 +23,7 @@ await hydrate();
 load();
 BS.bass(); B.bible(); M.notes(); LN.tracks();
 const addr = () => S.profile.address || "sir";
-const hello = () => `Hi, ${addr()}, what can I do for you?`;
+const hello = () => `Hi, ${addr()}, what can I do for you today?`;
 const lc = s => s ? s.charAt(0).toLowerCase() + s.slice(1) : s;
 const ucf = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 const pickOne = a => a[Math.floor(Math.random() * a.length)];
@@ -40,9 +41,10 @@ const voice = new Voice({
   onHangUp: () => { ui.pending = null; paintVoice(voice.mode); },
   onCommand: text => { $("#heard").textContent = ""; run(text, true); },
   onError: code => {
+    if (code === "blocked" && S.voice.handsFree) { needTap(); return; }
     const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found." }[code];
     if (msg) toast(msg);
-    if (code === "blocked" || code === "nomic") { S.voice.handsFree = false; save(); if (ui.view === "settings") render(); }
+    if (code === "nomic") { S.voice.handsFree = false; save(); if (ui.view === "settings") render(); }
   }
 });
 voice.voiceURI = S.voice.voiceURI; voice.rate = S.voice.rate; voice.pickVoice();
@@ -90,6 +92,7 @@ function paintSuggest() {
 }
 // speakable() lives in speech.js
 function reply(text, opts = {}) {
+  if (ui.quiet) { ui.quiet.push(text); if (opts.view) go(opts.view, opts.date); return; }
   pushMsg("pg", text, opts.html);
   if (opts.view) { go(opts.view, opts.date); if (opts.spoken) ui.autoClose = isMobile(); }
   if (S.voice.speak !== false) voice.say(speakable(text), opts.then);
@@ -188,6 +191,7 @@ function schoolReply(res, head, spoken) { render(); return reply((head ? head + 
 
 async function handle(text, spoken) {
   const bare0 = normalize(text).replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
+  if (isEndCall(bare0)) { ui.pending = null; return reply(pickOne([`You're welcome, ${addr()}. Talk soon.`, `Anytime, ${addr()}. Ending the call.`, `My pleasure, ${addr()}. Bye for now.`]), { then: () => voice.hangUp() }); }
   const pend = ui.pending; ui.pending = null;
   if (pend && await followUp(pend, bare0, text, spoken)) return;
   const it = intent(text);
@@ -298,7 +302,7 @@ async function handle(text, spoken) {
     // ---- Learning anything ----
     case "learn": {
       setStatus("Thinking…");
-      const steps = S.ai.provider !== "none" && S.ai.key ? await aiLearn(it.topic).catch(() => null) : null;
+      const steps = AI.on() ? await aiLearn(it.topic).catch(() => null) : null;
       const tr = LN.create(it.topic, steps); ui.topic = "learn";
       return reply(LN.brief(tr), { view: "notes", spoken });
     }
@@ -437,9 +441,9 @@ function completeCoach(cat, spoken) {
 async function recall(q, spoken, open) {
   const general = !/\babout\b|\bin [a-z]/.test(q) && /\b(?:what (?:have|did) i (?:learn|learned|learnt)|my (?:revelations|notes|lessons)|what revelations)\b/.test(q);
   let found = general ? M.notes().slice(0, 3) : M.search(q, 3);
-  if (S.ai.provider !== "none" && S.ai.key && (open || found.length)) {
+  if (AI.on() && (open || found.length)) {
     setStatus("Thinking…");
-    const ans = await aiChat(q, found.length ? found : M.search(q, 6)).catch(() => null);
+    const ans = await aiChat(q, found.length ? found : M.search(q, 6)).catch(e => { console.warn(e); return null; });
     if (ans) return reply(ans);
   }
   if (general && found.length) return reply(`Your latest: ` + found.map(n => `“${n.text}”`).join(" "), { view: "notes", spoken });
@@ -462,11 +466,14 @@ async function scheduleFrom(text, spoken) {
   const ctx = { date: ui.view === "today" ? ui.date : today(), today: today(), now: nowMin() };
   let items = parseSchedule(text, ctx);
   let events = items.filter(i => i.kind === "event");
-  if (!events.length && S.ai.provider !== "none" && S.ai.key) {
+  // With the AI on, chatty or vague lines go to conversation instead of becoming calendar blocks.
+  const chatty = /^(?:oh|um+|uh+|so|well|hmm+|maybe|i think|i feel|i'?m (?:so |really |kind of |a bit )?(?:tired|sad|stressed|bored|happy|excited|worried|feeling)|honestly|you know|to be honest|what do you think|do you think|should i|why|how come|tell me|can you explain)\b/i.test(text.trim()) || /\?\s*$/.test(text);
+  const vague = events.some(e => e.cat === "other" && e.s == null && e.e == null);
+  if (AI.on() && !ui.quiet && events.length && (chatty || vague)) events = [];
+  if (!events.length && AI.on() && !ui.quiet) {
     setStatus("Thinking…");
-    const ai = await aiExtract(text, ctx).catch(() => null);
-    if (ai && ai.length) { items = ai; events = ai; }
-    else { const ans = await aiChat(text, M.search(text, 4)).catch(() => null); if (ans) return reply(ans); }
+    try { const ans = await aiChat(text, M.search(text, 4)); if (ans) return reply(ans); }
+    catch (e) { return reply(`${AI.friendlyError(e)} You can check it in More, under PG's AI brain.`); }
   }
   if (!events.length) {
     const a = M.answer(text, M.search(text, 2));
@@ -525,21 +532,7 @@ function reviewText() {
 }
 
 // ================= Optional AI (user's own key) =================
-async function callAI(system, user, json) {
-  const { provider, key } = S.ai; const model = S.ai.model;
-  if (provider === "gemini") {
-    const m = model || "gemini-2.5-flash";
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent?key=${encodeURIComponent(key)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: system + "\n\n" + user }] }], generationConfig: json ? { responseMimeType: "application/json", temperature: 0.1 } : { temperature: 0.5 } }) });
-    if (!r.ok) throw new Error(await r.text());
-    return (await r.json()).candidates?.[0]?.content?.parts?.[0]?.text || "";
-  }
-  if (provider === "openai") {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + key }, body: JSON.stringify({ model: model || "gpt-4o-mini", messages: [{ role: "system", content: system }, { role: "user", content: user }], temperature: json ? 0.1 : 0.5, ...(json ? { response_format: { type: "json_object" } } : {}) }) });
-    if (!r.ok) throw new Error(await r.text());
-    return (await r.json()).choices?.[0]?.message?.content || "";
-  }
-  return "";
-}
+async function callAI(system, user, json) { return AI.call(system, user, { json }); }
 async function aiExtract(text, ctx) {
   const sys = `Extract schedule items from speech. Today is ${ctx.today}. Fix speech-to-text errors (e.g. "solid work" = SolidWorks, "based lessons" = bass lessons, wrong AM/PM). Return JSON {"items":[{"title":"","category":"class|study|work|commute|gym|bass|bible|church|learn|band|meal|meeting|social|rest|other","date":"YYYY-MM-DD","start":"HH:MM or null","end":"HH:MM or null","minutes":number or null}]} in the order spoken. Return {"items":[]} if none.`;
   const raw = await callAI(sys, text, true);
@@ -547,10 +540,54 @@ async function aiExtract(text, ctx) {
   const toM = s => { if (!s) return null; const [h, m] = s.split(":").map(Number); return h * 60 + m; };
   return (o.items || []).map(x => { const s = toM(x.start), e = toM(x.end); const cat = CATS[x.category] ? x.category : "other"; return { kind: "event", title: x.title || "Task", cat, date: x.date || ctx.date, s, e, dur: x.minutes || (s != null && e != null ? e - s : DEFAULT_MIN[cat]) }; });
 }
+function aiContext(notes = []) {
+  const d = today(), now = nowMin();
+  const sched = live(d).map(b => `${fmtTime(b.start)}-${fmtTime(b.end)} ${b.title}`).join("; ") || "nothing planned";
+  const due = SC.pending().slice(0, 6).map(t => `${t.title}${t.due ? " due " + t.due : ""}`).join("; ") || "none";
+  let meals = ""; try { meals = F.todayMeals(d, false).map(m => `${m.when}: ${m.r.t}`).join("; "); } catch {}
+  const facts = M.facts().slice(0, 25).map(n => "- " + n.text).join("\n") || "- nothing yet";
+  const mem = notes.length ? notes.map(n => `- ${n.date} (${M.FOLDERS[n.folder].label}): ${n.text}`).join("\n") : "";
+  return `Now: ${new Date().toLocaleString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}. He lives in Hong Kong.
+Today's timetable: ${sched}.
+Assignments: ${due}.
+Today's suggested meals: ${meals || "none"}.
+Learned things about PraiseGod:
+${facts}${mem ? `\nHis saved notes that may apply:\n${mem}` : ""}`;
+}
+function history(n = 10) {
+  return S.chat.slice(-n - 1, -1).filter(m => m.text).map(m => ({ role: m.who === "me" ? "user" : "assistant", content: m.text }));
+}
+// A natural back-and-forth with PG. The AI can also ask the app to do things and remember facts.
+async function aiTalk(text, notes = []) {
+  const sys = `You are PG, PraiseGod's personal assistant and partner, talking with him by voice like on a phone call. Call him "${addr()}" now and then, not every sentence.
+Speak naturally and warmly, like a friend who knows him well. Keep replies short: one to three spoken sentences, no lists, no markdown, no emojis. Ask a short follow-up question when it helps. Use what you know about him below, and his own notes when they apply.
+He is a Christian student who plays bass, goes to the gym and wants high-protein, high-fiber food.
+
+${aiContext(notes)}
+
+Reply ONLY with JSON: {"say": "what you say out loud", "do": ["plain commands for the app"], "remember": ["new lasting facts about him"]}.
+"do" is for when he clearly wants the app to act. Write each as a short command the app understands, for example "gym at 5pm", "bass lesson tomorrow at 6:30pm", "I have a history essay due Friday", "add eggs to my shopping list", "I don't eat pork", "is my plan realistic", "move gym to 7pm", "clear today". Leave it empty otherwise.
+"remember" is for lasting facts he reveals about himself (likes, habits, goals, people, how he feels about things). Write them as "You ..." sentences. Leave it empty if nothing new.`;
+  const raw = await AI.call(sys, [...history(10), { role: "user", content: text }], { json: true, max: 500 });
+  const o = AI.parseJSON(raw) || { say: String(raw || "").trim() };
+  return { say: String(o.say || "").trim(), do: (o.do || []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (o.remember || []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
+}
 async function aiChat(text, notes = []) {
-  const mem = notes.length ? `\nThings the user taught you (use these first, mention the date):\n${notes.map(n => `- ${n.date}${n.refs.length ? " (" + n.refs.join(", ") + ")" : ""}: ${n.text}`).join("\n")}` : "";
-  const sys = `You are PG, a warm, concise personal assistant. The user is a Christian student who plays bass. Address him as "${addr()}". Answer in 1–3 short spoken sentences. If his own notes apply, remind him of them and say how to apply them.${mem}`;
-  return (await callAI(sys, text, false)).trim();
+  const r = await aiTalk(text, notes);
+  return finishTalk(r);
+}
+// Run what the AI asked for quietly, then speak its reply.
+async function finishTalk(r) {
+  r.remember.forEach(f => { if (!M.facts().some(n => n.text.toLowerCase() === f.toLowerCase())) M.add(f, { folder: "about" }); });
+  const done = [];
+  for (const c of r.do) {
+    ui.quiet = []; try { await handle(c, false); } catch (e) { console.warn(e); }
+    done.push(...ui.quiet); ui.quiet = null;
+  }
+  if (r.do.length) render();
+  if (!r.say && !done.length) return null;
+  if (done.length) pushMsg("pg", done.join(" "));
+  return r.say || done.join(" ");
 }
 async function aiLearn(topic) {
   const raw = await callAI(`Make a beginner-to-advanced learning plan. Return JSON {"steps":[{"t":"short step title","d":"one sentence","q":"a YouTube search query for this step"}]} with 6 to 8 steps.`, topic, true);
@@ -826,12 +863,32 @@ function viewSchool() {
   h += `<details class="fold"><summary>How PG plans</summary><div class="card list tips">${SC.RULES.map(x => `<div class="rule"><b>${esc(x.t)}</b><p>${esc(x.d)}</p><a class="faint tip-src" href="${esc(x.url)}" target="_blank" rel="noopener">Source</a></div>`).join("")}</div></details>`;
   return h;
 }
+function aiSettings() {
+  const st = ui.aiStatus || (AI.on() ? { ok: S.ai.ok, text: S.ai.ok ? `Connected to ${AI.PROVIDERS[S.ai.provider].label}` : "Saved. Tap Test to check it works." } : { text: "Not connected" });
+  const pv = S.ai.provider && S.ai.provider !== "none" ? S.ai.provider : "";
+  return `<h2 class="sec"><span>PG's AI brain</span></h2><div class="card ai-card">
+    <p class="note" style="margin-top:0">Paste an API key from OpenAI, Claude or Google Gemini so PG can hold real conversations. The key stays on this device only.</p>
+    <div class="ai-status ${st.ok ? "ok" : st.err ? "err" : ""}" role="status"><i></i><span>${esc(st.text)}${st.ok ? ` · ${esc(AI.modelOf())}` : ""}</span></div>
+    <form class="ai-form" data-form="ai">
+      <label class="field"><span>API key</span><input class="input" name="key" type="password" data-act="ai-key-live" value="${esc(S.ai.key)}" placeholder="sk-…  or  sk-ant-…  or  AIza…" autocomplete="off" spellcheck="false" autocapitalize="off"></label>
+      <div class="grid2"><label class="field"><span>Provider</span><select class="input" name="provider"><option value="">Detect from key</option>${Object.entries(AI.PROVIDERS).map(([k, v]) => `<option value="${k}" ${pv === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
+      <label class="field"><span>Model <span class="faint">(optional)</span></span><input class="input" name="model" value="${esc(S.ai.model && AI.modelOf() === S.ai.model ? S.ai.model : "")}" placeholder="${esc(AI.PROVIDERS[pv || "openai"].model)}" autocomplete="off" spellcheck="false" autocapitalize="off"></label></div>
+      <div class="row"><button class="btn primary" type="submit">Save and connect</button>${AI.on() ? `<button class="btn" type="button" data-act="ai-test">Test</button><button class="btn ghost" type="button" data-act="ai-clear">Remove key</button>` : ""}</div>
+    </form>
+    <p class="note">Get a key: ${Object.values(AI.PROVIDERS).map(v => `<a href="${v.keyUrl}" target="_blank" rel="noopener">${esc(v.label)}</a>`).join(" · ")}</p></div>`;
+}
+async function connectAI() {
+  ui.aiStatus = { text: "Connecting…" }; render();
+  try { await AI.test(); S.ai.ok = true; save(); ui.aiStatus = null; render(); toast(`PG is connected to ${AI.PROVIDERS[S.ai.provider].label}.`); }
+  catch (e) { S.ai.ok = false; save(); ui.aiStatus = { err: true, text: AI.friendlyError(e) }; render(); }
+}
 function viewSettings() {
   const vs = voice.voices();
   const tm = m => pad(Math.floor(m / 60)) + ":" + pad(m % 60);
   const sw = (act, on, label, dis) => `<label class="switch"><input type="checkbox" data-act="${act}" ${on ? "checked" : ""} ${dis ? "disabled" : ""} aria-label="${label}"><i></i></label>`;
   return `<h1 class="title">More</h1>
   <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} things PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button></div>
+  ${aiSettings()}
   <h2 class="sec"><span>Voice</span></h2><div class="card">
     <div class="set-row"><div class="lbl">Hands-free “Hi PG”${voice.supported ? "" : ` <span class="faint">· not supported here</span>`}</div>${sw("handsfree", S.voice.handsFree, "Hands-free wake word", !voice.supported)}</div>
     <div class="set-row"><div class="lbl">Speak replies</div>${sw("speak", S.voice.speak !== false, "Speak replies")}</div>
@@ -849,11 +906,6 @@ function viewSettings() {
     <label class="field"><span>Day ends</span><input class="input" type="time" data-act="dayend" value="${tm(S.profile.dayEnd)}"></label></div>
     <div class="grid2"><label class="field"><span>Gym split</span><select class="input" data-act="split">${Object.entries(SPLITS).map(([k, v]) => `<option value="${k}" ${S.gym.split === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
     <label class="field"><span>Bible version</span><select class="input" data-act="version">${["NKJV", "KJV", "NIV", "ESV", "NLT", "AMP"].map(v => `<option ${B.bible().version === v ? "selected" : ""}>${v}</option>`).join("")}</select></label></div></div>
-  <h2 class="sec"><span>Smarter answers (optional)</span></h2><div class="card">
-    <p class="note" style="margin-top:0">Add your own AI key for richer answers from your notes. It stays on this device.</p>
-    <div class="grid3"><label class="field"><span>Provider</span><select class="input" data-act="ai-provider"><option value="none" ${S.ai.provider === "none" ? "selected" : ""}>Off</option><option value="gemini" ${S.ai.provider === "gemini" ? "selected" : ""}>Google Gemini</option><option value="openai" ${S.ai.provider === "openai" ? "selected" : ""}>OpenAI</option></select></label>
-    <label class="field"><span>API key</span><input class="input" type="password" data-act="ai-key" value="${esc(S.ai.key)}" autocomplete="off"></label>
-    <label class="field"><span>Model</span><input class="input" data-act="ai-model" value="${esc(S.ai.model)}" placeholder="${S.ai.provider === "openai" ? "gpt-4o-mini" : "gemini-2.5-flash"}"></label></div></div>
   <h2 class="sec"><span>Data</span></h2><div class="card"><div class="row">
     <button class="btn sm" data-act="backup">Back up</button><button class="btn sm" data-act="restore">Restore</button><button class="btn sm" data-act="clear-chat">Clear chat</button><button class="btn sm danger" data-act="reset">Erase all</button>
     <input type="file" id="restoreFile" accept="application/json,.json" hidden></div>
@@ -930,6 +982,8 @@ document.addEventListener("click", e => {
     case "bible-done": chime("ok"); completeCoach("bible"); break;
     case "note-del": M.remove(id); render(); break;
     case "folder": ui.folder = el.dataset.k; render(); break;
+    case "ai-test": connectAI(); break;
+    case "ai-clear": S.ai = { provider: "none", key: "", model: "", ok: false }; ui.aiStatus = null; save(); render(); toast("Key removed from this device."); break;
     case "about-folder": ui.folder = "about"; ui.q = ""; go("notes"); break;
     case "learn-done": { const tr = LN.tracks().find(t => t.id === id); const r = LN.complete(tr); render(); if (r) { chime("ok"); toast(r.next ? `Next: ${r.next.t}` : `${tr.topic} complete.`); } break; }
     case "learn-del": confirmSheet("Remove this learning plan?", "", "Remove", () => { LN.remove(id); render(); }); break;
@@ -937,7 +991,7 @@ document.addEventListener("click", e => {
     case "test-voice": voice.say(hello()); break;
     case "backup": {
       const a2 = document.createElement("a");
-      a2.href = URL.createObjectURL(new Blob([JSON.stringify(S, null, 1)], { type: "application/json" }));
+      a2.href = URL.createObjectURL(new Blob([JSON.stringify({ ...S, ai: { provider: "none", key: "", model: "" } }, null, 1)], { type: "application/json" }));
       a2.download = `pg-backup-${today()}.json`; document.body.appendChild(a2); a2.click(); a2.remove(); toast("Backup downloaded."); break;
     }
     case "restore": $("#restoreFile").click(); break;
@@ -976,11 +1030,22 @@ let qT;
 document.addEventListener("input", e => {
   const el = e.target;
   if (el.dataset.act === "song-p") { const row = el.closest(".song"); const st = stageOf(+el.value); const lab = row.querySelector(".song-stage"); lab.className = "song-stage " + st.tone; lab.innerHTML = `<span class="tnum">${el.value}%</span> · ${st.label}`; }
+  if (el.dataset.act === "ai-key-live") { const pv = AI.detect(el.value), sel = el.form?.provider; if (pv && sel && !sel.dataset.touched) sel.value = pv; }
+  if (el.name === "provider" && el.form?.dataset.form === "ai") el.dataset.touched = "1";
   if (el.dataset.act === "note-q") { clearTimeout(qT); qT = setTimeout(() => { ui.q = el.value; render(); const s = $(".search"); s.focus(); s.setSelectionRange(s.value.length, s.value.length); }, 250); }
 });
 document.addEventListener("submit", e => {
   const f = e.target;
   if (f.id === "composer") { e.preventDefault(); const t = $("#ask").value; $("#ask").value = ""; voice.kill(); run(t, "typed"); return; }
+  if (f.dataset.form === "ai") {
+    e.preventDefault();
+    const key = f.key.value.trim();
+    if (!key) { toast("Paste your API key first."); return; }
+    const prov = f.provider.value || AI.detect(key);
+    if (!prov) { ui.aiStatus = { err: true, text: "I couldn't tell which company that key is from. Pick the provider." }; render(); return; }
+    S.ai = { provider: prov, key, model: f.model.value.trim(), ok: false }; save();
+    connectAI(); return;
+  }
   if (f.dataset.form === "song") { e.preventDefault(); const n = f.song.value.trim(); if (n) { C.addSong(n); render(); } return; }
   if (f.dataset.form === "note") { e.preventDefault(); const t = f.t.value.trim(); if (t) { const n = M.add(t); ui.folder = "all"; ui.q = ""; render(); toast(`Saved to ${M.FOLDERS[n.folder].label}.`); } return; }
   if (f.dataset.form === "task") { e.preventDefault(); const t = f.t.value.trim(); if (!t) return; const list = SC.parse(/\b(?:essay|report|test|exam|quiz|project|presentation|homework|assignment|paper|lab|reading|worksheet)\b/i.test(t) ? t : t + " assignment"); if (!list.length) { toast("Try: History essay due Friday 5pm."); return; } const added = SC.add(list); const r = SC.plan(); render(); toast(added.some(x => !x.due) ? "Added. When is it due? Tell PG." : `${r.placed.length} study sessions planned.`); return; }
@@ -1080,6 +1145,14 @@ document.addEventListener("visibilitychange", () => { keepAwake(); if (!document
 renameCoachBlocks(today());
 paintChat(); render(); paintVoice("off");
 setInterval(tick, 20000);
+// Always listening for "Hi PG". Some browsers (like iPhone Safari) need one tap first.
+function needTap() {
+  if (ui.tapWait) return; ui.tapWait = true;
+  navigator.permissions?.query({ name: "microphone" }).then(p => { if (p.state === "denied") toast("Microphone is blocked. Allow it for this site in your browser settings so PG can hear Hi PG."); }).catch(() => {});
+  toast("Tap anywhere so PG can start listening for Hi PG.");
+  const go = () => { ui.tapWait = false; document.removeEventListener("pointerdown", go, true); if (S.voice.handsFree && voice.mode === "off") { voice.handsFree = true; voice.listen("wake"); } };
+  document.addEventListener("pointerdown", go, true);
+}
 if (S.voice.handsFree && voice.supported) { voice.handsFree = true; voice.listen("wake"); }
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
 window.PG = { run, S, voice };

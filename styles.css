@@ -445,3 +445,11 @@ a.btn { color: var(--text); text-decoration: none; } a.btn.primary { color: var(
 .end-call { margin-top: var(--space-2); }
 body.on-call .orb-status { color: var(--accent); }
 .end-call[hidden] { display: none; }
+
+/* PG's AI brain */
+.ai-status{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:var(--surface-2,rgba(255,255,255,.04));margin-bottom:12px;font-weight:600}
+.ai-status i{width:10px;height:10px;border-radius:50%;background:var(--faint,#7a8190);flex:none}
+.ai-status.ok i{background:#5BC48B;box-shadow:0 0 0 4px rgba(91,196,139,.18)}
+.ai-status.err{color:#F0A08A}.ai-status.err i{background:#E0705A}
+.ai-form{display:grid;gap:10px}
+.ai-form .row{flex-wrap:wrap}

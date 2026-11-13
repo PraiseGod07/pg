@@ -427,3 +427,12 @@ export function parseClock(s) {
   if (!m[3] && h >= 1 && h <= 6) h += 12; // "move gym to 6" -> 6 PM
   return h * 60 + mi;
 }
+
+// "Thanks PG, you can end the call now" and similar: end the call right away.
+export function isEndCall(t) {
+  t = String(t || "").toLowerCase().replace(/[^a-z' ]/g, " ").replace(/\s+/g, " ").trim();
+  return /\b(?:end|hang up|stop|close|finish|cut|drop)(?: up)?(?: (?:the|this|our))? (?:call|conversation|chat)\b/.test(t)
+    || /\b(?:you|he|we|u) (?:can|could|may) (?:hang up|go now|end it|stop now)\b/.test(t)
+    || /\b(?:thanks|thank you|thank u|cheers)\b.{0,25}\b(?:hang up|end it|that's all|we're done|we are done|i'm done|bye)\b/.test(t)
+    || /^(?:ok(?:ay)? )?(?:we're|we are) done(?: here)?(?: pg)?$/.test(t);
+}

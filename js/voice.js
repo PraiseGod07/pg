@@ -1,5 +1,5 @@
 // Voice engine: "Hi PG" wake word, command capture, and spoken replies.
-import { findWake } from "./nlu.js";
+import { findWake, isEndCall } from "./nlu.js";
 import { chunks, voiceScore, isNatural } from "./speech.js";
 
 const SR = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -95,7 +95,9 @@ export class Voice {
       // Woke with nothing else said: greet like Siri, then listen for the request
       this.timer = setTimeout(() => { if (this.mode === "command" && !this.cmd()) this.h.onGreet?.(); }, 1300);
     } else {
-      this.timer = setTimeout(() => this.finish(), lastFinal ? (this.call ? 1400 : 1900) : 2600);
+      // Ending the call should feel instant
+      const quick = isEndCall(c) ? 500 : null;
+      this.timer = setTimeout(() => this.finish(), quick ?? (lastFinal ? (this.call ? 1400 : 1900) : 2600));
     }
   }
   finish() {
