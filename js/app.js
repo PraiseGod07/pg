@@ -14,7 +14,7 @@ import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmt
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
-const ui = { view: "today", date: today(), openEx: null, playing: new Set(), autoClose: false, topic: null, folder: "all", q: "", gymTab: "workout", openRec: null };
+const ui = { view: "today", date: today(), openEx: null, playing: new Set(), autoClose: false, topic: null, folder: "all", q: "", gymTab: "workout", openRec: null, openTip: null };
 
 await hydrate();
 load();
@@ -75,7 +75,7 @@ function paintSuggest() {
     ? `<button class="chip" data-fill="${esc(s)}">${esc(s.replace(/: $/, ""))}</button>`
     : `<button class="chip" data-say="${esc(s)}">${esc(s)}</button>`).join("");
 }
-const speakable = t => t.replace(/\s*\([^)]*[\u3400-\u9fff][^)]*\)/g, "").replace(/[\u3400-\u9fff]+/g, "").replace(/(\d)–(\d)/g, "$1 to $2").replace(/“|”/g, "");
+const speakable = t => t.replace(/\s*\([^)]*[\u3400-\u9fff][^)]*\)/g, "").replace(/[\u3400-\u9fff]+/g, "").replace(/(\d)–(\d)/g, "$1 to $2").replace(/°C/g, " degrees").replace(/“|”/g, "");
 function reply(text, opts = {}) {
   pushMsg("pg", text, opts.html);
   if (opts.view) { go(opts.view, opts.date); if (opts.spoken) ui.autoClose = isMobile(); }
@@ -104,6 +104,7 @@ function undoable(snap, msg) {
 const say = b => `${b.title}, ${sayTime(b.start)} to ${sayTime(b.end)}`;
 const markCat = cat => { day(today()).blocks.filter(b => b.cat === cat && !b.done).forEach(b => b.done = true); save(); };
 const minsFor = (cat, dflt) => { const b = blocksOf(today()).find(x => x.cat === cat && !x.done); return b ? b.end - b.start : dflt; };
+const gymToday = (d = today()) => blocksOf(d).some(b => b.cat === "gym");
 const bibleRef = () => { const td = B.todays(); return td && !td.done ? B.refText(td) : ""; };
 
 // Which coach does "complete" refer to?
@@ -238,11 +239,12 @@ async function handle(text, spoken) {
     }
     case "gym_info": ui.topic = "gym"; ui.gymTab = "workout"; return reply(C.gymBrief(today(), true) + " " + F.postLine(), { view: "gym", spoken });
     // ---- Food ----
-    case "food_info": ui.gymTab = "food"; return reply(F.brief(), { view: "gym", spoken });
+    case "food_info": ui.gymTab = "food"; return reply(F.brief(today(), gymToday()), { view: "gym", spoken });
+    case "food_tip": { const t = F.tip(it.k); ui.gymTab = "food"; ui.openTip = it.k; return reply(t.d(), { view: "gym", spoken }); }
     case "weight": { const t = F.setWeight(it.kg); ui.gymTab = "food"; return reply(`Got it. Your target is about ${t} grams of protein a day.`, { view: "gym", spoken }); }
     case "recipe": {
       let r = F.findRecipe(it.q);
-      if (!r) { const ms = F.todayMeals(); r = (/breakfast/.test(it.q) ? ms[0] : /lunch/.test(it.q) ? ms[1] : /after|post/.test(it.q) ? ms[3] : ms[4]).r; }
+      if (!r) { const ms = F.todayMeals(today(), gymToday()); const w = /breakfast/.test(it.q) ? "Breakfast" : /lunch/.test(it.q) ? "Lunch" : /after|post/.test(it.q) ? "After the gym" : "Dinner"; r = (ms.find(m => m.when === w) || ms.at(-1)).r; }
       ui.gymTab = "food"; ui.openRec = r.k;
       return reply(F.recipeBrief(r), { view: "gym", spoken });
     }
@@ -495,20 +497,23 @@ function recipeCard(r, label) {
   const open = ui.openRec === r.k, on = F.food().week.includes(r.k);
   return `<article class="rec ${open ? "open" : ""}"><button class="rec-head" data-act="rec" data-k="${r.k}" aria-expanded="${open}">
     ${label ? `<span class="rec-when">${esc(label)}</span>` : ""}<span class="rec-t">${esc(r.t)}</span><span class="rec-p tnum">${r.p} g</span></button>
-    ${open ? `<div class="rec-body"><div class="faint rec-meta">${esc(r.zh)} · ${r.min} min · about ${r.p} g protein</div>
+    ${open ? `<div class="rec-body"><div class="faint rec-meta">${esc(r.zh)} · ${r.min} min · ${r.p} g protein · ${r.f} g fiber${r.batch ? ` · makes ${r.batch}` : ""}</div>
       <ul class="ing">${r.ing.map(([k, a]) => { const it = F.ITEMS[k]; const q = it.unit && a ? F.fmtQty(a, it.unit) : ""; return `<li><span>${esc(it.n)}</span><span class="faint">${esc(q)}</span></li>`; }).join("")}</ul>
       <ol class="cues">${r.steps.map(x => `<li>${esc(x)}</li>`).join("")}</ol>
-      <div class="row"><a class="btn sm" href="${esc(F.video(r))}" target="_blank" rel="noopener"><svg><use href="#i-play"/></svg>Watch how</a>
+      ${r.store ? `<p class="note rec-store">${esc(r.store)}</p>` : ""}
+      <div class="row"><a class="btn sm" href="${esc(F.link(r).url)}" target="_blank" rel="noopener"><svg><use href="#${r.src ? "i-ext" : "i-play"}"/></svg>${esc(F.link(r).label)}</a>
       <button class="btn sm" data-act="speak-rec" data-k="${r.k}"><svg><use href="#i-speaker"/></svg>Read it</button>
       <button class="btn sm ${on ? "" : "primary"}" data-act="rec-week" data-k="${r.k}">${on ? "On this week's list" : "Add to this week"}</button></div></div>` : ""}</article>`;
 }
 function viewFood() {
-  const ms = F.todayMeals(), f = F.food();
-  let h = `<div class="eyebrow">Food · Hong Kong</div><h1 class="title">About <em>${F.target()} g</em> of protein today.</h1>
+  const gym = gymToday(), ms = F.todayMeals(today(), gym), f = F.food();
+  let h = `<div class="eyebrow">Food · ${gym ? "Gym day" : "Rest day"}</div><h1 class="title">About <em>${F.target()} g</em> of protein today.</h1>
+    <div class="macros"><div><b class="tnum">${F.perMeal()} g</b><span>protein a meal</span></div><div><b class="tnum">${F.fiberTarget()} g</b><span>fiber a day</span></div></div>
     <form class="row kg-form" data-form="kg"><span class="faint">Your weight</span><input class="input tnum" name="kg" type="number" inputmode="decimal" min="30" max="250" step="0.5" placeholder="kg" value="${f.kg || ""}" aria-label="Weight in kg"><span class="faint">kg</span><button class="btn sm">Save</button></form>
     <h2 class="sec"><span>Today</span></h2>`;
   h += ms.map(m => recipeCard(m.r, m.when)).join("");
-  h += `<p class="note">About ${F.mealsProtein(ms)} g across these meals.</p>`;
+  h += `<p class="note">These meals give about ${F.sum(ms, "p")} g of protein and ${F.sum(ms, "f")} g of fiber.</p>`;
+  h += `<h2 class="sec"><span>Know this</span></h2><div class="card list tips">${F.TIPS.map(t => `<details class="tip" ${ui.openTip === t.k ? "open" : ""}><summary>${esc(t.t)}</summary><p>${esc(t.d())}</p><span class="faint tip-src">${esc(t.src)}</span></details>`).join("")}</div>`;
   const inToday = ms.some(m => m.r.k === ui.openRec);
   h += `<details class="fold" ${ui.openRec && !inToday ? "open" : ""}><summary>All recipes</summary>${F.RECIPES.map(r => recipeCard(r)).join("")}</details>`;
   return h;

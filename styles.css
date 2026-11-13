@@ -413,3 +413,16 @@ a.btn { color: var(--text); text-decoration: none; } a.btn.primary { color: var(
 .chk { width: 24px; height: 24px; border-radius: 7px; border: 1.5px solid var(--line-2); background: none; display: grid; place-items: center; color: var(--accent-ink); padding: 0; }
 .shop.got .chk { background: var(--accent); border-color: var(--accent); }
 .chk svg { width: 14px; height: 14px; }
+.macros { display: flex; gap: var(--space-6); margin: var(--space-3) 0 var(--space-4); }
+.macros div { display: flex; flex-direction: column; }
+.macros b { font-size: var(--text-lg); color: var(--text); }
+.macros span { font-size: var(--text-xs); color: var(--faint); }
+.rec-store { margin: 0 0 var(--space-4); }
+.tips { padding: var(--space-2) var(--space-4); }
+.tip + .tip { border-top: 1px solid var(--line); }
+.tip summary { cursor: pointer; list-style: none; padding: var(--space-3) 0; font-weight: 600; font-size: var(--text-sm); display: flex; justify-content: space-between; }
+.tip summary::after { content: "+"; color: var(--faint); }
+.tip[open] summary::after { content: "–"; }
+.tip summary::-webkit-details-marker { display: none; }
+.tip p { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--muted); line-height: 1.5; }
+.tip-src { display: block; font-size: var(--text-xs); padding-bottom: var(--space-3); }

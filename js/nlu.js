@@ -325,6 +325,12 @@ export function intent(raw) {
   if (/\b(?:what(?:'s| is) on|read|show|open|check)\b.*\b(?:shopping|grocery) list\b|^(?:my |the )?(?:shopping|grocery) list$/.test(bare)) return { type: "shop_show" };
   if ((f = bare.match(/\bwhere (?:can|do|should|could) i (?:buy|get|find) (?:some |good |cheap )?(.+?)(?: in hong kong| in hk)?$/))) return { type: "shop_where", item: f[1] };
   if ((f = bare.match(/\b(?:i weigh|my weight is|i(?:'m| am)(?: now)?) (\d+(?:\.\d+)?)\s?(kg|kgs|kilos?|kilograms?|lbs?|pounds)\b/))) return { type: "weight", kg: /^(?:lb|pound)/.test(f[2]) ? +f[1] * 0.4536 : +f[1] };
+  if (/\b(?:fiber|fibre)\b/.test(bare)) return { type: "food_tip", k: "fiber" };
+  if (/\b(?:eat|have|food|meal|snack)\b.*\bbefore (?:the |my |i )?(?:gym|workout|training|lifting|go)|\bpre[- ]?(?:workout|gym|training) (?:meal|snack|food)/.test(bare)) return { type: "food_tip", k: "pre" };
+  if (/\b(?:eat|have|food|meal|shake)\b.*\bafter (?:the |my )?(?:gym|workout|training|lifting)|\bpost[- ]?(?:workout|gym|training)|\b30 minutes? (?:after|window)|\banabolic window\b/.test(bare)) return { type: "food_tip", k: "post" };
+  if (/\bhow much protein\b|\bprotein (?:target|goal|per meal|a day)\b/.test(bare)) return { type: "food_tip", k: "protein" };
+  if (/\b(?:leftovers?|meal prep|how long (?:does|do|can|will) (?:food|it|cooked|leftovers)|keep in the fridge|food safety)\b/.test(bare)) return { type: "food_tip", k: "safe" };
+  if (/\b(?:portion|portions|how much (?:rice|carbs?)|my plate|plate size)\b/.test(bare)) return { type: "food_tip", k: "plate" };
   if ((f = bare.match(/\b(?:recipes?|how (?:do|can|should) i (?:cook|make|prepare)|what (?:should|can|do) i cook|what to cook|cook (?:for )?(?:dinner|lunch|breakfast|tonight)|teach me (?:to|how to) cook)\b(?:\s+(?:for|of|a|an|some|me))*\s*(.*)$/))) return { type: "recipe", q: f[1] };
   if (/\b(?:what (?:should|can|do) i eat|what to eat|foods? (?:with|high in|for|that|rich in)|high protein|protein (?:foods?|target|goal|intake|meals?)|how much protein|meal plan|what should i have for (?:breakfast|lunch|dinner)|my diet|nutrition|eat (?:before|after) (?:the )?(?:gym|workout|training)|build muscle|gain muscle)\b/.test(bare) && !/\b(?:at|from) \d/.test(bare)) return { type: "food_info" };
   // ---- Bible ----
