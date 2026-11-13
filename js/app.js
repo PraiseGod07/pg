@@ -1,5 +1,5 @@
 // PG — app controller: views, command handling, reminders.
-import { S, load, save, day, sortedBlocks, reset, replace } from "./store.js";
+import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1 } from "./store.js";
 import { CATS, EXERCISES, SPLITS, INSTRUMENTS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
 import { intent, parseSchedule, matchBlock, parseClock } from "./nlu.js";
 import { placeItems, conflicts, gaps, firstGap } from "./scheduler.js";
@@ -11,6 +11,7 @@ const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const ui = { view: "today", date: today(), openEx: null, playing: new Set(), sheetOpen: false, autoClose: false };
 
+await hydrate();
 load();
 const addr = () => S.profile.address || "sir";
 
@@ -600,7 +601,7 @@ function confirmSheet(title, body, cta, fn) {
 function restoreFrom(file) {
   if (!file) return;
   const r = new FileReader();
-  r.onload = () => { try { const o = JSON.parse(r.result); if (!o.days) throw 0; confirmSheet("Restore this backup?", "It replaces everything currently on this device.", "Restore", () => { replace(o); load(); paintChat(); render(); toast("Backup restored."); }); } catch { toast("That file isn't a PG backup."); } };
+  r.onload = () => { try { const o = JSON.parse(r.result); if (!o.days && Array.isArray(o.tasks)) { confirmSheet("Import PG Planner tasks?", "Your open tasks from the old app will be added to your days and to-do list.", "Import", () => { importV1(o); render(); toast("Old tasks imported."); }); return; } if (!o.days) throw 0; confirmSheet("Restore this backup?", "It replaces everything currently on this device.", "Restore", () => { replace(o); load(); paintChat(); render(); toast("Backup restored."); }); } catch { toast("That file isn't a PG backup."); } };
   r.readAsText(file);
 }
 

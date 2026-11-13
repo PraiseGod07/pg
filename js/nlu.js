@@ -280,7 +280,7 @@ export function parseSchedule(raw, ctx) {
     if (it.kind !== "event") return;
     if (it.s != null && it.e == null && it.dur) it.e = it.s + it.dur;
     if (it.s != null && it.e != null) it.dur = it.e - it.s;
-    if (!it.dur) it.dur = DEFAULT_MIN[it.cat] || 30;
+    if (!it.dur) { it.dur = DEFAULT_MIN[it.cat] || 30; it.durDefault = true; }
     it.title = it.title.replace(/\s+/g, " ").trim().slice(0, 60);
   });
   return items;

@@ -27,7 +27,7 @@ export function placeItems(items, getDay, opts) {
     let start = it.s, end = it.e;
     const dur = it.dur || DEFAULT_MIN[it.cat] || 30;
     let flex = false;
-    if (start == null && end != null) start = Math.max(cursor ?? end - dur, end - dur);
+    if (start == null && end != null) start = (cursor != null && cursor < end && it.durDefault) ? cursor : Math.max(cursor ?? end - dur, end - dur);
     if (start == null) {
       flex = true;
       const earliest = cursor ?? (it.date === opts.today ? Math.max(opts.dayStart, Math.ceil(opts.now / 15) * 15) : opts.dayStart);

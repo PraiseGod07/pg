@@ -1,12 +1,29 @@
-// Local-first storage. Everything stays on the device. Falls back to memory if storage is blocked.
+// Local-first storage. Everything stays on the device (browser Cache Storage). Falls back to memory if blocked.
 import { today, uid } from "./util.js";
 
 const KEY = "pg.assistant.v2";
-let mem = null;
+const BOX = "pg-data";
+const URL_FOR = k => new URL("./__pgdata/" + encodeURIComponent(k), location.href).href;
+const mem = {};
+const hasCache = (() => { try { return typeof caches !== "undefined" && !!caches.open; } catch { return false; } })();
+let writing = Promise.resolve();
 const ls = {
-  get(k) { try { return localStorage.getItem(k); } catch { return mem && mem[k]; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch { mem = mem || {}; mem[k] = v; } }
+  get(k) { return mem[k]; },
+  set(k, v) {
+    mem[k] = v;
+    if (!hasCache) return;
+    writing = writing.then(() => caches.open(BOX)).then(c => c.put(URL_FOR(k), new Response(v, { headers: { "content-type": "application/json" } }))).catch(() => {});
+  }
 };
+// Read saved data into memory before the app starts
+export async function hydrate() {
+  if (!hasCache) return;
+  try {
+    const c = await caches.open(BOX);
+    const r = await c.match(URL_FOR(KEY));
+    if (r) mem[KEY] = await r.text();
+  } catch {}
+}
 
 export const DEFAULTS = () => ({
   v: 2,
@@ -33,17 +50,14 @@ function merge(base, o) {
 export function load() {
   const raw = ls.get(KEY);
   if (raw) { try { S = merge(DEFAULTS(), JSON.parse(raw)); } catch { S = DEFAULTS(); } }
-  else migrateV1();
+  
   S.chat = (S.chat || []).slice(-60);
   return S;
 }
 
-// Bring tasks over from the previous PG Planner version (pgplanner.v1)
-function migrateV1() {
-  const r = ls.get("pgplanner.v1") || ls.get("myplanner.v2") || ls.get("myplanner.v1");
-  if (!r) return;
+// Bring tasks over from a PG Planner (v1) backup file
+export function importV1(o) {
   try {
-    const o = JSON.parse(r);
     const catMap = { assign: "study", group: "study", study: "study", test: "study", meeting: "meeting", webinar: "meeting", venture: "work", people: "social", hobby: "other", social: "social" };
     (o.tasks || []).filter(t => !t.done).forEach(t => {
       const cat = catMap[t.c] || "other";
@@ -55,7 +69,8 @@ function migrateV1() {
     });
     if (o.ai && o.ai.key) S.ai = { provider: o.ai.provider || "gemini", key: o.ai.key, model: "" };
     save();
-  } catch {}
+    return true;
+  } catch { return false; }
 }
 
 export function save() { ls.set(KEY, JSON.stringify(S)); }
