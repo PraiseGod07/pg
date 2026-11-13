@@ -375,7 +375,7 @@ async function handle(text, spoken) {
   if (AI.on() && !ui.quiet && !["greet", "hush", "dismiss", "clear", "school_add"].includes(it.type)) {
     setStatus("Thinking…");
     try { const ans = await aiChat(text, M.search(text, 4)); if (ans) return reply(ans, { spoken }); return voice.afterReply(); }
-    catch (e) { console.warn(e); ui.aiFail = AI.friendlyError(e); }
+    catch (e) { console.warn(e); ui.aiFail = AI.friendlyError(e); if (/Cloudflare AI isn't connected/.test(ui.aiFail) && !/^(?:what'?s next|read my schedule)/i.test(text.trim())) return reply(ui.aiFail); }
   }
   switch (it.type) {
     case "greet": {
@@ -663,7 +663,7 @@ async function scheduleFrom(text, spoken) {
   if (!events.length && AI.on() && !ui.quiet) {
     setStatus("Thinking…");
     try { const ans = await aiChat(text, M.search(text, 4)); if (ans) return reply(ans); }
-    catch (e) { return reply(`${AI.friendlyError(e)} You can check it in More, under PG's AI brain.`); }
+    catch (e) { const m = AI.friendlyError(e); return reply(/Cloudflare/.test(m) ? m : `${m} You can check it in More, under PG's AI brain.`); }
   }
   if (!events.length) {
     const a = M.answer(text, M.search(text, 2));
@@ -820,7 +820,9 @@ async function aiChat(text, notes = []) {
   // Weather and obviously live questions go to the internet first, so the answer is fast and real.
   let web = null;
   if (WEB.WEATHER_RE.test(text)) { setStatus("Checking the weather…"); web = await WEB.weather(text).catch(e => (console.warn(e), null)); }
-  const r = await aiTalk(text, notes, web, !web && WEB.LIVE_RE.test(text) && !ACTION.test(text));
+  let r;
+  try { r = await aiTalk(text, notes, web, !web && WEB.LIVE_RE.test(text) && !ACTION.test(text)); }
+  catch (e) { if (web?.spoken) { ui.sources = web.sources; return web.spoken; } throw e; }   // AI down: still give the live weather
   ui.sources = r.sources?.length && r.say ? r.sources : null;
   return finishTalk(r);
 }

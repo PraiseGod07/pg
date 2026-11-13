@@ -131,6 +131,7 @@ export async function test() {
 }
 export function friendlyError(e) {
   if (e?.message === "nocloud") return "Connect PG Cloud first, in the PG Cloud card above.";
+  if (/AI\.run is not a function|binding named AI/i.test(e?.message || "")) return "My Cloudflare AI isn't connected. In Cloudflare, open pg-cloud, then Settings, then Bindings. Delete anything named AI that isn't Workers AI, like AI Search or a variable under Variables and Secrets. Then press Add, choose Workers AI, name it AI and press Deploy.";
   if (S.ai?.provider === "cloudflare" && e?.status === 502) return "Workers AI had a problem: " + (e.message || "try again.");
   if (S.ai?.provider === "cloudflare" && e instanceof TypeError) return "Couldn't reach PG Cloud. Check your internet connection.";
   if (S.ai?.provider === "cloudflare" && e?.status === 401) return "This device is locked out of PG Cloud. Enter your passcode in the PG Cloud card.";

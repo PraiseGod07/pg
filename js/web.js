@@ -30,6 +30,7 @@ export async function weather(text) {
   const day = i => `${i === 1 ? "Tomorrow" : "The day after"}: ${WMO[d.weather_code[i]] || "mixed"}, ${n(d.temperature_2m_min[i])} to ${n(d.temperature_2m_max[i])}°C, ${d.precipitation_probability_max[i]}% chance of rain.`;
   return {
     text: `Live weather for ${loc.name} at ${c.time.replace("T", " ")} local time: ${n(c.temperature_2m)}°C, feels like ${n(c.apparent_temperature)}°C, ${WMO[c.weather_code] || "mixed"}, humidity ${c.relative_humidity_2m}%, wind ${n(c.wind_speed_10m)} km/h. Today ${n(d.temperature_2m_min[0])} to ${n(d.temperature_2m_max[0])}°C, ${d.precipitation_probability_max[0]}% chance of rain. ${day(1)} ${day(2)}`,
+    spoken: `Right now in ${loc.name} it's ${n(c.temperature_2m)} degrees, feels like ${n(c.apparent_temperature)}, with ${WMO[c.weather_code] || "mixed weather"}. Today goes from ${n(d.temperature_2m_min[0])} to ${n(d.temperature_2m_max[0])}, with a ${d.precipitation_probability_max[0]}% chance of rain.${d.precipitation_probability_max[0] >= 50 ? " Take an umbrella." : ""}`,
     sources: [{ title: "Open-Meteo", url: "https://open-meteo.com/" }]
   };
 }
