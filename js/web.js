@@ -1,5 +1,5 @@
 // PG's internet: web search through PG Cloud (free Bing and Google News feeds), live weather from Open-Meteo,
-// and Wikipedia straight from the browser as a backup. No keys and no cost.
+// match lists from TheSportsDB, and Wikipedia straight from the browser as a backup. No keys and no cost.
 import { S } from "./store.js";
 import * as SY from "./sync.js";
 
@@ -8,7 +8,7 @@ const WMO = { 0: "clear skies", 1: "mostly clear", 2: "partly cloudy", 3: "cloud
 
 export const WEATHER_RE = /\b(?:weather|forecast|temperature outside|how (?:hot|cold|warm) is it|is it (?:hot|cold|raining|going to rain|gonna rain|sunny|windy)|will it rain|going to rain|gonna rain|(?:need|bring|take) an? umbrella|typhoon|rainstorm warning)\b/i;
 // Questions that clearly need fresh facts from the internet.
-export const LIVE_RE = /\b(?:news|latest|currently|right now|today'?s|this week|yesterday|tonight|score|scores|who won|won the|result of|results of|standings|price of|stock|share price|bitcoin|crypto|exchange rate|how much is|how much does|release date|come out|coming out|open (?:now|today)|opening hours|election|president of|ceo of|search (?:the )?(?:web|internet|online)|look (?:it )?up|google)\b/i;
+export const LIVE_RE = /\b(?:news|latest|currently|right now|today'?s|this week|yesterday|tonight|score|scores|who won|won the|result of|results of|standings|price of|stock|share price|bitcoin|crypto|exchange rate|how much is|how much does|release date|come out|coming out|open (?:now|today)|opening hours|election|president of|ceo of|founder of|revenue|net worth|valuation|market cap|stock market|market share|ipo|earnings|funding round|raised \$?\d|how much (?:did|does) .{1,30} (?:make|earn)|biggest companies|top companies|trending|interest rates?|inflation|search (?:the )?(?:web|internet|online)|look (?:it )?up|google)\b/i;
 
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_, j) => setTimeout(() => j(new Error("timeout")), ms))]);
 const n = x => Math.round(x);
@@ -17,7 +17,7 @@ async function place(text) {
   let p = (String(text).match(/\b(?:in|at|for)\s+([A-Za-z][A-Za-z .'-]{1,40}?)(?:\s+(?:right now|now|today|tomorrow|this (?:morning|afternoon|evening|week|weekend)|tonight|later))?\s*[?.!]*$/i) || [])[1] || "";
   p = p.replace(/\b(?:right now|now|today|tomorrow|tonight|later)\b/gi, "").trim();
   if (!p || /^(?:the )?(?:morning|afternoon|evening|night|week|weekend|moment|hong ?kong|hk|here|home)$/i.test(p)) return HOME;
-  const j = await (await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(p)}&count=1&language=en`)).json();
+  let j = {}; try { j = await (await withTimeout(fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(p)}&count=1&language=en`), 6000)).json(); } catch {}
   const g = j.results?.[0];
   return g ? { name: g.name + (g.country && g.name !== g.country ? `, ${g.country}` : ""), lat: g.latitude, lon: g.longitude } : HOME;
 }
@@ -25,7 +25,12 @@ async function place(text) {
 export async function weather(text) {
   const loc = await place(text);
   const u = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&timezone=auto&forecast_days=3`;
-  const w = await (await withTimeout(fetch(u), 8000)).json();
+  let w;
+  try { w = await (await withTimeout(fetch(u), 7000)).json(); if (!w.current) throw new Error("bad"); }
+  catch (e) {   // phone can't reach Open-Meteo: go through PG Cloud
+    if (!SY.on()) throw e;
+    w = await (await withTimeout(fetch(SY.url() + "/v1/weather" + u.slice(u.indexOf("?")), { headers: { authorization: "Bearer " + (S.dev.cloud?.token || "") } }), 9000)).json();
+  }
   const c = w.current, d = w.daily;
   const day = i => `${i === 1 ? "Tomorrow" : "The day after"}: ${WMO[d.weather_code[i]] || "mixed"}, ${n(d.temperature_2m_min[i])} to ${n(d.temperature_2m_max[i])}°C, ${d.precipitation_probability_max[i]}% chance of rain.`;
   return {
@@ -51,11 +56,49 @@ export async function search(q, news = /\b(?:news|headlines?|happening)\b/i.test
   if (SY.on()) {
     try {
       const r = await withTimeout(fetch(SY.url() + "/v1/web", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + (S.dev.cloud?.token || "") }, body: JSON.stringify({ q, news }) }), 15000);
-      if (r.ok) results = (await r.json()).results || [];
+      if (r.ok) { const j = await r.json(); results = j.results || []; if (j.via) console.info("PG web", j.via); }
     } catch (e) { console.warn(e); }
   }
-  if (!results.length) { try { results = await withTimeout(wiki(q), 8000); } catch (e) { console.warn(e); } }
+  results = relevant(q, results);
+  if (!results.length) { try { results = relevant(q, await withTimeout(wiki(q), 8000)); } catch (e) { console.warn(e); } }
   if (!results.length) return null;
   const text = results.slice(0, 8).map((x, i) => `[${i + 1}] ${x.title}${x.site ? ` (${x.site})` : ""}${x.date ? ` (${x.date})` : ""} ${x.url}\n${x.snippet || ""}${x.text ? `\nPage text: ${x.text}` : ""}`).join("\n\n");
   return { text, sources: results.slice(0, 8).map(x => ({ title: x.title, url: x.url, site: x.site || "" })) };
+}
+
+// Keep only results that are actually about the question (drops junk like unrelated Microsoft pages).
+const STOP = new Set("a an the and or of to in on at for from with by is are was were be been it its this that these those what whats which who whom how when where why do does did can could will would should i me my you your we our they them their he she his her about tell please now right today latest current there any some get find show give".split(" "));
+const words = q => String(q).toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(w => w.length > 1 && !STOP.has(w));
+export function relevant(q, list) {
+  const k = words(q); if (!k.length) return list;
+  const need = k.length >= 4 ? 2 : 1;
+  return list.filter(x => { const t = `${x.title} ${x.snippet || ""} ${x.url}`.toLowerCase(); return k.filter(w => t.includes(w)).length >= need; });
+}
+
+// Fixtures and results for big leagues, from TheSportsDB's free public feed.
+const LEAGUES = [
+  { re: /\b(?:premier league|epl|english premier|prem)\b/i, id: 4328, name: "Premier League" },
+  { re: /\bla ?liga\b/i, id: 4335, name: "La Liga" },
+  { re: /\bserie a\b/i, id: 4332, name: "Serie A" },
+  { re: /\bbundesliga\b/i, id: 4331, name: "Bundesliga" },
+  { re: /\bligue 1\b/i, id: 4334, name: "Ligue 1" },
+  { re: /\bchampions league\b|\bucl\b/i, id: 4480, name: "Champions League" },
+  { re: /\bnba\b/i, id: 4387, name: "NBA" }
+];
+export const SPORTS_RE = new RegExp(LEAGUES.map(l => l.re.source).join("|"), "i");
+const DB = "https://www.thesportsdb.com/api/v1/json/123/";
+const when = ts => { const d = new Date(ts.replace(" ", "T") + (/[zZ]|[+-]\d\d:?\d\d$/.test(ts) ? "" : "Z")); return isNaN(d) ? ts : d.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Hong_Kong" }); };
+export async function sports(text) {
+  const lg = LEAGUES.find(l => l.re.test(text)); if (!lg) return null;
+  const get = async p => (await (await withTimeout(fetch(DB + p), 8000)).json()).events || [];
+  const [next, past] = await Promise.all([get(`eventsnextleague.php?id=${lg.id}`).catch(() => []), get(`eventspastleague.php?id=${lg.id}`).catch(() => [])]);
+  const round = async e => e ? (await get(`eventsround.php?id=${lg.id}&r=${e.intRound}&s=${e.strSeason}`).catch(() => [])) : [];
+  const [up, done] = await Promise.all([round(next[0]), round(past[0])]);
+  const line = e => `${when(e.strTimestamp || e.dateEvent)}: ${e.strHomeTeam} vs ${e.strAwayTeam}${e.intHomeScore != null && e.intHomeScore !== "" ? ` (final ${e.intHomeScore}-${e.intAwayScore})` : ""}${e.strVenue ? ` at ${e.strVenue}` : ""}`;
+  const sort = l => [...l].sort((a, b) => String(a.strTimestamp).localeCompare(String(b.strTimestamp)));
+  if (!up.length && !done.length) return null;
+  return {
+    text: `${lg.name} from TheSportsDB (times are Hong Kong time, today is ${new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: "Asia/Hong_Kong" })}).\nIf he asks about this weekend or today and the next round starts later, tell him there are no matches then (often an international break) and give him the next round's dates and matches.\nNEXT ROUND${next[0] ? " (round " + next[0].intRound + ")" : ""}:\n${sort(up).map(line).join("\n") || "none listed"}\nLAST ROUND RESULTS${past[0] ? " (round " + past[0].intRound + ")" : ""}:\n${sort(done).map(line).join("\n") || "none listed"}`,
+    sources: [{ title: "TheSportsDB", url: `https://www.thesportsdb.com/league/${lg.id}`, site: "TheSportsDB" }]
+  };
 }

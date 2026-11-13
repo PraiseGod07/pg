@@ -1,4 +1,5 @@
 import { looksLikeSchool, estIn } from "./school.js";
+import { clean as cleanHeard } from "./hearing.js";
 // PG language understanding: wake word, intents, and spoken-schedule parsing.
 // Works fully on-device. Built for messy speech-to-text (no punctuation, mis-heard words, wrong AM/PM).
 import { DEFAULT_MIN } from "./library.js";
@@ -432,7 +433,7 @@ export function parseClock(s) {
 
 // "Thanks PG, you can end the call now" and similar: end the call right away.
 export function isEndCall(t) {
-  t = String(t || "").toLowerCase().replace(/[^a-z' ]/g, " ").replace(/\s+/g, " ").trim();
+  t = cleanHeard(String(t || "")).toLowerCase().replace(/[^a-z' ]/g, " ").replace(/\s+/g, " ").trim();
   return /\b(?:end|hang up|stop|close|finish|cut|drop)(?: up)?(?: (?:the|this|our))? (?:call|conversation|chat)\b/.test(t)
     || /\b(?:you|he|we|u) (?:can|could|may) (?:hang up|go now|end it|stop now)\b/.test(t)
     || /\b(?:thanks|thank you|thank u|cheers)\b.{0,25}\b(?:hang up|end it|that's all|we're done|we are done|i'm done|bye)\b/.test(t)

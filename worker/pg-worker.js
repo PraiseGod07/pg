@@ -2,12 +2,13 @@
 // 1) Runs Workers AI for PG (needs a Workers AI binding named AI).
 // 2) Keeps PG's data so your laptop and phone stay the same (needs a D1 database binding named DB).
 // 3) Gives PG a natural voice (Deepgram Aura-2) and good hearing (Deepgram Nova-3), also through Workers AI.
-// 4) Lets PG look things up on the internet for free (Bing and Google News search feeds, then reads the top pages).
+// 4) Lets PG look things up on the internet for free (DuckDuckGo, Google News, Bing and Wikipedia, then reads the top pages),
+//    and gets live weather from Open-Meteo.
 // 5) Only devices that enter your passcode can use it. The passcode is set the first time you connect
 //    and is stored only as a salted hash in your database. Wrong guesses are limited.
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, OPTIONS", "Access-Control-Allow-Headers": "authorization, content-type", "Access-Control-Max-Age": "86400" };
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-const VERSION = 3;
+const VERSION = 4;
 const VOICES = /^(amalthea|andromeda|apollo|arcas|aries|asteria|athena|atlas|aurora|callista|cora|cordelia|delia|draco|electra|harmonia|helena|hera|hermes|hyperion|iris|janus|juno|jupiter|luna|mars|minerva|neptune|odysseus|ophelia|orion|orpheus|pandora|phoebe|pluto|saturn|thalia|theia|vesta|zeus)$/;
 const out = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { ...CORS, "content-type": "application/json" } });
 const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
@@ -27,7 +28,7 @@ async function setup(db) {
 const get = async (db, k) => (await db.prepare("SELECT v, t FROM kv WHERE k = ?").bind(k).first()) || null;
 const put = (db, k, v, t = Date.now()) => db.prepare("INSERT INTO kv (k, v, t) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, t = excluded.t").bind(k, v, t).run();
 
-// Internet lookups, free and keyless: Bing and Google News search feeds, then the text of the top pages.
+// Internet lookups, free and keyless: DuckDuckGo, Google News and Wikipedia, then the text of the top pages.
 const UA = { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36", "accept-language": "en-US,en;q=0.9" };
 const ent = s => String(s || "").replace(/<!\[CDATA\[|\]\]>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;|&#x27;|&apos;/g, "'").replace(/&nbsp;/g, " ").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
 const tag = (x, t) => ent((x.match(new RegExp(`<${t}[^>]*>([\\s\\S]*?)</${t}>`)) || [])[1] || "").replace(/<[^>]+>/g, "").trim();
@@ -46,17 +47,47 @@ async function pageText(u) {
     return ent(main.replace(/<\/(?:p|div|li|h\d|tr|br)>/gi, "\n").replace(/<[^>]+>/g, " ")).replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim().slice(0, 2500);
   } catch { return ""; }
 }
+// Keep only results that are actually about the question.
+const STOP = new Set("a an the and or of to in on at for from with by is are was were be been it its this that these those what whats which who whom how when where why do does did can could will would should i me my you your we our they them their he she his her about tell please now right today latest current there any some get find show give".split(" "));
+const words = q => String(q).toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(w => w.length > 1 && !STOP.has(w));
+function relevant(q, list) {
+  const k = words(q); if (!k.length) return list;
+  const need = k.length >= 4 ? 2 : 1;
+  return list.filter(x => { const t = (x.title + " " + x.snippet + " " + x.url).toLowerCase(); return k.filter(w => t.includes(w)).length >= need; });
+}
+async function ddg(q) {
+  const r = await fetch("https://html.duckduckgo.com/html/", { method: "POST", headers: { ...UA, "content-type": "application/x-www-form-urlencoded", referer: "https://html.duckduckgo.com/" }, body: "q=" + encodeURIComponent(q) + "&kl=us-en" });
+  if (r.status !== 200) return [];
+  const h = await r.text(), outl = [];
+  const re = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>)?/g;
+  let m;
+  while ((m = re.exec(h)) && outl.length < 8) {
+    let u = ent(m[1]); const d = u.match(/[?&]uddg=([^&]+)/); if (d) u = decodeURIComponent(d[1]); if (u.startsWith("//")) u = "https:" + u;
+    if (/duckduckgo\.com\/y\.js|ad_provider/.test(u)) continue;
+    outl.push({ title: ent(m[2].replace(/<[^>]+>/g, "")).trim(), url: u, snippet: ent(String(m[3] || "").replace(/<[^>]+>/g, "")).trim().slice(0, 400) });
+  }
+  return outl;
+}
+async function wiki(q) {
+  const s = await (await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&srlimit=3`, { headers: UA })).json();
+  const t = (s.query?.search || []).slice(0, 2).map(x => x.title); if (!t.length) return [];
+  const ex = await (await fetch(`https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&exintro=1&format=json&titles=${encodeURIComponent(t.join("|"))}`, { headers: UA })).json();
+  return Object.values(ex.query?.pages || {}).map(p => ({ title: p.title + " - Wikipedia", url: "https://en.wikipedia.org/wiki/" + encodeURIComponent(p.title.replace(/ /g, "_")), snippet: String(p.extract || "").slice(0, 400), text: String(p.extract || "").slice(0, 2000), site: "Wikipedia" }));
+}
 async function web(q, news) {
   const e = encodeURIComponent(q);
-  const [b, g] = await Promise.all([
-    rss(`https://www.bing.com/search?q=${e}&format=rss&setlang=en`, 8).catch(() => []),
-    news ? rss(`https://news.google.com/rss/search?q=${e}&hl=en-US&gl=US&ceid=US:en`, 8).catch(() => []) : Promise.resolve([])
+  const [d, g, w, bg] = await Promise.all([
+    ddg(q).catch(() => []),
+    rss(`https://news.google.com/rss/search?q=${e}&hl=en-US&gl=US&ceid=US:en`, 10).catch(() => []),
+    wiki(q).catch(() => []),
+    rss(`https://www.bing.com/search?q=${e}&format=rss&setlang=en&cc=US`, 8).catch(() => [])
   ]);
-  const results = [...g.slice(0, 5), ...b].filter(x => x.title && x.url);
-  const read = results.filter(x => !/news\.google\.com|youtube\.com|facebook\.com|instagram\.com|tiktok\.com|x\.com|twitter\.com/.test(x.url)).slice(0, 2);
+  const dd = relevant(q, d), gg = relevant(q, g), ww = relevant(q, w), bb = relevant(q, bg);
+  const results = (news ? [...gg.slice(0, 6), ...dd, ...bb, ...ww] : [...dd, ...bb.slice(0, 4), ...gg.slice(0, 4), ...ww]).filter((x, i, a) => x.title && x.url && a.findIndex(y => y.url === x.url) === i);
+  const read = results.filter(x => !x.text && !/news\.google\.com|youtube\.com|facebook\.com|instagram\.com|tiktok\.com|x\.com|twitter\.com|reddit\.com/.test(x.url)).slice(0, 2);
   const texts = await Promise.all(read.map(x => pageText(x.url)));
   read.forEach((x, i) => { if (texts[i]) x.text = texts[i]; });
-  return results.slice(0, 8);
+  return { results: results.slice(0, 8), via: { ddg: d.length, news: g.length, wiki: w.length, bing: bb.length } };
 }
 
 export default {
@@ -123,13 +154,20 @@ export default {
         return new Response(a, { headers: { ...CORS, "content-type": "audio/mpeg", "cache-control": "no-store" } });
       } catch (e) { return out({ error: { message: String(e?.message || e) } }, 502); }
     }
-    // PG's ears: recorded speech (wav) in, words out
+    // PG's internet
     if (path === "/v1/web" && req.method === "POST") {
       const b = await req.json().catch(() => ({}));
       const q = String(b.q || "").trim().slice(0, 200);
       if (!q) return out({ results: [] });
-      try { return out({ results: await web(q, !!b.news) }); } catch (e) { return out({ error: { message: String(e?.message || e) } }, 502); }
+      try { return out(await web(q, !!b.news)); } catch (e) { return out({ error: { message: String(e?.message || e) } }, 502); }
     }
+    // Live weather, for phones that can't reach Open-Meteo directly
+    if (path === "/v1/weather" && req.method === "GET") {
+      const u = new URL(req.url);
+      const r = await fetch("https://api.open-meteo.com/v1/forecast" + u.search);
+      return new Response(r.body, { status: r.status, headers: { ...CORS, "content-type": "application/json" } });
+    }
+    // PG's ears: recorded speech (wav) in, words out
     if (path === "/v1/stt" && req.method === "POST") {
       if (!env.AI) return out({ error: { message: "PG Cloud needs a Workers AI binding named AI." } }, 500);
       const buf = await req.arrayBuffer(), type = req.headers.get("content-type") || "audio/wav";

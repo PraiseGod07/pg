@@ -17,6 +17,7 @@ import * as AG from "./agent.js";
 import * as SY from "./sync.js";
 import { PG_CLOUD, PG_VERSION } from "./config.js";
 import * as WEB from "./web.js";
+import * as HR from "./hearing.js";
 import * as D from "./daily.js";
 import { cloudApi, VOICES as CLOUD_VOICES } from "./cloudvoice.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
@@ -132,7 +133,11 @@ function reply(text, opts = {}) {
 async function run(text, spoken = false) {
   text = String(text || "").trim();
   if (!text) { voice.afterReply(); return; }
-  pushMsg("me", text);
+  // Fix misheard or mistyped words from the words around them ("end the corner" -> "end the call").
+  const fixed = HR.clean(text);
+  pushMsg("me", fixed);
+  if (fixed !== text) S.chat.at(-1).raw = text;
+  text = fixed;
   const dates = [...Array(8)].map((_, i) => addDays(today(), i));
   ui.turn = { before: new Set(dates.flatMap(d => (S.days[d]?.blocks || []).map(b => b.id))), dates };
   try { await handle(text, spoken); }
@@ -761,7 +766,10 @@ function history(n = 10) {
 // A natural back-and-forth with PG. The AI can also ask the app to do things and remember facts.
 async function aiTalk(text, notes = [], web = null, live = false) {
   const sys = `You are PG, PraiseGod's personal assistant and partner, talking with him by voice like on a phone call. Call him "${addr()}" now and then, not every sentence.
-Speak naturally and warmly, like a smart friend who knows him well. You can talk about ANYTHING he brings up: faith and the Bible, life, feelings, relationships, school subjects, science, history, tech and coding, money, business, health, fitness, food, music, sports, news, ideas, jokes, advice or just casual chat. Give real, thoughtful answers with substance, share your view when he asks, and keep the conversation going like a real person would. Never refuse a normal topic or steer him back to the app. You have the internet. When answering needs current or exact facts you aren't sure of (news, weather, sports, prices, people, recent events, places, opening hours, anything "latest" or "today", or anything after 2024), don't guess: reply with "search" set to a short web search query and "say" empty, and you'll get live results back. Write the query like a good Google search with the key words only, and put in the year or date when he says "this year", "today" or "latest" (today is ${today()}). Never say you can't access the internet.${web ? `
+Speak naturally and warmly, like a smart friend who knows him well. You can talk about ANYTHING he brings up: faith and the Bible, life, feelings, relationships, school subjects, science, history, tech and coding, money, business, health, fitness, food, music, sports, news, ideas, jokes, advice or just casual chat. Give real, thoughtful answers with substance, share your view when he asks, and keep the conversation going like a real person would. Never refuse a normal topic or steer him back to the app. For business (starting or growing a business, marketing, sales, pricing, money, investing, companies, side hustles, creator products), answer like a sharp business mentor with clear, practical steps; search the internet for real company facts, numbers, prices and market news.
+His words come from voice recognition or quick typing, so some words may be misheard or misspelled, like "corner" when he said "call", "jim" for "gym", "base" for "bass", or a word that sounds alike but makes no sense in the sentence. Work out what he really meant from the whole sentence and the conversation so far, act on that, and don't mention the mistake. When you changed any word, put his corrected sentence in "heard". You have the internet. When answering needs current or exact facts you aren't sure of (news, weather, sports, prices, people, recent events, places, opening hours, anything "latest" or "today", or anything after 2024), don't guess: reply with "search" set to a short web search query and "say" empty, and you'll get live results back. Write the query like a good Google search with the key words only, and put in the year or date when he says "this year", "today" or "latest" (today is ${today()}). Never say you can't access the internet. When you search, leave "say" empty: never say "let me check" or "one moment", because you get the results straight away.
+Never promise to do something later ("I'll add", "I'll look"). Either do it now with "ops"/"do" in this same reply, or ask the question you need answered.
+Every exercise you add with add_exercise automatically gets a "Watch on YouTube" form-video button in his Gym tab, made from its "search" field (for example "incline dumbbell press proper form"). So when he asks for videos, add the exercise with a good "search", and tell him the video button is on the exercise in the Gym tab. Exercises already in his plan already have that video button.${web ? `
 
 LIVE INTERNET RESULTS for his question, fetched just now (${new Date().toString().slice(0, 24)}):
 ${web.text}
@@ -782,19 +790,34 @@ ${AG.snapshot()}
 
 Example: he says "add an exercise for my lower chest" -> {"say":"Sure, sir. Decline push-ups are great for the lower chest. Which gym day should they go on, and how many sets and reps?","ops":[],"do":[],"remember":[]}
 Then he says "push day, 3 sets of 10 to 15" -> {"say":"Done, sir. Decline push-ups are on push day, 3 sets of 10 to 15.","ops":[{"op":"add_exercise","day":"push","name":"Decline push-up","muscles":"Lower chest, triceps","cues":["Feet up on a bench","Lower your chest to the floor slowly","Push up hard and squeeze"],"search":"decline push up proper form","sets":3,"reps":"10-15","rest":60}]}
-Reply ONLY with JSON: {"say": "what you say out loud", "ops": [direct changes], "do": ["plain commands for the app"], "remember": ["new lasting facts about him"], "search": "web search query, only when you need the internet"}.
+Reply ONLY with JSON: {"say": "what you say out loud", "ops": [direct changes], "do": ["plain commands for the app"], "remember": ["new lasting facts about him"], "search": "web search query, only when you need the internet", "heard": "his corrected sentence, only if you fixed a misheard word", "topic": "what this is about"}.
 ${AG.TOOLS}
 "do" is for when he clearly wants the app to act. Write each as a short command the app understands, for example "gym at 5pm", "bass lesson tomorrow at 6:30pm", "I have a history essay due Friday", "add eggs to my shopping list", "I don't eat pork", "is my plan realistic", "move gym to 7pm", "clear today". Leave it empty otherwise.
 For homework, assignments, essays, projects and tests, put his words in "do" (for example "I have an assignment called Code AI due Monday") and keep the name he gave. Never make up a due time or a timetable slot he didn't say.
-"remember" is for lasting facts he reveals about himself (likes, habits, goals, people, how he feels about things). Write them as "You ..." sentences. Leave it empty if nothing new.`;
+"remember" is ONLY for lasting things about him that will still be true next month: who he is (school, church, city, age, job), people in his life, likes and dislikes, food rules and allergies, habits and routines, goals and dreams, skills he's working on, strong opinions and values, and how he wants PG to talk or act. NOT for one-off questions, today's plans, passing moods, things he asked you to look up, or facts about the world. Write each as a "You ..." sentence. Leave it empty if nothing new.
+"topic" is a 1 to 3 word label for what his message is about, like "business", "premier league", "bass guitar", "bible", "fitness", "coding" or "cantonese". Use "" for small talk, greetings and simple app commands.`;
   const raw = await AI.call(sys, [...history(10), { role: "user", content: live ? text + "\n\n(PG note: this needs live facts from the internet, so reply with a \"search\" query.)" : text }], { json: true, max: 900 });
   const o = AI.parseJSON(raw) || { say: String(raw || "").trim() };
+  {
+    const heard = typeof o.heard === "string" ? o.heard.trim() : "";
+    const me = S.chat.at(-1)?.who === "me" ? S.chat.at(-1) : S.chat.slice().reverse().find(m => m.who === "me");
+    if (heard && me && me.text === text && heard.toLowerCase() !== text.toLowerCase() && heard.length < text.length * 1.6 + 10) { me.raw = me.raw || text; me.text = heard; save(); paintChat(); }
+    if (!web && typeof o.topic === "string") D.noteTopic(o.topic, M);
+  }
   // He needs the internet: look it up, then answer from the live results.
   const q = !web && typeof o.search === "string" ? o.search.trim() : "";
   if (q && !(Array.isArray(o.ops) && o.ops.length)) {
     setStatus("Searching the internet…");
-    const found = await WEB.search(q).catch(e => (console.warn(e), null));
+    const found = WEB.SPORTS_RE.test(q + " " + text) ? await WEB.sports(q + " " + text).catch(() => null) || await WEB.search(q).catch(() => null)
+      : WEB.WEATHER_RE.test(q + " " + text) ? await WEB.weather(text).catch(() => null) : await WEB.search(q).catch(e => (console.warn(e), null));
     if (found) return aiTalk(text, notes, found);
+    return { sources: [], say: `I searched the internet for that, ${addr()}, but couldn't find a reliable answer. Want me to try it a different way?`, ops: [], do: [], remember: [] };
+  }
+  if (web) {
+    // The answer must come from the results: never "let me check" or a bare "Search".
+    let say = String(o.say || "").trim();
+    if (!say || /^search\b|let me (?:check|look|search|find)|i(?:'ll| will) (?:check|look|search)|one moment|hold on/i.test(say) && say.length < 90) say = web.spoken || `Here's what I found, ${addr()}: ${web.sources.slice(0, 2).map(x => x.title).join("; ")}.`;
+    o.say = say; o.search = "";
   }
   const r = { sources: web?.sources || [], say: String(o.say || "").trim(), ops: Array.isArray(o.ops) ? o.ops : [], do: (Array.isArray(o.do) ? o.do : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (Array.isArray(o.remember) ? o.remember : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
   // He asked for a change but the AI only talked (or said it couldn't): ask again, just for the changes.
@@ -820,6 +843,7 @@ async function aiChat(text, notes = []) {
   // Weather and obviously live questions go to the internet first, so the answer is fast and real.
   let web = null;
   if (WEB.WEATHER_RE.test(text)) { setStatus("Checking the weather…"); web = await WEB.weather(text).catch(e => (console.warn(e), null)); }
+  else if (WEB.SPORTS_RE.test(text) && !ACTION.test(text)) { setStatus("Checking the fixtures…"); web = await WEB.sports(text).catch(e => (console.warn(e), null)); }
   let r;
   try { r = await aiTalk(text, notes, web, !web && WEB.LIVE_RE.test(text) && !ACTION.test(text)); }
   catch (e) { if (web?.spoken) { ui.sources = web.sources; return web.spoken; } throw e; }   // AI down: still give the live weather
@@ -1222,7 +1246,7 @@ function viewNotes() {
   }
   h += `<h2 class="sec"><span>Folders</span></h2><div class="split-chips">${[["all", "All", all.length], ...Object.entries(M.FOLDERS).map(([k, v]) => [k, v.short || v.label, c[k] || 0])].map(([k, l, n]) => `<button class="chip ${ui.folder === k ? "on" : ""}" data-act="folder" data-k="${k}">${esc(l)} <span class="faint">${n}</span></button>`).join("")}</div>
     <input class="input search" data-act="note-q" type="search" placeholder="Search" value="${esc(ui.q)}" aria-label="Search notes">`;
-  if (ui.folder === "about") h += `<h2 class="sec"><span>Learned things about PraiseGod</span></h2><p class="note">PG writes here by itself as it learns you. You can add your own, like: remember that I focus best after a walk.</p>`;
+  if (ui.folder === "about") h += `<h2 class="sec"><span>Learned things about PraiseGod</span></h2><p class="note">PG saves lasting things here by itself: who you are, the people in your life, likes and dislikes, food rules, habits, goals, skills you're building, your values, and how you want PG to act. If you keep asking about the same topic on different days, PG saves that too. One-off questions, today's plans and passing moods are not saved. You can add your own, like: remember that I focus best after a walk.</p>`;
   h += list.length ? list.map(noteCard).join("") : `<p class="note">${all.length ? "Nothing here yet." : "Nothing saved yet."}</p>`;
   return h;
 }
@@ -1279,8 +1303,8 @@ function cloudSettings() {
     </form>${cloudSteps(!SY.url())}</div>`;
 }
 function naturalVoice() {
-  if (!SY.on() || !CV.v || CV.v >= 3) return "";
-  return `<div class="update-box"><b>Update PG Cloud to give PG the full internet</b><p class="note" style="margin:4px 0 8px">Press Copy, open your pg-cloud Worker in Cloudflare, press Edit code, replace everything with the copy, then press Deploy. Until then PG uses Wikipedia and live weather only.</p><div class="row"><button class="btn primary sm" data-act="cloud-copy">Copy PG Cloud code</button><a class="btn sm" href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener">Open Cloudflare</a></div></div>`;
+  if (!SY.on() || !CV.v || CV.v >= 4) return "";
+  return `<div class="update-box"><b>Update PG Cloud to give PG the full internet</b><p class="note" style="margin:4px 0 8px">Press Copy, open your pg-cloud Worker in Cloudflare, press Edit code, replace everything with the copy, then press Deploy. This gives him better web search and a backup route for the weather.</p><div class="row"><button class="btn primary sm" data-act="cloud-copy">Copy PG Cloud code</button><a class="btn sm" href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener">Open Cloudflare</a></div></div>`;
 }   // PG uses the free built-in phone voice
 function copyCloud() { navigator.clipboard?.writeText(AI.CLOUD_CODE).then(() => toast("PG Cloud code copied. Paste it in Cloudflare."), () => toast("Couldn't copy. Open worker/pg-worker.js in the PG GitHub repo.")); }
 async function connectCloud(address, code, done) {
@@ -1292,7 +1316,7 @@ async function connectCloud(address, code, done) {
     if (S.ai.provider === "cloudflare") connectAI();
   } catch (e) { done?.(e); }
 }
-function afterSync() { if (CV.v < 3) probeCloud(); C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); ui.date = today(); paintLock(); render(); }
+function afterSync() { if (CV.v < 4) probeCloud(); C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); ui.date = today(); paintLock(); render(); }
 function paintLock() {
   let el = $("#lock");
   if (!SY.locked()) { el?.remove(); document.body.classList.remove("locked"); return; }

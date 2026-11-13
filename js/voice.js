@@ -148,7 +148,7 @@ export class Voice {
     if (this.handsFree) this.listen("wake"); else this.set("off");
   }
   // End the call and go back to waiting for "Hi PG"
-  hangUp() { this.call = false; this.kill(); this.mic.close(); clearTimeout(this.idleTimer); chime("down"); this.h.onHangUp?.(); if (this.handsFree) this.listen("wake"); else this.set("off"); }
+  hangUp() { this.call = false; this.kill(); this.mic.close(); clearTimeout(this.idleTimer); chime("down"); this.h.onHangUp?.(); this.set("off"); if (this.handsFree) setTimeout(() => { if (this.mode === "off" && this.handsFree) this.listen("wake"); }, 5000); }   // pause before "Hi PG" listening, so PG's own goodbye can't restart a call
 
   // ---- talking over PG (barge-in) ----
   // While PG speaks, the mic stays open. Saying "stop", "wait", "hold on" cuts PG off and it listens.

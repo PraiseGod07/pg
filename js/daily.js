@@ -123,3 +123,18 @@ export function learned() {
   return out;
 }
 export const CANTO_N = CANTO.length;
+
+// ---- Things he keeps asking about ----
+// Each AI reply labels its topic. Asked 3+ times on 2+ different days = PG saves it as something to learn about him.
+const SKIP_TOPIC = /^(?:|small talk|greeting|greetings|chat|app|app command|schedule|time|thanks|help|other|general|misc)$/;
+export function noteTopic(topic, M) {
+  const t = String(topic || "").toLowerCase().replace(/[^a-z0-9 '&+-]/g, "").replace(/\s+/g, " ").trim().slice(0, 30);
+  if (!t || SKIP_TOPIC.test(t) || t.split(" ").length > 3) return;
+  const all = S.interests || (S.interests = {});
+  const it = all[t] || (all[t] = { n: 0, days: [], saved: 0 });
+  it.n++; const d = today();
+  if (!it.days.includes(d)) it.days = [...it.days, d].slice(-30);
+  if (!it.saved && it.n >= 3 && it.days.length >= 2) { it.saved = 1; M.add(`You often ask about ${t}.`, { folder: "about" }); }
+  else if (it.saved === 1 && it.n >= 10 && it.days.length >= 4) { it.saved = 2; M.add(`${t} is one of your big interests. You ask about it a lot.`, { folder: "about" }); }
+  save();
+}
