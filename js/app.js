@@ -14,6 +14,8 @@ import * as F from "./food.js";
 import * as SC from "./school.js";
 import * as AI from "./ai.js";
 import * as AG from "./agent.js";
+import * as SY from "./sync.js";
+import { PG_CLOUD } from "./config.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
 
 const $ = s => document.querySelector(s);
@@ -1021,22 +1023,84 @@ function viewSchool() {
   h += `<details class="fold"><summary>How PG plans</summary><div class="card list tips">${SC.RULES.map(x => `<div class="rule"><b>${esc(x.t)}</b><p>${esc(x.d)}</p><a class="faint tip-src" href="${esc(x.url)}" target="_blank" rel="noopener">Source</a></div>`).join("")}</div></details>`;
   return h;
 }
+// ================= PG Cloud: sync, passcode, Workers AI =================
+const ago = t => { if (!t) return "not yet"; const s = Math.round((Date.now() - t) / 1000); return s < 60 ? "just now" : s < 3600 ? Math.round(s / 60) + " min ago" : fmtTime(new Date(t).getHours() * 60 + new Date(t).getMinutes()); };
+function cloudSteps(open) {
+  return `<details class="fold" ${open ? "open" : ""}><summary>Set up PG Cloud (about 3 minutes, free)</summary>
+    <ol class="steps">
+      <li>In Cloudflare, open <a href="https://dash.cloudflare.com/?to=/:account/workers/d1" target="_blank" rel="noopener">D1 SQL database</a>. Press Create Database, name it <b>pg</b>, and press Create.</li>
+      <li>Open <a href="https://dash.cloudflare.com/?to=/:account/workers-and-pages/create" target="_blank" rel="noopener">Workers and Pages</a>. Press Create application, then Start with Hello World. Name it <b>pg-cloud</b> and press Deploy.</li>
+      <li>Press Edit code. Clear everything in worker.js, paste the PG Cloud code, and press Deploy.</li>
+      <li>In the Worker's Bindings tab, press Add binding. Pick <b>Workers AI</b> and type <b>AI</b> as the name. Add one more: <b>D1 database</b>, name <b>DB</b>, and pick <b>pg</b>.</li>
+      <li>Copy the Worker's address (it ends in .workers.dev) into PG Cloud address here. Type your passcode and press Connect. The first device you connect sets the passcode.</li>
+    </ol>
+    <button class="btn" type="button" data-act="cloud-copy">Copy PG Cloud code</button></details>`;
+}
+function cloudSettings() {
+  if (SY.on()) return `<h2 class="sec"><span>PG Cloud</span></h2><div class="card">
+    <div class="ai-status ok" role="status"><i></i><span>Syncing this device · last synced ${esc(ago(SY.last()))}</span></div>
+    <p class="note">Your schedule, notes, plans and AI settings match on every device that has the passcode.</p>
+    <div class="row"><button class="btn" data-act="cloud-sync">Sync now</button><button class="btn" data-act="cloud-others">Sign out other devices</button><button class="btn ghost" data-act="cloud-off">Stop syncing here</button></div>${cloudSteps(false)}</div>`;
+  const st = ui.cloudStatus;
+  return `<h2 class="sec"><span>PG Cloud</span></h2><div class="card">
+    <p class="note" style="margin-top:0">Keep your laptop and phone the same, lock PG with a passcode, and run PG's AI on your Cloudflare Workers AI. It all lives in your own Cloudflare account.</p>
+    ${st ? `<div class="ai-status ${st.err ? "err" : ""}" role="status"><i></i><span>${esc(st.text)}</span></div>` : ""}
+    <form class="ai-form" data-form="cloud">
+      ${PG_CLOUD ? "" : `<label class="field"><span>PG Cloud address</span><input class="input" name="url" value="${esc(SY.url())}" placeholder="https://pg-cloud.yourname.workers.dev" autocomplete="off" spellcheck="false" autocapitalize="off" inputmode="url"></label>`}
+      <label class="field"><span>Passcode</span><input class="input" name="code" type="password" inputmode="numeric" autocomplete="off" placeholder="Your passcode"></label>
+      <div class="row"><button class="btn primary" type="submit">Connect</button></div>
+    </form>${cloudSteps(!SY.url())}</div>`;
+}
+function copyCloud() { navigator.clipboard?.writeText(AI.CLOUD_CODE).then(() => toast("PG Cloud code copied. Paste it in Cloudflare."), () => toast("Couldn't copy. Open worker/pg-worker.js in the PG GitHub repo.")); }
+async function connectCloud(address, code, done) {
+  try {
+    const r = await SY.unlock(address, code);
+    if (S.ai.provider === "none" || !AI.on() || S.ai.provider === "cloudflare") { S.ai = { ...S.ai, provider: "cloudflare", ok: false }; save(); }
+    afterSync(); done?.(null, r);
+    toast(r.adopted ? "Connected. This device now has your PG data." : r.first ? "PG Cloud is set up. Your passcode is saved." : "Connected. This device's data is now in PG Cloud.");
+    if (S.ai.provider === "cloudflare") connectAI();
+  } catch (e) { done?.(e); }
+}
+function afterSync() { C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); ui.date = today(); paintLock(); render(); }
+function paintLock() {
+  let el = $("#lock");
+  if (!SY.locked()) { el?.remove(); document.body.classList.remove("locked"); return; }
+  document.body.classList.add("locked");
+  if (el) return;
+  el = document.createElement("div"); el.id = "lock"; el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true"); el.setAttribute("aria-label", "Unlock PG");
+  el.innerHTML = `<form class="lock-card" data-form="unlock">
+    <div class="lock-mark" aria-hidden="true">PG</div>
+    <h1 class="title">Enter passcode</h1>
+    <p class="faint">PG is private. Enter the passcode to open it on this device.</p>
+    ${PG_CLOUD ? "" : `<label class="field"><span>PG Cloud address</span><input class="input" name="url" placeholder="https://pg-cloud.yourname.workers.dev" autocomplete="off" spellcheck="false" autocapitalize="off" inputmode="url"></label>`}
+    <label class="field"><span>Passcode</span><input class="input lock-code" name="code" type="password" inputmode="numeric" autocomplete="off" autofocus></label>
+    <p class="lock-err" role="alert"></p>
+    <button class="btn primary" type="submit">Unlock</button></form>`;
+  document.body.appendChild(el);
+  setTimeout(() => el.querySelector(".lock-code")?.focus(), 50);
+}
+SY.init({
+  busy: () => voice.mode !== "off" || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || ""),
+  changed: () => afterSync(),
+  revoked: () => { voice.kill?.(); afterSync(); }
+});
 function aiSettings() {
   const st = ui.aiStatus || (AI.on() ? { ok: S.ai.ok, text: S.ai.ok ? `Connected to ${AI.label()}` : "Saved. Tap Test to check it works." } : { text: "Not connected" });
   const pv = S.ai.provider && !["none", "auto"].includes(S.ai.provider) ? S.ai.provider : "";
   return `<h2 class="sec"><span>PG's AI brain</span></h2><div class="card ai-card">
-    <p class="note" style="margin-top:0">Paste an API key from any AI company, like ChatGPT, Claude, Gemini, Grok, DeepSeek, Groq, Mistral, Perplexity or OpenRouter, so PG can hold real conversations. PG figures out which one it is. The key stays on this device only.</p>
+    <p class="note" style="margin-top:0">Paste an API key from any AI company, like ChatGPT, Claude, Gemini, Grok, DeepSeek, Groq, Mistral, Perplexity or OpenRouter, so PG can hold real conversations. PG figures out which one it is. ${SY.on() ? "PG Cloud keeps the key on your other devices too." : "The key stays on this device unless PG Cloud is on."}</p>
     <div class="ai-status ${st.ok ? "ok" : st.err ? "err" : ""}" role="status"><i></i><span>${esc(st.text)}${st.ok ? ` · ${esc(AI.modelOf())}` : ""}</span></div>
     <form class="ai-form" data-form="ai">
-      <label class="field"><span>API key</span><input class="input" name="key" type="password" data-act="ai-key-live" value="${esc(S.ai.key)}" placeholder="Paste your key here" autocomplete="off" spellcheck="false" autocapitalize="off"></label>
+      <label class="field" data-ai-key ${pv === "cloudflare" ? "hidden" : ""}><span>API key</span><input class="input" name="key" type="password" data-act="ai-key-live" value="${esc(S.ai.key)}" placeholder="Paste your key here" autocomplete="off" spellcheck="false" autocapitalize="off"></label>
       <div class="grid2"><label class="field"><span>Provider</span><select class="input" name="provider" data-act="ai-prov"><option value="">Detect from key</option>${Object.entries(AI.PROVIDERS).map(([k, v]) => `<option value="${k}" ${pv === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
       <label class="field"><span>Model <span class="faint">(optional)</span></span><input class="input" name="model" value="${esc(S.ai.model && AI.modelOf() === S.ai.model ? S.ai.model : "")}" placeholder="${esc(pv ? (AI.PROVIDERS[pv].model || "PG picks one") : "PG picks one")}" autocomplete="off" spellcheck="false" autocapitalize="off"></label></div>
+      <p class="note ai-cf" data-ai-cf ${pv === "cloudflare" ? "" : "hidden"}>${SY.on() ? "Uses Workers AI on your PG Cloud. No key needed." : "Connect PG Cloud above first. Then PG uses your Workers AI with no key."}</p>
       <label class="field" data-ai-base ${pv === "custom" ? "" : "hidden"}><span>Web address of the AI</span><input class="input" name="base" value="${esc(S.ai.base || "")}" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false" autocapitalize="off" inputmode="url"></label>
       <div class="row"><button class="btn primary" type="submit">Save and connect</button>${AI.on() ? `<button class="btn" type="button" data-act="ai-test">Test</button><button class="btn ghost" type="button" data-act="ai-clear">Remove key</button>` : ""}</div>
     </form>
     <details class="fold"><summary>Where to get a key</summary><p class="note">${Object.values(AI.PROVIDERS).filter(v => v.keyUrl).map(v => `<a href="${v.keyUrl}" target="_blank" rel="noopener">${esc(v.label.replace(/ \(.*\)$/, ""))}</a>`).join(" · ")}. One OpenRouter key works with models from almost every company.</p></details></div>`;
 }
-function showBase(f) { const b = f?.querySelector("[data-ai-base]"); if (b) b.hidden = f.provider.value !== "custom"; }
+function showBase(f) { const b = f?.querySelector("[data-ai-base]"); if (b) b.hidden = f.provider.value !== "custom"; const c = f?.querySelector("[data-ai-cf]"); if (c) c.hidden = f.provider.value !== "cloudflare"; const k = f?.querySelector("[data-ai-key]"); if (k) k.hidden = f.provider.value === "cloudflare"; }
 async function connectAI() {
   ui.aiStatus = { text: "Connecting…" }; render();
   try { await AI.test(); S.ai.ok = true; save(); ui.aiStatus = null; render(); toast(`PG is connected to ${AI.label()}.`); }
@@ -1048,6 +1112,7 @@ function viewSettings() {
   const sw = (act, on, label, dis) => `<label class="switch"><input type="checkbox" data-act="${act}" ${on ? "checked" : ""} ${dis ? "disabled" : ""} aria-label="${label}"><i></i></label>`;
   return `<h1 class="title">More</h1>
   <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} things PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button></div>
+  ${cloudSettings()}
   ${aiSettings()}
   <h2 class="sec"><span>Voice</span></h2><div class="card">
     <div class="set-row"><div class="lbl">Always listen for “Hi PG”<span class="faint" style="display:block;font-weight:400;font-size:var(--text-xs)">${voice.supported ? "Off means PG only listens after you press the button. Some phones beep when it's on." : "Not supported here"}</span></div>${sw("handsfree", S.voice.handsFree, "Hands-free wake word", !voice.supported)}</div>
@@ -1143,6 +1208,10 @@ document.addEventListener("click", e => {
     case "note-del": M.remove(id); render(); break;
     case "folder": ui.folder = el.dataset.k; render(); break;
     case "ai-test": connectAI(); break;
+    case "cloud-copy": copyCloud(); break;
+    case "cloud-sync": SY.pull().then(() => SY.push()).then(() => { render(); toast("Synced."); }); break;
+    case "cloud-others": if (confirm("Sign out every other device? They'll need the passcode again, and their copy of PG is cleared.")) SY.signOutOthers().then(() => toast("Other devices are signed out."), e => toast(e.message)); break;
+    case "cloud-off": SY.disconnect(); if (S.ai.provider === "cloudflare") S.ai.ok = false; save(true); render(); toast("This device stopped syncing."); break;
     case "ai-clear": S.ai = { provider: "none", key: "", model: "", ok: false }; ui.aiStatus = null; save(); render(); toast("Key removed from this device."); break;
     case "about-folder": ui.folder = "about"; ui.q = ""; go("notes"); break;
     case "learn-done": { const tr = LN.tracks().find(t => t.id === id); const r = LN.complete(tr); render(); if (r) { chime("ok"); toast(r.next ? `Next: ${r.next.t}` : `${tr.topic} complete.`); } break; }
@@ -1198,9 +1267,27 @@ document.addEventListener("input", e => {
 document.addEventListener("submit", e => {
   const f = e.target;
   if (f.id === "composer") { e.preventDefault(); const t = $("#ask").value; $("#ask").value = ""; voice.kill(); run(t, "typed"); return; }
+  if (f.dataset.form === "unlock" || f.dataset.form === "cloud") {
+    e.preventDefault();
+    const code = f.code.value, url = f.url ? f.url.value : PG_CLOUD, btn = f.querySelector("button[type=submit]");
+    if (!code.trim()) { f.code.focus(); return; }
+    btn.disabled = true; btn.textContent = "Checking…";
+    connectCloud(url, code, err => {
+      if (!err) return;
+      btn.disabled = false; btn.textContent = f.dataset.form === "unlock" ? "Unlock" : "Connect";
+      if (f.dataset.form === "unlock") { f.querySelector(".lock-err").textContent = err.message; f.code.value = ""; f.code.focus(); }
+      else { ui.cloudStatus = { err: true, text: err.message }; render(); }
+    });
+    return;
+  }
   if (f.dataset.form === "ai") {
     e.preventDefault();
     const key = f.key.value.trim();
+    if (f.provider.value === "cloudflare") {
+      S.ai = { ...S.ai, provider: "cloudflare", model: f.model.value.trim(), ok: false }; save();
+      if (!SY.on()) { ui.aiStatus = { err: true, text: "Connect PG Cloud above first." }; render(); return; }
+      connectAI(); return;
+    }
     if (!key) { toast("Paste your API key first."); return; }
     const prov = f.provider.value || AI.detect(key) || "auto";
     const base = f.base.value.trim();
@@ -1312,7 +1399,7 @@ document.addEventListener("visibilitychange", () => { keepAwake(); if (!document
 
 // ================= Boot =================
 renameCoachBlocks(today());
-paintChat(); render(); paintVoice("off");
+paintChat(); render(); paintVoice("off"); paintLock(); SY.pull();
 setInterval(tick, 20000);
 // Always listening for "Hi PG". Some browsers (like iPhone Safari) need one tap first.
 function needTap() {

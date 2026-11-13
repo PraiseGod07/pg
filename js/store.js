@@ -39,7 +39,9 @@ export const DEFAULTS = () => ({
   learn: { tracks: [], active: null },
   food: { kg: null, week: null, list: [], made: null },
   chat: [],
-  ai: { provider: "none", key: "", model: "" }
+  ai: { provider: "none", key: "", model: "" },
+  t: 0,                // last change, used to keep devices in sync
+  dev: { trusted: false, cloud: { url: "", token: "", last: 0 } }   // this device only, never synced
 });
 
 export let S = DEFAULTS();
@@ -57,6 +59,9 @@ export function load() {
   try { navigator.storage?.persist?.(); } catch {}
   const raw = ls.get(KEY);
   if (raw) { try { S = merge(DEFAULTS(), JSON.parse(raw)); } catch { S = DEFAULTS(); } }
+  // v2.9: devices that already had PG before the passcode lock count as yours
+  if (raw && S.dev.trusted === false && !S.dev.seen) S.dev.trusted = true;
+  S.dev.seen = 1;
   
   S.chat = (S.chat || []).slice(-60);
   // v2.7: PG listens for "Hi PG" all the time by default
@@ -83,8 +88,21 @@ export function importV1(o) {
   } catch { return false; }
 }
 
-export function save() { ls.set(KEY, JSON.stringify(S)); }
+const hooks = [];
+export const onSave = f => hooks.push(f);
+// quiet = bookkeeping only (sync status), not a change worth sending to other devices
+export function save(quiet) { if (!quiet) S.t = Date.now(); ls.set(KEY, JSON.stringify(S)); if (!quiet) hooks.forEach(f => { try { f(); } catch {} }); }
+// Take data from PG Cloud while keeping this device's own settings
+export function adopt(o, t) {
+  const dev = S.dev, vu = S.voice?.voiceURI || "";
+  const next = merge(DEFAULTS(), o);
+  for (const k of Object.keys(S)) delete S[k];
+  Object.assign(S, next, { dev, t });
+  S.voice.voiceURI = vu;
+}
+// Lock this device and clear its copy of the data
+export function wipe() { const fresh = DEFAULTS(); for (const k of Object.keys(S)) delete S[k]; Object.assign(S, fresh); S.dev.seen = 1; save(true); }
 export function day(d = today()) { return (S.days[d] = S.days[d] || { blocks: [] }); }
 export function sortedBlocks(d = today()) { return day(d).blocks.slice().sort((a, b) => a.start - b.start || a.end - b.end); }
-export function reset() { S = DEFAULTS(); save(); }
-export function replace(o) { S = merge(DEFAULTS(), o); save(); }
+export function reset() { const dev = S.dev; S = DEFAULTS(); S.dev = dev; save(); }
+export function replace(o) { const dev = S.dev; S = merge(DEFAULTS(), o); S.dev = dev; save(); }

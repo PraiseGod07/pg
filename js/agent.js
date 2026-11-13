@@ -7,7 +7,7 @@ import * as C from "./coach.js";
 import * as M from "./brain.js";
 
 // Anything under these is off limits, both for reading and for writing.
-const PRIVATE = /^(?:ai|v|alwaysOn)(?:\.|$)|(?:^|\.)(?:key|apiKey|api_key|token|secret|password|credential|base)(?:\.|$)/i;
+const PRIVATE = /^(?:ai|v|alwaysOn|dev|t)(?:\.|$)|(?:^|\.)(?:key|apiKey|api_key|token|secret|password|credential|base|account)(?:\.|$)/i;
 export const isPrivate = path => PRIVATE.test(String(path || ""));
 
 const hhmm = m => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
