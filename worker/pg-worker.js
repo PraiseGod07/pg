@@ -2,11 +2,12 @@
 // 1) Runs Workers AI for PG (needs a Workers AI binding named AI).
 // 2) Keeps PG's data so your laptop and phone stay the same (needs a D1 database binding named DB).
 // 3) Gives PG a natural voice (Deepgram Aura-2) and good hearing (Deepgram Nova-3), also through Workers AI.
-// 4) Only devices that enter your passcode can use it. The passcode is set the first time you connect
+// 4) Lets PG look things up on the internet for free (Bing and Google News search feeds, then reads the top pages).
+// 5) Only devices that enter your passcode can use it. The passcode is set the first time you connect
 //    and is stored only as a salted hash in your database. Wrong guesses are limited.
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, OPTIONS", "Access-Control-Allow-Headers": "authorization, content-type", "Access-Control-Max-Age": "86400" };
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-const VERSION = 2;
+const VERSION = 3;
 const VOICES = /^(amalthea|andromeda|apollo|arcas|aries|asteria|athena|atlas|aurora|callista|cora|cordelia|delia|draco|electra|harmonia|helena|hera|hermes|hyperion|iris|janus|juno|jupiter|luna|mars|minerva|neptune|odysseus|ophelia|orion|orpheus|pandora|phoebe|pluto|saturn|thalia|theia|vesta|zeus)$/;
 const out = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { ...CORS, "content-type": "application/json" } });
 const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
@@ -25,6 +26,38 @@ async function setup(db) {
 }
 const get = async (db, k) => (await db.prepare("SELECT v, t FROM kv WHERE k = ?").bind(k).first()) || null;
 const put = (db, k, v, t = Date.now()) => db.prepare("INSERT INTO kv (k, v, t) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, t = excluded.t").bind(k, v, t).run();
+
+// Internet lookups, free and keyless: Bing and Google News search feeds, then the text of the top pages.
+const UA = { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36", "accept-language": "en-US,en;q=0.9" };
+const ent = s => String(s || "").replace(/<!\[CDATA\[|\]\]>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;|&#x27;|&apos;/g, "'").replace(/&nbsp;/g, " ").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
+const tag = (x, t) => ent((x.match(new RegExp(`<${t}[^>]*>([\\s\\S]*?)</${t}>`)) || [])[1] || "").replace(/<[^>]+>/g, "").trim();
+async function rss(u, n) {
+  const r = await fetch(u, { headers: UA, redirect: "follow", cf: { cacheTtl: 300 } });
+  if (!r.ok) return [];
+  return ((await r.text()).match(/<item>[\s\S]*?<\/item>/g) || []).slice(0, n).map(x => ({ title: tag(x, "title"), url: tag(x, "link"), snippet: tag(x, "description").slice(0, 400), date: tag(x, "pubDate"), site: tag(x, "source") }));
+}
+async function pageText(u) {
+  try {
+    const r = await Promise.race([fetch(u, { headers: UA, redirect: "follow" }), new Promise((_, j) => setTimeout(() => j(new Error("slow")), 5000))]);
+    if (!r.ok || !/html|text/.test(r.headers.get("content-type") || "")) return "";
+    let h = (await r.text()).slice(0, 600000);
+    h = h.replace(/<(script|style|noscript|svg|header|footer|nav|form|aside)[\s\S]*?<\/\1>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ");
+    const main = (h.match(/<(?:article|main)[\s\S]*?<\/(?:article|main)>/i) || [h])[0];
+    return ent(main.replace(/<\/(?:p|div|li|h\d|tr|br)>/gi, "\n").replace(/<[^>]+>/g, " ")).replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim().slice(0, 2500);
+  } catch { return ""; }
+}
+async function web(q, news) {
+  const e = encodeURIComponent(q);
+  const [b, g] = await Promise.all([
+    rss(`https://www.bing.com/search?q=${e}&format=rss&setlang=en`, 8).catch(() => []),
+    news ? rss(`https://news.google.com/rss/search?q=${e}&hl=en-US&gl=US&ceid=US:en`, 8).catch(() => []) : Promise.resolve([])
+  ]);
+  const results = [...g.slice(0, 5), ...b].filter(x => x.title && x.url);
+  const read = results.filter(x => !/news\.google\.com|youtube\.com|facebook\.com|instagram\.com|tiktok\.com|x\.com|twitter\.com/.test(x.url)).slice(0, 2);
+  const texts = await Promise.all(read.map(x => pageText(x.url)));
+  read.forEach((x, i) => { if (texts[i]) x.text = texts[i]; });
+  return results.slice(0, 8);
+}
 
 export default {
   async fetch(req, env) {
@@ -91,6 +124,12 @@ export default {
       } catch (e) { return out({ error: { message: String(e?.message || e) } }, 502); }
     }
     // PG's ears: recorded speech (wav) in, words out
+    if (path === "/v1/web" && req.method === "POST") {
+      const b = await req.json().catch(() => ({}));
+      const q = String(b.q || "").trim().slice(0, 200);
+      if (!q) return out({ results: [] });
+      try { return out({ results: await web(q, !!b.news) }); } catch (e) { return out({ error: { message: String(e?.message || e) } }, 502); }
+    }
     if (path === "/v1/stt" && req.method === "POST") {
       if (!env.AI) return out({ error: { message: "PG Cloud needs a Workers AI binding named AI." } }, 500);
       const buf = await req.arrayBuffer(), type = req.headers.get("content-type") || "audio/wav";

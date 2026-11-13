@@ -16,6 +16,7 @@ import * as AI from "./ai.js";
 import * as AG from "./agent.js";
 import * as SY from "./sync.js";
 import { PG_CLOUD, PG_VERSION } from "./config.js";
+import * as WEB from "./web.js";
 import * as D from "./daily.js";
 import { cloudApi, VOICES as CLOUD_VOICES } from "./cloudvoice.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
@@ -116,6 +117,10 @@ function reply(text, opts = {}) {
     ui.turn.used = true;
     const ex = D.forgotten(ui.turn.before, ui.turn.dates);
     if (ex) { text += " " + ex; if (opts.html) opts.html += `<div style="margin-top:6px">${esc(ex)}</div>`; if (opts.speak) opts.speak += " " + ex; }
+  }
+  if (ui.sources) {
+    const src = ui.sources.slice(0, 3).map(x => { let h = ""; try { h = new URL(x.url).hostname.replace(/^www\./, ""); } catch {} return `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.site || h || x.title)}</a>`; }).filter((v, i, a) => a.indexOf(v) === i).join(" · ");
+    opts.html = (opts.html || esc(text)) + `<div class="srcs">${src}</div>`; ui.sources = null;
   }
   pushMsg("pg", text, opts.html);
   if (opts.view) { go(opts.view, opts.date); if (opts.spoken) ui.autoClose = isMobile(); }
@@ -754,9 +759,14 @@ function history(n = 10) {
   return S.chat.slice(-n - 1, -1).filter(m => m.text && !(m.who !== "me" && REFUSE.test(m.text))).map(m => ({ role: m.who === "me" ? "user" : "assistant", content: m.text }));
 }
 // A natural back-and-forth with PG. The AI can also ask the app to do things and remember facts.
-async function aiTalk(text, notes = []) {
+async function aiTalk(text, notes = [], web = null, live = false) {
   const sys = `You are PG, PraiseGod's personal assistant and partner, talking with him by voice like on a phone call. Call him "${addr()}" now and then, not every sentence.
-Speak naturally and warmly, like a smart friend who knows him well. You can talk about ANYTHING he brings up: faith and the Bible, life, feelings, relationships, school subjects, science, history, tech and coding, money, business, health, fitness, food, music, sports, news, ideas, jokes, advice or just casual chat. Give real, thoughtful answers with substance, share your view when he asks, and keep the conversation going like a real person would. Never refuse a normal topic or steer him back to the app. You have no live internet, so for things that change minute to minute (current weather, live scores, today's news, prices) say honestly that you can't see live info and share what you do know, without making numbers up. Your specialty is still his life and his PG app: his schedule, plans, gym, food, Bible, bass, school and goals, so when a topic touches those, use his data below.
+Speak naturally and warmly, like a smart friend who knows him well. You can talk about ANYTHING he brings up: faith and the Bible, life, feelings, relationships, school subjects, science, history, tech and coding, money, business, health, fitness, food, music, sports, news, ideas, jokes, advice or just casual chat. Give real, thoughtful answers with substance, share your view when he asks, and keep the conversation going like a real person would. Never refuse a normal topic or steer him back to the app. You have the internet. When answering needs current or exact facts you aren't sure of (news, weather, sports, prices, people, recent events, places, opening hours, anything "latest" or "today", or anything after 2024), don't guess: reply with "search" set to a short web search query and "say" empty, and you'll get live results back. Write the query like a good Google search with the key words only, and put in the year or date when he says "this year", "today" or "latest" (today is ${today()}). Never say you can't access the internet.${web ? `
+
+LIVE INTERNET RESULTS for his question, fetched just now (${new Date().toString().slice(0, 24)}):
+${web.text}
+
+Answer from these results. Be specific with the real facts and numbers, mention where they came from by name (like "according to Reuters"), and don't set "search" again. If the results don't answer it, say so honestly.` : ""} Your specialty is still his life and his PG app: his schedule, plans, gym, food, Bible, bass, school and goals, so when a topic touches those, use his data below.
 Keep replies easy to listen to: usually one to four spoken sentences. If he asks you to explain, teach or go deeper, you can talk longer, up to about eight sentences. No lists, no markdown, no emojis. Ask a short follow-up question when it helps. Use what you know about him below, and his own notes when they apply.
 He is a Christian student who plays bass, goes to the gym and wants high-protein, high-fiber food.
 
@@ -772,16 +782,23 @@ ${AG.snapshot()}
 
 Example: he says "add an exercise for my lower chest" -> {"say":"Sure, sir. Decline push-ups are great for the lower chest. Which gym day should they go on, and how many sets and reps?","ops":[],"do":[],"remember":[]}
 Then he says "push day, 3 sets of 10 to 15" -> {"say":"Done, sir. Decline push-ups are on push day, 3 sets of 10 to 15.","ops":[{"op":"add_exercise","day":"push","name":"Decline push-up","muscles":"Lower chest, triceps","cues":["Feet up on a bench","Lower your chest to the floor slowly","Push up hard and squeeze"],"search":"decline push up proper form","sets":3,"reps":"10-15","rest":60}]}
-Reply ONLY with JSON: {"say": "what you say out loud", "ops": [direct changes], "do": ["plain commands for the app"], "remember": ["new lasting facts about him"]}.
+Reply ONLY with JSON: {"say": "what you say out loud", "ops": [direct changes], "do": ["plain commands for the app"], "remember": ["new lasting facts about him"], "search": "web search query, only when you need the internet"}.
 ${AG.TOOLS}
 "do" is for when he clearly wants the app to act. Write each as a short command the app understands, for example "gym at 5pm", "bass lesson tomorrow at 6:30pm", "I have a history essay due Friday", "add eggs to my shopping list", "I don't eat pork", "is my plan realistic", "move gym to 7pm", "clear today". Leave it empty otherwise.
 For homework, assignments, essays, projects and tests, put his words in "do" (for example "I have an assignment called Code AI due Monday") and keep the name he gave. Never make up a due time or a timetable slot he didn't say.
 "remember" is for lasting facts he reveals about himself (likes, habits, goals, people, how he feels about things). Write them as "You ..." sentences. Leave it empty if nothing new.`;
-  const raw = await AI.call(sys, [...history(10), { role: "user", content: text }], { json: true, max: 900 });
+  const raw = await AI.call(sys, [...history(10), { role: "user", content: live ? text + "\n\n(PG note: this needs live facts from the internet, so reply with a \"search\" query.)" : text }], { json: true, max: 900 });
   const o = AI.parseJSON(raw) || { say: String(raw || "").trim() };
-  const r = { say: String(o.say || "").trim(), ops: Array.isArray(o.ops) ? o.ops : [], do: (Array.isArray(o.do) ? o.do : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (Array.isArray(o.remember) ? o.remember : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
+  // He needs the internet: look it up, then answer from the live results.
+  const q = !web && typeof o.search === "string" ? o.search.trim() : "";
+  if (q && !(Array.isArray(o.ops) && o.ops.length)) {
+    setStatus("Searching the internet…");
+    const found = await WEB.search(q).catch(e => (console.warn(e), null));
+    if (found) return aiTalk(text, notes, found);
+  }
+  const r = { sources: web?.sources || [], say: String(o.say || "").trim(), ops: Array.isArray(o.ops) ? o.ops : [], do: (Array.isArray(o.do) ? o.do : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (Array.isArray(o.remember) ? o.remember : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
   // He asked for a change but the AI only talked (or said it couldn't): ask again, just for the changes.
-  if (!r.ops.length && !r.do.length && (REFUSE.test(r.say) || (ACTION.test(text) && !/\?\s*$/.test(r.say)))) {
+  if (!web && !r.ops.length && !r.do.length && (REFUSE.test(r.say) || (ACTION.test(text) && !/\?\s*$/.test(r.say)))) {
     try {
       const raw2 = await AI.call(`You turn PraiseGod's request into changes to his PG app. You CAN change everything in the app below, so never refuse. Never assume: if the request is missing a detail the change needs (which day, start time, length, which item, amounts, sets and reps), make no change and put one short question asking for all the missing details in "say". Use the earlier conversation for details he already gave.
 APP DATA (today is ${today()}):
@@ -800,7 +817,11 @@ Reply ONLY with JSON: {"say": "one short spoken sentence saying what you did, ca
   return r;
 }
 async function aiChat(text, notes = []) {
-  const r = await aiTalk(text, notes);
+  // Weather and obviously live questions go to the internet first, so the answer is fast and real.
+  let web = null;
+  if (WEB.WEATHER_RE.test(text)) { setStatus("Checking the weather…"); web = await WEB.weather(text).catch(e => (console.warn(e), null)); }
+  const r = await aiTalk(text, notes, web, !web && WEB.LIVE_RE.test(text) && !ACTION.test(text));
+  ui.sources = r.sources?.length && r.say ? r.sources : null;
   return finishTalk(r);
 }
 // Run what the AI asked for quietly, then speak its reply.
@@ -1255,7 +1276,10 @@ function cloudSettings() {
       <div class="row"><button class="btn primary" type="submit">Connect</button></div>
     </form>${cloudSteps(!SY.url())}</div>`;
 }
-function naturalVoice() { return ""; }   // PG uses the free built-in phone voice
+function naturalVoice() {
+  if (!SY.on() || !CV.v || CV.v >= 3) return "";
+  return `<div class="update-box"><b>Update PG Cloud to give PG the full internet</b><p class="note" style="margin:4px 0 8px">Press Copy, open your pg-cloud Worker in Cloudflare, press Edit code, replace everything with the copy, then press Deploy. Until then PG uses Wikipedia and live weather only.</p><div class="row"><button class="btn primary sm" data-act="cloud-copy">Copy PG Cloud code</button><a class="btn sm" href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener">Open Cloudflare</a></div></div>`;
+}   // PG uses the free built-in phone voice
 function copyCloud() { navigator.clipboard?.writeText(AI.CLOUD_CODE).then(() => toast("PG Cloud code copied. Paste it in Cloudflare."), () => toast("Couldn't copy. Open worker/pg-worker.js in the PG GitHub repo.")); }
 async function connectCloud(address, code, done) {
   try {
@@ -1266,7 +1290,7 @@ async function connectCloud(address, code, done) {
     if (S.ai.provider === "cloudflare") connectAI();
   } catch (e) { done?.(e); }
 }
-function afterSync() { if (CV.v < 2) probeCloud(); C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); ui.date = today(); paintLock(); render(); }
+function afterSync() { if (CV.v < 3) probeCloud(); C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); ui.date = today(); paintLock(); render(); }
 function paintLock() {
   let el = $("#lock");
   if (!SY.locked()) { el?.remove(); document.body.classList.remove("locked"); return; }
