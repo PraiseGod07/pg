@@ -243,9 +243,9 @@ async function handle(text, spoken) {
     // ---- Memory ----
     case "note": {
       const inBible = context() === "bible" || ui.view === "bible";
-      const n = M.add(it.text, { folder: it.folder || (inBible ? "spiritual" : null), ctx: inBible && B.bible().plan ? bibleRef() || B.stats()?.book : "" });
+      const n = M.add(it.text, { folder: it.folder || (M.classify(it.text) === "about" ? "about" : inBible ? "spiritual" : null), ctx: inBible && B.bible().plan ? bibleRef() || B.stats()?.book : "" });
       if (ui.view === "notes" || ui.view === "bible") render();
-      return reply(`Saved to ${M.FOLDERS[n.folder].label}${n.refs.length ? `, linked to ${n.refs[0]}` : ""}.`);
+      return reply(n.folder === "about" ? pickOne([`Got it, I'll remember that about you.`, `Noted. I wrote that in your Learned things about PraiseGod folder.`]) : `Saved to ${M.FOLDERS[n.folder].label}${n.refs.length ? `, linked to ${n.refs[0]}` : ""}.`);
     }
     case "recall": return recall(it.q, spoken);
     case "ask": {
@@ -330,7 +330,7 @@ async function handle(text, spoken) {
       when = when || (ui.food && ui.food.focus) || "Dinner";
       const FAM = { fish: ["fish", "salmon", "tuna"], salmon: ["salmon"], shrimp: ["shrimp"], beef: ["beef"], chicken: ["chicken"], pork: ["pork"], eggs: ["eggs"] };
       const noList = /seafood/.test(t) ? ["fish", "salmon", "tuna", "shrimp"] : ingK ? (FAM[ingK] || [ingK]) : null;
-      if (!when && noList) when = (ms.find(m => m.r.ing.some(([k]) => noList.includes(k))) || {}).when;
+      if (noList) { const has = m => m && m.r.ing.some(([k]) => noList.includes(k)); const cur = ms.find(m => m.when === when); if (!has(cur)) when = (ms.find(has) || {}).when || when; }
       const f = { gym, quick: /quick|faster|easier|easy|less time|lazy|tired|simple/.test(t), veg: /no meat|vegetarian|without meat|meat ?free|plant/.test(t), no: noList };
       const sw = F.swap(when, f);
       ui.food = { focus: when, at: Date.now() }; ui.gymTab = "food";
@@ -401,11 +401,12 @@ async function handle(text, spoken) {
       return reply(`A few things. ${issues.map(ucf).join(". ")}. Want me to make it realistic?`, { view: "today", date: dd, spoken });
     }
     case "learned": {
-      const lines = [...SC.learnedLines(), ...F.learned()];
-      const n = M.notes().length;
-      if (n) lines.push(`you've saved ${n} note${n > 1 ? "s" : ""} with me`);
-      if (!lines.length) return reply(`Not much yet, ${addr()}. The more you tell me, like how long things really take and what food you like, the better I plan for you.`);
-      return reply(`So far I know ${lines.join(", ")}. I use all of it when I plan for you.`);
+      syncFacts();
+      const fs = M.facts();
+      if (!fs.length) return reply(`Not much yet, ${addr()}. As you use me, I write what I learn in your Learned things about PraiseGod folder, like how long things really take and what food you like.`);
+      const top = fs.slice(0, 4).map(n => n.text.replace(/\.$/, "")).map(lc);
+      ui.folder = "about";
+      return reply(`I've written ${fs.length} thing${fs.length > 1 ? "s" : ""} in your Learned things about PraiseGod folder. For example, ${top.slice(0, 3).join(". Also, ")}. I use all of it when I plan for you.`, { view: "notes", spoken });
     }
     default: return scheduleFrom(text, spoken);
   }
@@ -560,7 +561,26 @@ async function aiLearn(topic) {
 // ================= Views =================
 function go(view, date) { ui.view = view; if (date) ui.date = date; render(); $("#main").scrollTo?.(0, 0); if (isMobile()) window.scrollTo(0, 0); }
 const TITLES = { today: "Today", school: "School", bass: "Bass", bible: "Bible", gym: "Gym", notes: "Notes", settings: "Settings" };
+// Everything PG has learned, written into the "Learned things about PraiseGod" folder.
+function factList() {
+  const out = [...SC.facts(), ...F.facts()];
+  const bs = BS.bass();
+  if (BS.finished()) out.push({ k: "bass", t: "You finished all 26 bass lessons." });
+  else if (bs.idx > 0) out.push({ k: "bass", t: `You're on bass lesson ${BS.lessonNo()} of ${BS.CURRICULUM.length}, ${BS.lesson().t}.` });
+  const bb = B.bible();
+  if (bb.plan && !bb.plan.finished) out.push({ k: "bible", t: `You're reading ${B.bookName(bb.plan.book)}, up to ${bb.max} chapter${bb.max > 1 ? "s" : ""} a day.` });
+  const doneBooks = [...new Set([...(bb.history || []), bb.plan].filter(x => x && x.finished).map(x => B.bookName(x.book)))];
+  if (doneBooks.length) out.push({ k: "bible_done", t: `You've finished reading ${doneBooks.join(", ")}.` });
+  if (S.gym?.splitChosen && SPLITS[S.gym.split]) out.push({ k: "gym_split", t: `You train on a ${SPLITS[S.gym.split].label.toLowerCase()} split.` });
+  const gl = (S.gym?.log || []).filter(l => l.date >= addDays(today(), -28)).length;
+  if (gl >= 3) out.push({ k: "gym_freq", t: `You've trained about ${Math.round(gl / 4 * 10) / 10} times a week this past month.` });
+  if (S.profile.dayStart !== 420 || S.profile.dayEnd !== 1380) out.push({ k: "day", t: `Your day usually runs from ${fmtTime(S.profile.dayStart)} to ${fmtTime(S.profile.dayEnd)}.` });
+  const tr = LN.tracks(); if (tr.length) out.push({ k: "learning", t: `You're learning ${tr.map(t => t.topic).join(", ")}.` });
+  return out;
+}
+function syncFacts() { try { M.syncFacts(factList()); } catch (e) { console.warn(e); } }
 function render() {
+  syncFacts();
   if (!TITLES[ui.view]) ui.view = "today";
   $$("[data-view]").forEach(b => b.classList.toggle("on", b.dataset.view === ui.view));
   $("#view").innerHTML = { today: viewToday, school: viewSchool, bass: viewBass, bible: viewBible, gym: viewGym, notes: viewNotes, settings: viewSettings }[ui.view]();
@@ -763,7 +783,7 @@ function viewBible() {
   return h;
 }
 
-const noteCard = n => `<article class="note-card" style="--c:${M.FOLDERS[n.folder].color}"><p>${esc(n.text)}</p><div class="nmeta"><span>${esc(M.fmtDate(n.date))}</span><span class="tag cat">${esc(M.FOLDERS[n.folder].label)}</span>${n.refs.slice(0, 2).map(r => `<span class="tag">${esc(r)}</span>`).join("")}<button class="x" data-act="note-del" data-id="${n.id}" aria-label="Delete note"><svg><use href="#i-x"/></svg></button></div></article>`;
+const noteCard = n => `<article class="note-card" style="--c:${M.FOLDERS[n.folder].color}"><p>${esc(n.text)}</p><div class="nmeta"><span>${esc(M.fmtDate(n.date))}</span><span class="tag cat">${esc(M.FOLDERS[n.folder].short || M.FOLDERS[n.folder].label)}</span>${n.by === "pg" ? `<span class="tag">Written by PG</span>` : ""}${n.refs.slice(0, 2).map(r => `<span class="tag">${esc(r)}</span>`).join("")}<button class="x" data-act="note-del" data-id="${n.id}" aria-label="Delete note"><svg><use href="#i-x"/></svg></button></div></article>`;
 function viewNotes() {
   const c = M.counts(), all = M.notes();
   let list = ui.q ? M.search(ui.q, 50) : all;
@@ -776,9 +796,10 @@ function viewNotes() {
     h += trs.map(t => { const s = t.steps[t.idx]; const pc = Math.round(t.idx / t.steps.length * 100); return `<div class="card track"><div class="spread"><b>${esc(t.topic)}</b><span class="faint tnum">${Math.min(t.idx + 1, t.steps.length)}/${t.steps.length}</span></div>${bar(pc)}
       ${s ? `<div class="step-t">${esc(s.t)}</div><div class="step-d">${esc(s.d)}</div><div class="row">${s.links.map(l => `<a class="tag link" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)} <svg><use href="#i-ext"/></svg></a>`).join("")}<span class="grow"></span><button class="btn sm primary" data-act="learn-done" data-id="${t.id}">Complete</button><button class="x" data-act="learn-del" data-id="${t.id}" aria-label="Remove ${esc(t.topic)}"><svg><use href="#i-x"/></svg></button></div>` : `<div class="step-d">All steps done.</div>`}</div>`; }).join("");
   }
-  h += `<h2 class="sec"><span>Folders</span></h2><div class="split-chips">${[["all", "All", all.length], ...Object.entries(M.FOLDERS).map(([k, v]) => [k, v.label, c[k] || 0])].map(([k, l, n]) => `<button class="chip ${ui.folder === k ? "on" : ""}" data-act="folder" data-k="${k}">${esc(l)} <span class="faint">${n}</span></button>`).join("")}</div>
+  h += `<h2 class="sec"><span>Folders</span></h2><div class="split-chips">${[["all", "All", all.length], ...Object.entries(M.FOLDERS).map(([k, v]) => [k, v.short || v.label, c[k] || 0])].map(([k, l, n]) => `<button class="chip ${ui.folder === k ? "on" : ""}" data-act="folder" data-k="${k}">${esc(l)} <span class="faint">${n}</span></button>`).join("")}</div>
     <input class="input search" data-act="note-q" type="search" placeholder="Search" value="${esc(ui.q)}" aria-label="Search notes">`;
-  h += list.length ? list.map(noteCard).join("") : `<p class="note">${all.length ? "Nothing here." : "Nothing saved yet."}</p>`;
+  if (ui.folder === "about") h += `<h2 class="sec"><span>Learned things about PraiseGod</span></h2><p class="note">PG writes here by itself as it learns you. You can add your own, like: remember that I focus best after a walk.</p>`;
+  h += list.length ? list.map(noteCard).join("") : `<p class="note">${all.length ? "Nothing here yet." : "Nothing saved yet."}</p>`;
   return h;
 }
 
@@ -810,7 +831,7 @@ function viewSettings() {
   const tm = m => pad(Math.floor(m / 60)) + ":" + pad(m % 60);
   const sw = (act, on, label, dis) => `<label class="switch"><input type="checkbox" data-act="${act}" ${on ? "checked" : ""} ${dis ? "disabled" : ""} aria-label="${label}"><i></i></label>`;
   return `<h1 class="title">More</h1>
-  <div class="tiles"><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button></div>
+  <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} things PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button></div>
   <h2 class="sec"><span>Voice</span></h2><div class="card">
     <div class="set-row"><div class="lbl">Hands-free “Hi PG”${voice.supported ? "" : ` <span class="faint">· not supported here</span>`}</div>${sw("handsfree", S.voice.handsFree, "Hands-free wake word", !voice.supported)}</div>
     <div class="set-row"><div class="lbl">Speak replies</div>${sw("speak", S.voice.speak !== false, "Speak replies")}</div>
@@ -909,6 +930,7 @@ document.addEventListener("click", e => {
     case "bible-done": chime("ok"); completeCoach("bible"); break;
     case "note-del": M.remove(id); render(); break;
     case "folder": ui.folder = el.dataset.k; render(); break;
+    case "about-folder": ui.folder = "about"; ui.q = ""; go("notes"); break;
     case "learn-done": { const tr = LN.tracks().find(t => t.id === id); const r = LN.complete(tr); render(); if (r) { chime("ok"); toast(r.next ? `Next: ${r.next.t}` : `${tr.topic} complete.`); } break; }
     case "learn-del": confirmSheet("Remove this learning plan?", "", "Remove", () => { LN.remove(id); render(); }); break;
     case "song-del": S.band.songs = S.band.songs.filter(s => s.id !== id); save(); render(); break;
@@ -941,7 +963,7 @@ document.addEventListener("change", e => {
     case "address": S.profile.address = v.trim() || "sir"; save(); break;
     case "daystart": { const [h, m] = v.split(":").map(Number); S.profile.dayStart = h * 60 + m; save(); break; }
     case "dayend": { const [h, m] = v.split(":").map(Number); S.profile.dayEnd = h * 60 + m; save(); break; }
-    case "split": S.gym.split = v; S.gym.idx = 0; S.gym.override = null; save(); renameCoachBlocks(today()); break;
+    case "split": S.gym.split = v; S.gym.splitChosen = true; S.gym.idx = 0; S.gym.override = null; save(); renameCoachBlocks(today()); break;
     case "version": B.bible().version = v; save(); break;
     case "ai-provider": S.ai.provider = v; save(); render(); break;
     case "ai-key": S.ai.key = v.trim(); save(); break;

@@ -387,3 +387,15 @@ export function fix(d) {
 export const fmt = { when, dueText, time: fmtTime };
 
 function andList(a) { return a.length < 2 ? (a[0] || "") : a.slice(0, -1).join(", ") + " and " + a.at(-1); }
+
+export function facts() {
+  const out = [], r = ratio(), p = prefTime(), s = sch();
+  if (r.learned) out.push({ k: "pace", t: `Your assignments usually take about ${r.r} times what you first guess. I worked this out from ${r.n} finished assignments, so I plan with your real pace.` });
+  if (p) out.push({ k: "study_time", t: `You study best in the ${p}${s.pref ? ", you told me" : ", from when you actually finish your sessions"}.` });
+  if (s.cap !== 240) out.push({ k: "study_cap", t: `You want at most ${sayDur(s.cap)} of study a day.` });
+  if (s.window.wk !== 960) out.push({ k: "study_start", t: `On school days you like to start studying around ${fmtTime(s.window.wk)}.` });
+  if (s.window.we !== 600) out.push({ k: "study_start_we", t: `On weekends you like to start studying around ${fmtTime(s.window.we)}.` });
+  const kinds = {}; s.log.filter(l => l.actual && l.kind).forEach(l => { (kinds[l.kind] = kinds[l.kind] || []).push(l.actual); });
+  Object.entries(kinds).forEach(([k, xs]) => { if (xs.length >= 2) out.push({ k: "kind_" + k, t: `${k.charAt(0).toUpperCase() + k.slice(1)}s take you about ${sayDur(Math.round(xs.reduce((a, b) => a + b, 0) / xs.length / 15) * 15)} in total.` }); });
+  return out;
+}

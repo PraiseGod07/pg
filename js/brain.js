@@ -4,6 +4,7 @@ import { today, uid } from "./util.js";
 import { findBook, bookName, prep } from "./bible.js";
 
 export const FOLDERS = {
+  about:     { label: "Learned things about PraiseGod", short: "About PraiseGod", color: "#D9B36C" },
   spiritual: { label: "Spiritual", color: "#C9A45C" },
   bass:      { label: "Bass",      color: "#B592E0" },
   fitness:   { label: "Fitness",   color: "#E08A6D" },
@@ -16,10 +17,13 @@ const KW = {
   fitness: /\b(gym|workout|lift\w*|squat|bench|protein|muscle|cardio|run\w*|reps?|sets?|diet|sleep|stretch\w*)\b/,
   learning: /\b(study|studying|exam|class|course|solidworks|code|coding|math|physics|engineering|learn\w*|lecture|homework|cad)\b/
 };
+// Facts about you, e.g. "I prefer studying at night", "my favourite food is jollof"
+const ABOUT = /^(?:i(?:'m| am)? (?:like|love|enjoy|hate|dislike|prefer|usually|always|never|can't|cannot|don't|do not|am allergic|'m allergic|am a |'m a |am from|'m from|live|work|go to|study at|wake|sleep|get up|feel best|focus best|learn best)|my (?:favou?rite|birthday|goal|dream|name|school|major|course|church|teacher|coach|band|family|mum|mom|dad|brother|sister|friend|weakness|strength))\b/;
 export function classify(text, hint) {
   if (hint && FOLDERS[hint]) return hint;
   const t = text.toLowerCase();
   if (findBook(t) >= 0 && /\d/.test(t)) return "spiritual";
+  if (ABOUT.test(t) && !KW.spiritual.test(t)) return "about";
   for (const f of ["spiritual", "bass", "fitness", "learning"]) if (KW[f].test(t)) return f;
   return "life";
 }
@@ -40,7 +44,7 @@ export function add(text, opts = {}) {
   notes().unshift(n); save();
   return n;
 }
-export function remove(id) { S.notes = notes().filter(n => n.id !== id); save(); }
+export function remove(id) { const n = notes().find(x => x.id === id); if (n && n.key) hidden().push(n.key); S.notes = notes().filter(n => n.id !== id); save(); }
 export function update(id, text) { const n = notes().find(x => x.id === id); if (n) { n.text = text; n.folder = classify(text); n.refs = refsIn(text).length ? refsIn(text) : n.refs; save(); } }
 
 // ---- Retrieval ----
@@ -72,3 +76,24 @@ export function answer(q, found) {
   return t;
 }
 export function counts() { const c = {}; notes().forEach(n => { c[n.folder] = (c[n.folder] || 0) + 1; }); return c; }
+
+// ---- Learned things about PraiseGod: PG writes these itself ----
+export const facts = () => notes().filter(n => n.folder === "about");
+function hidden() { S.factsHidden = S.factsHidden || []; return S.factsHidden; }
+// Write or update one thing PG learned. Same key = same fact, so it updates instead of repeating.
+export function learnFact(key, text) {
+  if (hidden().includes(key)) return null;
+  let n = notes().find(x => x.key === key);
+  if (n) { if (n.text === text) return n; n.text = text; n.date = today(); n.ts = Date.now(); n.updated = true; }
+  else { n = { id: uid(), key, text, folder: "about", refs: [], ctx: "", by: "pg", date: today(), ts: Date.now() }; notes().unshift(n); }
+  save(); return n;
+}
+// Keep PG's facts in step with what it currently knows. Your own notes are never touched.
+export function syncFacts(list) {
+  const keys = new Set(list.map(f => f.k));
+  let changed = false;
+  list.forEach(f => { const before = notes().find(x => x.key === f.k)?.text; learnFact(f.k, f.t); if (before !== f.t) changed = true; });
+  const stale = notes().filter(n => n.by === "pg" && n.key && !keys.has(n.key));
+  if (stale.length) { S.notes = notes().filter(n => !stale.includes(n)); save(); changed = true; }
+  return changed;
+}

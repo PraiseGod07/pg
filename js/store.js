@@ -53,6 +53,8 @@ function merge(base, o) {
 }
 
 export function load() {
+  // Ask the browser to keep PG's data even when the device is low on space.
+  try { navigator.storage?.persist?.(); } catch {}
   const raw = ls.get(KEY);
   if (raw) { try { S = merge(DEFAULTS(), JSON.parse(raw)); } catch { S = DEFAULTS(); } }
   

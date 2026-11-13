@@ -346,3 +346,12 @@ export function whereBrief(q) {
   return `${it.n}: ${st.label}. ${st.tip}${it.zh ? ` (${it.zh})` : ""}`;
 }
 export function postLine(date = today()) { const r = todayMeals(date, true).find(m => m.when === "After the gym").r; return `After training, have ${lc(r.t)} for about ${r.p} grams of protein.`; }
+
+export function facts() {
+  const p = prefs(), out = [], nm = k => (ITEMS[k]?.n || k).toLowerCase().replace(/ \(.+\)|, .+$/, "").replace(/^(?:lean|fresh|peeled|plain|firm|frozen(?: shelled)?) /, "");
+  Object.entries(p.yes).filter(([, n]) => n >= 1).forEach(([k]) => { const r = recipe(k); if (r && !hasIng(r, p.avoid) && (p.no[k] || 0) < 2) out.push({ k: "like_" + k, t: `You enjoy ${lc(r.t)}.` }); });
+  Object.entries(p.no).filter(([, n]) => n >= 2).forEach(([k]) => { const r = recipe(k); if (r) out.push({ k: "skip_" + k, t: `You usually turn down ${lc(r.t)}, so I stopped suggesting it.` }); });
+  p.avoid.forEach(k => out.push({ k: "avoid_" + k, t: `You don't eat ${nm(k)}.` }));
+  if (food().kg) out.push({ k: "weight", t: `You weigh about ${kg()} kg, so your protein target is ${target()} grams a day.` });
+  return out;
+}
