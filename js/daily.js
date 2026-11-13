@@ -3,7 +3,7 @@
 import { S, save, sortedBlocks } from "./store.js";
 import { today, addDays, nowMin, uid, sayTime, sayDur, fmtDay } from "./util.js";
 import { VERSES } from "./verses.js";
-import { CANTO } from "./canto.js";
+import { CANTO, sayLike } from "./canto.js";
 import * as BS from "./bass.js";
 import * as B from "./bible.js";
 import * as SC from "./school.js";
@@ -115,11 +115,11 @@ export function teachTwo() {
   while (pick.length < 2 && pool.length) pick.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
   pick.forEach(i => canto().learned.push({ i, date: today() }));
   save();
-  return pick.map(i => ({ i, zh: CANTO[i][0], jp: CANTO[i][1], en: CANTO[i][2] }));
+  return pick.map(i => ({ i, zh: CANTO[i][0], jp: sayLike(CANTO[i][1]), en: CANTO[i][2] }));
 }
 export function learned() {
   const seen = new Set(), out = [];
-  for (const x of [...canto().learned].reverse()) { if (seen.has(x.i) || !CANTO[x.i]) continue; seen.add(x.i); out.push({ i: x.i, date: x.date, zh: CANTO[x.i][0], jp: CANTO[x.i][1], en: CANTO[x.i][2] }); }
+  for (const x of [...canto().learned].reverse()) { if (seen.has(x.i) || !CANTO[x.i]) continue; seen.add(x.i); out.push({ i: x.i, date: x.date, zh: CANTO[x.i][0], jp: sayLike(CANTO[x.i][1]), en: CANTO[x.i][2] }); }
   return out;
 }
 export const CANTO_N = CANTO.length;

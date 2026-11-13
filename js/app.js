@@ -18,6 +18,7 @@ import * as SY from "./sync.js";
 import { PG_CLOUD, PG_VERSION } from "./config.js";
 import * as WEB from "./web.js";
 import * as HR from "./hearing.js";
+import { sayLike } from "./canto.js";
 import * as D from "./daily.js";
 import { cloudApi, VOICES as CLOUD_VOICES } from "./cloudvoice.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
@@ -186,8 +187,8 @@ function endCall() {
   }
   if (h >= 17 || h < 4) {
     const two = D.teachTwo(), bye = h >= 21 || h < 4 ? "Good night" : "Have a good evening";
-    const text = `Before you go, ${addr()}, here are two Cantonese sentences for tonight. 1. ${two[0].zh} (${two[0].jp}) means "${two[0].en}" 2. ${two[1].zh} (${two[1].jp}) means "${two[1].en}" I saved them under Cantonese in More. ${bye}.`;
-    const html = `<div>Before you go, ${esc(addr())}, here are two Cantonese sentences for tonight.</div><ol class="canto-list">${two.map(c => `<li><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">${esc(c.jp)}</span><span>${esc(c.en)}</span></li>`).join("")}</ol><div>I saved them under Cantonese in More. ${bye}.</div>`;
+    const text = `Before you go, ${addr()}, here are two Cantonese sentences for tonight. 1. ${two[0].zh} (say it: ${two[0].jp}) means "${two[0].en}" 2. ${two[1].zh} (say it: ${two[1].jp}) means "${two[1].en}" I saved them under Cantonese in More. ${bye}.`;
+    const html = `<div>Before you go, ${esc(addr())}, here are two Cantonese sentences for tonight.</div><ol class="canto-list">${two.map(c => `<li><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">Say it: ${esc(c.jp)}</span><span>${esc(c.en)}</span></li>`).join("")}</ol><div>I saved them under Cantonese in More. ${bye}.</div>`;
     const sp = `Before you go, ${addr()}, here are two Cantonese sentences for tonight. The first one. ${zhSay(two[0].zh)} It means: ${two[0].en.replace(/\(.*?\)/g, "")} Once more. ${zhSay(two[0].zh)} The second one. ${zhSay(two[1].zh)} It means: ${two[1].en.replace(/\(.*?\)/g, "")} Once more. ${zhSay(two[1].zh)} I saved them for you under Cantonese. ${bye}, ${addr()}.`;
     return reply(text, { ...hang, html, speak: speakable(sp, true) });
   }
@@ -222,9 +223,9 @@ async function daily(text, bare, spoken) {
   }
   if (/\bteach me (?:some |two |2 |a few |more )?(?:cantonese|canto)\b|\bcantonese (?:lesson|sentences?) (?:now|please)\b/.test(b)) {
     const two = D.teachTwo();
-    const text = `Here are two. 1. ${two[0].zh} (${two[0].jp}) means "${two[0].en}" 2. ${two[1].zh} (${two[1].jp}) means "${two[1].en}" I saved them under Cantonese.`;
+    const text = `Here are two. 1. ${two[0].zh} (say it: ${two[0].jp}) means "${two[0].en}" 2. ${two[1].zh} (say it: ${two[1].jp}) means "${two[1].en}" I saved them under Cantonese.`;
     const sp = `Here are two. ${zhSay(two[0].zh)} It means: ${two[0].en.replace(/\(.*?\)/g, "")} ${zhSay(two[1].zh)} It means: ${two[1].en.replace(/\(.*?\)/g, "")} I saved them under Cantonese.`;
-    return reply(text, { speak: speakable(sp, true), html: `<ol class="canto-list">${two.map(c => `<li><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">${esc(c.jp)}</span><span>${esc(c.en)}</span></li>`).join("")}</ol>` }), true;
+    return reply(text, { speak: speakable(sp, true), html: `<ol class="canto-list">${two.map(c => `<li><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">Say it: ${esc(c.jp)}</span><span>${esc(c.en)}</span></li>`).join("")}</ol>` }), true;
   }
   if (/\b(?:what|which) cantonese (?:have i|did i) (?:learn|learned|learnt)|\b(?:show|open|read) (?:me )?my cantonese\b|\bmy cantonese (?:sentences|words|list)\b/.test(b)) {
     const l = D.learned();
@@ -237,7 +238,7 @@ async function daily(text, bare, spoken) {
 function openCanto() {
   const l = D.learned(), sh = $("#sheet");
   sh.innerHTML = `<h3>Cantonese</h3><p class="note" style="margin:0 0 8px">${l.length} of ${D.CANTO_N} learned. Tap a sentence to hear it.</p>
-    ${l.length ? `<ol class="canto-list">${l.map(c => `<li><button class="canto-play" data-act="canto-play" data-zh="${esc(c.zh)}" aria-label="Play ${esc(c.en)}"><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">${esc(c.jp)}</span><span>${esc(c.en)}</span></button></li>`).join("")}</ol>` : `<p class="note">Nothing yet. In the evening, say end the call and PG teaches you two sentences.</p>`}
+    ${l.length ? `<ol class="canto-list">${l.map(c => `<li><button class="canto-play" data-act="canto-play" data-zh="${esc(c.zh)}" aria-label="Play ${esc(c.en)}"><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">Say it: ${esc(c.jp)}</span><span>${esc(c.en)}</span></button></li>`).join("")}</ol>` : `<p class="note">Nothing yet. In the evening, say end the call and PG teaches you two sentences.</p>`}
     <div class="sheet-actions"><button class="btn" data-act="canto-more">Teach me two now</button><button class="btn ghost" data-act="close-sheet">Close</button></div>`;
   if (!sh.open) sh.showModal();
 }
@@ -767,7 +768,7 @@ function history(n = 10) {
 async function aiTalk(text, notes = [], web = null, live = false) {
   const sys = `You are PG, PraiseGod's personal assistant and partner, talking with him by voice like on a phone call. Call him "${addr()}" now and then, not every sentence.
 Speak naturally and warmly, like a smart friend who knows him well. You can talk about ANYTHING he brings up: faith and the Bible, life, feelings, relationships, school subjects, science, history, tech and coding, money, business, health, fitness, food, music, sports, news, ideas, jokes, advice or just casual chat. Give real, thoughtful answers with substance, share your view when he asks, and keep the conversation going like a real person would. Never refuse a normal topic or steer him back to the app. For business (starting or growing a business, marketing, sales, pricing, money, investing, companies, side hustles, creator products), answer like a sharp business mentor with clear, practical steps; search the internet for real company facts, numbers, prices and market news.
-His words come from voice recognition or quick typing, so some words may be misheard or misspelled, like "corner" when he said "call", "jim" for "gym", "base" for "bass", or a word that sounds alike but makes no sense in the sentence. Work out what he really meant from the whole sentence and the conversation so far, act on that, and don't mention the mistake. When you changed any word, put his corrected sentence in "heard". You have the internet. When answering needs current or exact facts you aren't sure of (news, weather, sports, prices, people, recent events, places, opening hours, anything "latest" or "today", or anything after 2024), don't guess: reply with "search" set to a short web search query and "say" empty, and you'll get live results back. Write the query like a good Google search with the key words only, and put in the year or date when he says "this year", "today" or "latest" (today is ${today()}). Never say you can't access the internet. When you search, leave "say" empty: never say "let me check" or "one moment", because you get the results straight away.
+His words come from voice recognition or quick typing, so some words may be misheard or misspelled, like "corner" when he said "call", "jim" for "gym", "base" for "bass", or a word that sounds alike but makes no sense in the sentence. Work out what he really meant from the whole sentence and the conversation so far, act on that, and don't mention the mistake. When you changed any word, put his corrected sentence in "heard". When you write Cantonese, give the Chinese characters, then an easy English-style "say it" spelling with NO tone numbers (for example 你好 "say it: nay hoh" means hello), then the meaning. Never use Jyutping numbers like nei5. You have the internet. When answering needs current or exact facts you aren't sure of (news, weather, sports, prices, people, recent events, places, opening hours, anything "latest" or "today", or anything after 2024), don't guess: reply with "search" set to a short web search query and "say" empty, and you'll get live results back. Write the query like a good Google search with the key words only, and put in the year or date when he says "this year", "today" or "latest" (today is ${today()}). Never say you can't access the internet. When you search, leave "say" empty: never say "let me check" or "one moment", because you get the results straight away.
 Never promise to do something later ("I'll add", "I'll look"). Either do it now with "ops"/"do" in this same reply, or ask the question you need answered.
 Every exercise you add with add_exercise automatically gets a "Watch on YouTube" form-video button in his Gym tab, made from its "search" field (for example "incline dumbbell press proper form"). So when he asks for videos, add the exercise with a good "search", and tell him the video button is on the exercise in the Gym tab. Exercises already in his plan already have that video button.${web ? `
 
@@ -819,6 +820,8 @@ For homework, assignments, essays, projects and tests, put his words in "do" (fo
     if (!say || /^search\b|let me (?:check|look|search|find)|i(?:'ll| will) (?:check|look|search)|one moment|hold on/i.test(say) && say.length < 90) say = web.spoken || `Here's what I found, ${addr()}: ${web.sources.slice(0, 2).map(x => x.title).join("; ")}.`;
     o.say = say; o.search = "";
   }
+  // Cantonese from the AI: swap any Jyutping numbers (nei5 hou2) for the easy spelling (nay hoh).
+  if (typeof o.say === "string" && /[\u4e00-\u9fff]/.test(o.say)) o.say = o.say.replace(/\b(?:[a-z]{1,6}[1-6](?:\s+|(?=[^a-z0-9])|$)){2,}/gi, m => sayLike(m.trimEnd()) + (/\s$/.test(m) ? " " : ""));
   const r = { sources: web?.sources || [], say: String(o.say || "").trim(), ops: Array.isArray(o.ops) ? o.ops : [], do: (Array.isArray(o.do) ? o.do : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (Array.isArray(o.remember) ? o.remember : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
   // He asked for a change but the AI only talked (or said it couldn't): ask again, just for the changes.
   if (!web && !r.ops.length && !r.do.length && (REFUSE.test(r.say) || (ACTION.test(text) && !/\?\s*$/.test(r.say)))) {
