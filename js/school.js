@@ -74,7 +74,7 @@ function ymdNext(base, mi, dd) {
   if (new Date(y, mi, dd) < new Date(b.getFullYear(), b.getMonth(), b.getDate())) y++;
   return y + "-" + String(mi + 1).padStart(2, "0") + "-" + String(dd).padStart(2, "0");
 }
-function timeIn(s) {
+export function timeIn(s) {
   if (/\bmidnight\b/.test(s)) return 1439;
   if (/\bnoon|midday\b/.test(s)) return 720;
   if (/\bend of (?:the )?day\b/.test(s)) return 1439;
@@ -107,8 +107,18 @@ function titleOf(seg, kind, subj) {
   return cap((pre && pre.split(" ").length <= 3 ? pre + " " : "") + noun);
 }
 
+// Take a clause from what he said, with his own capitals, as the task's name
+function nameFrom(raw, seg) {
+  let x = seg.replace(/^(?:it'?s|it is|this is|that is|called|named|titled|the topic is|topic|about|on|which is|that's)\s+/, "").replace(/\s+(?:which|that|and it|it)(?:'s| is)?$/, "").trim();
+  if (x.split(" ").length < 2 && x.length < 4) return "";
+  const i = String(raw).toLowerCase().replace(/[“”"]/g, "").replace(/\s+/g, " ").indexOf(x);
+  const orig = i >= 0 ? String(raw).replace(/[“”"]/g, "").replace(/\s+/g, " ").slice(i, i + x.length) : x;
+  return orig.charAt(0).toUpperCase() + orig.slice(1);
+}
 // "I have a history essay due Friday at 5pm, about 3 hours, and a math test next Tuesday"
 export function parse(raw, base = today()) {
+  // "an assignment called Code AI is a tool for language learning due Monday"
+  const called = String(raw).replace(/[“”"]/g, "").match(/\b(?:called|named|titled)\s+(.+?)(?=,|\s+(?:which |that |and )?(?:is |it's |it is )?(?:due|by|on (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|next|this|tomorrow)\b|[.!?]?$)/i);
   const t = String(raw).toLowerCase().replace(/[“”"]/g, "").replace(/\s+/g, " ").trim();
   const segs = t.split(/\s*(?:[;.!?]\s+|,\s*(?:and\s+|plus\s+|also\s+|then\s+)?|\s+and\s+(?=(?:a|an|my|the|another|also|then|i have|i've got|there's)\b)|\s+(?:also|plus|then)\s+)/).filter(Boolean);
   const out = [];
@@ -118,7 +128,14 @@ export function parse(raw, base = today()) {
     if (isDur && out.length) { out.at(-1).est = est; continue; }
     if (k || (subj && date)) {
       const kind = k ? k.k : "assignment";
-      out.push({ title: titleOf(seg, kind, subj), kind, due: date, dueMin: tm, est: est != null && !(est >= 600 && kind !== "project") ? est : null });
+      const nm = !out.length && called && called[1].trim().length > 2 ? called[1].trim() : "";
+      out.push({ title: nm ? (nm.charAt(0).toUpperCase() + nm.slice(1)).slice(0, 60) : titleOf(seg, kind, subj), named: !!nm, kind, due: date, dueMin: tm, est: est != null && !(est >= 600 && kind !== "project") ? est : null });
+      continue;
+    }
+    // "an assignment, Code AI is a tool for language learning, due Monday": the plain clause is its name
+    if (!k && !date && tm == null && est == null && out.length && !out.at(-1).named) {
+      const name = nameFrom(raw, seg);
+      if (name) { const o = out.at(-1); o.title = name.length > 60 ? name.slice(0, 57).replace(/\s+\S*$/, "") + "…" : name; o.named = true; }
       continue;
     }
     if ((date || tm != null) && out.length) { const o = out.at(-1); if (!o.due && date) o.due = date; if (o.dueMin == null && tm != null) o.dueMin = tm; if (est != null && o.est == null) o.est = est; }
@@ -275,7 +292,7 @@ export function whyTime(t) {
   if (t.guess) return r.learned
     ? `You usually take ${r.r} times your guess, so I planned ${sayDur(t.plan)} instead of ${sayDur(t.guess)}.`
     : `You said ${sayDur(t.guess)}. Most people take longer than they think, so I planned ${sayDur(t.plan)}.`;
-  return `A ${t.kind} usually takes about ${sayDur(t.plan)}${kindAdj(t.kind) !== 1 ? " for you" : ""}.`;
+  return `${/^[aeiou]/.test(t.kind) ? "An" : "A"} ${t.kind} usually takes about ${sayDur(t.plan)}${kindAdj(t.kind) !== 1 ? " for you" : ""}.`;
 }
 export function addedBrief(added, res) {
   const head = added.length === 1 ? `Got it. ${added[0].title}, due ${dueText(added[0])}.` : `Got it, ${added.length} assignments. ${andList(added.map(t => `${t.title} due ${when(t.due)}`))}.`;

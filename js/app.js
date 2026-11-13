@@ -176,6 +176,14 @@ async function followUp(p, bare, text, spoken) {
     if (got && got.due) { t.due = got.due; if (got.dueMin != null) t.dueMin = got.dueMin; if (got.est) { t.guess = got.est; } save(); const res = SC.plan(); return reply(`Got it, due ${SC.fmt.dueText(t)}. ${SC.planBrief(res)}`, { view: "school", spoken }), true; }
     return false;
   }
+  if (p.type === "duetime") {
+    const t = SC.tasks().find(x => x.id === p.tid); if (!t) return false;
+    if (SC.looksLikeSchool(text) || bare.split(" ").length > 7) return false;   // a new request, not an answer
+    const min = SC.timeIn(bare) ?? parseClock(bare);
+    if (min != null && min >= 0) { t.dueMin = min; save(); const res = SC.plan(); return reply(`Okay, due ${SC.fmt.dueText(t)}. ${SC.planBrief(res)}`, { view: "school", spoken }), true; }
+    if (NO.test(bare) || /\b(?:no (?:set )?time|don'?t know|not sure|any ?time|end of (?:the )?day|whenever)\b/.test(bare)) { const res = SC.plan(); return reply(`No problem. I'll have it done before then. ${SC.planBrief(res)}`, { view: "school", spoken }), true; }
+    return false;
+  }
   if (p.type === "more") {
     if (NO.test(bare) || /^(?:no )?(?:that's (?:it|all)|nothing(?: else)?|i'm good|all good)/.test(bare)) return reply(`Okay, ${addr()}. Talk soon.`, { then: () => voice.call ? voice.hangUp() : voice.afterReply() }), true;
     if (YES.test(bare)) return reply("Go ahead."), true;
@@ -205,7 +213,7 @@ async function handle(text, spoken) {
   // Add / delete / replace things on the timetable, in plain words
   if (!["greet", "hush", "dismiss"].includes(it.type) && await localEdit(text, spoken)) return;
   // With an AI key, PG thinks with the AI first so it can handle anything; the built-in brain is the backup.
-  if (AI.on() && !ui.quiet && !["greet", "hush", "dismiss", "clear"].includes(it.type)) {
+  if (AI.on() && !ui.quiet && !["greet", "hush", "dismiss", "clear", "school_add"].includes(it.type)) {
     setStatus("Thinking…");
     try { const ans = await aiChat(text, M.search(text, 4)); if (ans) return reply(ans, { spoken }); return voice.afterReply(); }
     catch (e) { console.warn(e); ui.aiFail = AI.friendlyError(e); }
@@ -393,6 +401,9 @@ async function handle(text, spoken) {
       const res = SC.plan();
       const nodate = added.find(t => !t.due);
       if (nodate) ui.pending = { type: "due", tid: nodate.id };
+      // Due day but no time: ask instead of guessing
+      const notime = !nodate && added.length === 1 && added[0].due && added[0].dueMin == null && added[0].kind !== "exam" && added[0].kind !== "quiz" ? added[0] : null;
+      if (notime) { ui.pending = { type: "duetime", tid: notime.id }; render(); return reply(`Got it. ${notime.title}, due ${SC.fmt.dueText(notime)}. ${SC.planBrief(res)} What time is it due? If there's no set time, just say no.`, { view: "school", spoken }); }
       return schoolReply(res, added.length === 1 ? `Got it. ${added[0].title}${added[0].due ? `, due ${SC.fmt.dueText(added[0])}` : ""}. ${SC.whyTime(added[0])}` : `Got it, ${added.length} assignments: your ${andWords(added.map(t => lc(t.title)))}.${added.some(t => t.guess) ? (SC.ratio().learned ? ` I planned your guesses at ${SC.ratio().r} times, your real pace.` : " I added 50% to your time guesses, since most people underestimate.") : ""}`, spoken);
     }
     case "school_plan": return schoolReply(SC.plan(), "", spoken);
@@ -574,8 +585,11 @@ Today's suggested meals: ${meals || "none"}.
 Learned things about PraiseGod:
 ${facts}${mem ? `\nHis saved notes that may apply:\n${mem}` : ""}`;
 }
+const REFUSE = /\b(?:can(?:'|’|no)t|cannot|unable to|not able to|don't have (?:the )?(?:ability|access|permission)|no way to|outside (?:of )?my|beyond my)\b/i;
+const ACTION = /\b(?:add|put|include|insert|create|make|schedule|book|plan|set|change|edit|update|rename|move|shift|push back|swap|replace|switch|remove|delete|drop|cancel|clear|take (?:out|off|away)|get rid of|increase|decrease|raise|lower|turn (?:on|off)|mark|log|save|write down|note)\b/i;
 function history(n = 10) {
-  return S.chat.slice(-n - 1, -1).filter(m => m.text).map(m => ({ role: m.who === "me" ? "user" : "assistant", content: m.text }));
+  // Leave out old refusals so the AI doesn't copy them
+  return S.chat.slice(-n - 1, -1).filter(m => m.text && !(m.who !== "me" && REFUSE.test(m.text))).map(m => ({ role: m.who === "me" ? "user" : "assistant", content: m.text }));
 }
 // A natural back-and-forth with PG. The AI can also ask the app to do things and remember facts.
 async function aiTalk(text, notes = []) {
@@ -585,18 +599,37 @@ He is a Christian student who plays bass, goes to the gym and wants high-protein
 
 ${aiContext(notes)}
 
-You can change anything in his app (timetable, gym exercises, Bible plan, bass, songs, shopping list, notes, food, school, settings) except API keys and private settings. When he asks for a change, do it with "ops" and say briefly what you did. If he asks for something you need to look up (like an exercise for a muscle), choose a well-known, safe option from your knowledge and add it. If a request is unclear, ask one short question instead of guessing.
+You are fully in control of his app and you CAN change anything in it: timetable, gym exercises, Bible plan, bass, songs, shopping list, notes, food, school and settings. The only thing you can't touch is API keys and private settings. When he asks for any change, always do it with "ops" (or "do") in this same reply and say briefly what you did. Never tell him you can't change the app or that he should do it himself. If he asks for something you need to look up (like an exercise for a muscle), choose a well-known, safe option from your knowledge and add it. If a request is unclear, ask one short question instead of guessing.
 
 APP DATA (today is ${today()}):
 ${AG.snapshot()}
 
+Example: he says "add an exercise for my lower chest" -> {"say":"Done, sir. I put decline push-ups on push day.","ops":[{"op":"add_exercise","day":"push","name":"Decline push-up","muscles":"Lower chest, triceps","cues":["Feet up on a bench","Lower your chest to the floor slowly","Push up hard and squeeze"],"search":"decline push up proper form","sets":3,"reps":"10-15","rest":60}]}
 Reply ONLY with JSON: {"say": "what you say out loud", "ops": [direct changes], "do": ["plain commands for the app"], "remember": ["new lasting facts about him"]}.
 ${AG.TOOLS}
 "do" is for when he clearly wants the app to act. Write each as a short command the app understands, for example "gym at 5pm", "bass lesson tomorrow at 6:30pm", "I have a history essay due Friday", "add eggs to my shopping list", "I don't eat pork", "is my plan realistic", "move gym to 7pm", "clear today". Leave it empty otherwise.
+For homework, assignments, essays, projects and tests, put his words in "do" (for example "I have an assignment called Code AI due Monday") and keep the name he gave. Never make up a due time or a timetable slot he didn't say.
 "remember" is for lasting facts he reveals about himself (likes, habits, goals, people, how he feels about things). Write them as "You ..." sentences. Leave it empty if nothing new.`;
   const raw = await AI.call(sys, [...history(10), { role: "user", content: text }], { json: true, max: 900 });
   const o = AI.parseJSON(raw) || { say: String(raw || "").trim() };
-  return { say: String(o.say || "").trim(), ops: Array.isArray(o.ops) ? o.ops : [], do: (o.do || []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (o.remember || []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
+  const r = { say: String(o.say || "").trim(), ops: Array.isArray(o.ops) ? o.ops : [], do: (Array.isArray(o.do) ? o.do : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (Array.isArray(o.remember) ? o.remember : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
+  // He asked for a change but the AI only talked (or said it couldn't): ask again, just for the changes.
+  if (!r.ops.length && !r.do.length && (REFUSE.test(r.say) || (ACTION.test(text) && !/\?\s*$/.test(r.say)))) {
+    try {
+      const raw2 = await AI.call(`You turn PraiseGod's request into changes to his PG app. You CAN change everything in the app below, so never refuse. If he asks for something you need to know (like an exercise for a muscle, a recipe or a song), pick a well-known, safe option yourself.
+APP DATA (today is ${today()}):
+${AG.snapshot()}
+
+${AG.TOOLS}
+"do" is a list of short plain commands for the app, like "gym at 5pm" or "add eggs to my shopping list".
+Reply ONLY with JSON: {"say": "one short spoken sentence saying what you did, calling him ${addr()}", "ops": [...], "do": [...]}. If it is not a change request at all, reply {"say": "", "ops": [], "do": []}.`, [{ role: "user", content: text }], { json: true, max: 900 });
+      const o2 = AI.parseJSON(raw2) || {};
+      const ops = Array.isArray(o2.ops) ? o2.ops : [], dos = (Array.isArray(o2.do) ? o2.do : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3);
+      if (ops.length || dos.length) Object.assign(r, { ops, do: dos, say: String(o2.say || "").trim() || (REFUSE.test(r.say) ? "" : r.say) });
+    } catch (e) { console.warn(e); }
+  }
+  if (!r.ops.length && !r.do.length && REFUSE.test(r.say) && ACTION.test(text)) r.say = `I didn't catch exactly what to change, ${addr()}. Say it once more, like "add cable crossovers to push day".`;
+  return r;
 }
 async function aiChat(text, notes = []) {
   const r = await aiTalk(text, notes);
@@ -682,6 +715,8 @@ function splitClauses(text) {
 }
 function exerciseCmd(c) {
   const add = c.match(/^(?:(?:can|could) you |please )?(?:add|put|include|throw in) (?:in )?(?:a |an |the |some )?(.+?) (?:to|into|in|on) (?:my |the )?(?:(push|pull|legs?|upper|lower|full body) )?(?:day|workout|routine|exercises?|exercise list|gym(?: list| plan| day| routine)?)\b/);
+  // Vague asks ("an exercise for my chest") need the AI to choose one
+  if (add && /^(?:new |another |one more |good |better )?(?:exercises?|workouts?|moves?|something|one|it|that|this)\b|\bfor (?:my |the )?/i.test(add[1])) return AI.on() ? "@ai" : "Tell me which exercise to add, like cable crossovers to push day. Or connect an AI in Settings and I'll pick one for you.";
   if (add) { const r = C.addExercise({ name: add[1].replace(/\s+exercise$/, "") }, add[2] || ""); return `Added ${EXERCISES[r.key].name} to ${r.day?.name || "your workout"}.`; }
   const rm = c.match(/^(?:(?:can|could) you |please )?(?:remove|delete|drop|take out|get rid of|skip) (?:the |my )?(.+?) (?:from|off|out of) (?:my |the )?(?:(push|pull|legs?|upper|lower|full body) )?(?:day|workout|routine|exercises?|exercise list|gym(?: list| plan| day| routine)?)\b/);
   if (rm) { const r = C.removeExercise(rm[1], rm[2] || ""); return r ? `Removed ${EXERCISES[r.key].name} from your workout.` : `I couldn't find ${rm[1]} in your workout.`; }
@@ -690,6 +725,7 @@ function exerciseCmd(c) {
 async function localEdit(text, spoken) {
   const low = normalize(text).replace(/[^a-z0-9: ',.;]/g, " ").replace(/\s+/g, " ").trim();
   const ex = exerciseCmd(low.replace(/[,.;]/g, ""));
+  if (ex === "@ai") return false;
   if (ex) { go("gym"); return reply(ex, { spoken }), true; }
   if (!EDIT_CUE.test(low)) return false;
   const clauses = splitClauses(low);
