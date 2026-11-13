@@ -15,7 +15,7 @@ import * as SC from "./school.js";
 import * as AI from "./ai.js";
 import * as AG from "./agent.js";
 import * as SY from "./sync.js";
-import { PG_CLOUD } from "./config.js";
+import { PG_CLOUD, PG_VERSION } from "./config.js";
 import * as D from "./daily.js";
 import { cloudApi, VOICES as CLOUD_VOICES } from "./cloudvoice.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
@@ -1315,7 +1315,7 @@ function viewSettings() {
   const vs = voice.voices();
   const tm = m => pad(Math.floor(m / 60)) + ":" + pad(m % 60);
   const sw = (act, on, label, dis) => `<label class="switch"><input type="checkbox" data-act="${act}" ${on ? "checked" : ""} ${dis ? "disabled" : ""} aria-label="${label}"><i></i></label>`;
-  return `<h1 class="title">More</h1>
+  return `<h1 class="title">More <span class="faint" style="font-size:var(--text-xs);font-family:inherit;font-weight:400">v${PG_VERSION}</span></h1>
   <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} things PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button><button class="tile" data-act="goals-open" style="${catVar("gym")}"><span class="eyebrow">Goals</span><b>${D.goals().length ? D.goals().length + " goal" + (D.goals().length > 1 ? "s" : "") : "Add your goals"}</b></button><button class="tile" data-act="canto-open" style="${catVar("social")}"><span class="eyebrow">Cantonese</span><b>${D.learned().length} learned</b></button></div>
   ${cloudSettings()}
   ${aiSettings()}
@@ -1626,7 +1626,12 @@ function needTap() {
   document.addEventListener("pointerdown", go, true);
 }
 if (S.voice.handsFree && voice.supported) { voice.handsFree = true; voice.listen("wake"); }
-if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  // When a new version arrives, reload once so he's never stuck on an old copy (but never mid-call).
+  const had = !!navigator.serviceWorker.controller; let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => { if (!had || reloaded) return; const go = () => { if (voice.mode === "off" && !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || "")) { reloaded = true; location.reload(); } else setTimeout(go, 3000); }; go(); });
+  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(r => r.update()).catch(() => {});
+}
 window.PG = { run, S, voice, probeCloud };
 
 function andWords(a) { return a.length < 2 ? (a[0] || "") : a.slice(0, -1).join(", ") + " and your " + a.at(-1); }

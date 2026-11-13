@@ -139,7 +139,7 @@ export function friendlyError(e) {
   if (e?.status === 404) return "That model name wasn't found. Clear the model box to use the default.";
   if (e?.message === "timeout") return "The AI took too long to answer. Tap Test to try again, or try a faster model such as gemini-3.5-flash-lite.";
   if (e?.message === "unknownkey") return "None of the AI services I know accepted that key. Pick the company under Provider, or choose Other and paste its web address.";
-  if (e?.message === "nobase") return "Paste the service's web address (it usually ends in /v1).";
+  if (e?.message === "nobase") return "My AI brain isn't set up on this device yet. Open More, then PG's AI brain, choose Cloudflare Workers AI and press Connect.";
   if (e instanceof TypeError) return navigator.onLine === false ? "You're offline. Check your internet." : "Couldn't reach that AI from the browser. Check your internet. If it keeps failing, that company may block apps like PG. OpenRouter works with almost any model and does allow it.";
   return "The AI had a problem: " + String(e?.message || e).slice(0, 120);
 }
