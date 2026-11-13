@@ -59,7 +59,7 @@ voice.voiceURI = S.voice.voiceURI; voice.rate = S.voice.rate; voice.pickVoice();
 // PG's natural voice and hearing run on PG Cloud once its code is version 2 or newer.
 const CV = { v: 0 };
 voice.cloudVoice = S.voice.cloudVoice || "apollo";
-voice.cloud = { ...cloudApi(() => SY.url(), () => S.dev.cloud?.token || ""), ok: () => SY.on() && CV.v >= 2 && S.voice.natural !== false };
+voice.cloud = { ...cloudApi(() => SY.url(), () => S.dev.cloud?.token || ""), ok: () => SY.on() && CV.v >= 2 && S.voice.natural === true };   // paid cloud voice is opt-in only; free phone voice by default
 async function probeCloud() {
   if (!SY.on()) { CV.v = 0; return; }
   try { const j = await (await fetch(SY.url() + "/", { cache: "no-store" })).json(); CV.v = +j.v || 1; } catch { return; }
@@ -756,7 +756,8 @@ function history(n = 10) {
 // A natural back-and-forth with PG. The AI can also ask the app to do things and remember facts.
 async function aiTalk(text, notes = []) {
   const sys = `You are PG, PraiseGod's personal assistant and partner, talking with him by voice like on a phone call. Call him "${addr()}" now and then, not every sentence.
-Speak naturally and warmly, like a friend who knows him well. Keep replies short: one to three spoken sentences, no lists, no markdown, no emojis. Ask a short follow-up question when it helps. Use what you know about him below, and his own notes when they apply.
+Speak naturally and warmly, like a smart friend who knows him well. You can talk about ANYTHING he brings up: faith and the Bible, life, feelings, relationships, school subjects, science, history, tech and coding, money, business, health, fitness, food, music, sports, news, ideas, jokes, advice or just casual chat. Give real, thoughtful answers with substance, share your view when he asks, and keep the conversation going like a real person would. Never refuse a normal topic or steer him back to the app. Your specialty is still his life and his PG app: his schedule, plans, gym, food, Bible, bass, school and goals, so when a topic touches those, use his data below.
+Keep replies easy to listen to: usually one to four spoken sentences. If he asks you to explain, teach or go deeper, you can talk longer, up to about eight sentences. No lists, no markdown, no emojis. Ask a short follow-up question when it helps. Use what you know about him below, and his own notes when they apply.
 He is a Christian student who plays bass, goes to the gym and wants high-protein, high-fiber food.
 
 ${aiContext(notes)}
@@ -1254,14 +1255,7 @@ function cloudSettings() {
       <div class="row"><button class="btn primary" type="submit">Connect</button></div>
     </form>${cloudSteps(!SY.url())}</div>`;
 }
-function naturalVoice() {
-  if (!SY.on()) return `<p class="note">Connect PG Cloud to give PG a natural, human-sounding voice.</p>`;
-  if (CV.v && CV.v < 2) return `<div class="update-box"><b>Update PG Cloud for PG's natural voice</b><p class="note" style="margin:4px 0 8px">Your PG Cloud code is the older version. Press Copy, open your pg-cloud Worker in Cloudflare, press Edit code, replace everything with the copy, then press Deploy.</p><div class="row"><button class="btn primary sm" data-act="cloud-copy">Copy PG Cloud code</button><a class="btn sm" href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener">Open Cloudflare</a></div></div>`;
-  if (!CV.v) return "";
-  const cur = S.voice.cloudVoice || "apollo";
-  return `<div class="set-row"><div class="lbl">Natural voice<span class="faint" style="display:block;font-weight:400;font-size:var(--text-xs)">Speaks and listens through your PG Cloud. No beeps on your phone.</span></div>${`<label class="switch"><input type="checkbox" data-act="natural" ${S.voice.natural !== false ? "checked" : ""} aria-label="Natural voice"><i></i></label>`}</div>
-    ${S.voice.natural !== false ? `<label class="field" style="margin-top:var(--space-3)"><span>PG's voice</span><select class="input" data-act="cvoice">${CLOUD_VOICES.map(v => `<option value="${v.id}" ${cur === v.id ? "selected" : ""}>${v.name} · ${v.kind}</option>`).join("")}</select></label>` : ""}`;
-}
+function naturalVoice() { return ""; }   // PG uses the free built-in phone voice
 function copyCloud() { navigator.clipboard?.writeText(AI.CLOUD_CODE).then(() => toast("PG Cloud code copied. Paste it in Cloudflare."), () => toast("Couldn't copy. Open worker/pg-worker.js in the PG GitHub repo.")); }
 async function connectCloud(address, code, done) {
   try {
