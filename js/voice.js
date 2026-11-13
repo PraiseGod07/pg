@@ -112,7 +112,7 @@ export class Voice {
     clearTimeout(this.timer);
     if (!c) {
       // Woke with nothing else said: greet like Siri, then listen for the request
-      this.timer = setTimeout(() => { if (this.mode === "command" && !this.cmd()) this.h.onGreet?.(); }, 1300);
+      if (this.offset > 0) this.timer = setTimeout(() => { if (this.mode === "command" && !this.cmd()) this.h.onGreet?.(); }, 1300);   // only after "Hey PG"; the button already greets
     } else {
       // Ending the call should feel instant
       const quick = isEndCall(c) ? 500 : null;

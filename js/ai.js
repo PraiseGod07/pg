@@ -31,7 +31,13 @@ export function detect(key) {
 }
 // Keys with no telltale prefix: these are the services to try one by one.
 const PROBE = ["openai", "deepseek", "mistral", "together", "groq", "fireworks", "openrouter", "xai", "cerebras"];
-const P = () => PROVIDERS[S.ai.provider] || PROVIDERS.custom;
+// A broken setup (unknown service, or "other" with no web address) falls back to his Cloudflare AI on PG Cloud.
+function fix() {
+  if (!S.ai) return;
+  const pv = S.ai.provider, broken = !PROVIDERS[pv] || (pv === "custom" && !/^https:\/\//.test(S.ai.base || "")) || (pv !== "cloudflare" && pv !== "none" && !S.ai.key);
+  if (broken && pv !== "none" && SY.on()) { S.ai.provider = "cloudflare"; S.ai.autoModel = ""; if (/^(?!@cf\/)/.test(S.ai.model || "@cf/")) S.ai.model = ""; save(); }
+}
+const P = () => { fix(); return PROVIDERS[S.ai.provider] || PROVIDERS.custom; };
 const baseOf = () => {
   if (S.ai.provider === "cloudflare") return SY.on() ? SY.url() + "/v1" : "";
   return (S.ai.provider === "custom" ? (S.ai.base || "") : P().base || "").replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
@@ -41,7 +47,7 @@ export const CLOUD_CODE = "// PG Cloud: your private PG server on your own Cloud
 export const label = () => S.ai.provider === "custom" ? (S.ai.base ? new URL(S.ai.base).host : "your AI") : P().label.replace(/ \(.*\)$/, "");
 export const modelOf = () => { const m = (S.ai.model || "").trim().replace(/^@cf\/zai-org\/glm-5\.3-flash$/, ""); return m && !OLD.test(m) ? m : (S.ai.autoModel || P().model || ""); };
 
-export const on = () => S.ai?.provider === "cloudflare" ? SY.on() : !!(S.ai && S.ai.key && S.ai.provider && S.ai.provider !== "none");
+export const on = () => (fix(), S.ai?.provider === "cloudflare") ? SY.on() : !!(S.ai && S.ai.key && S.ai.provider && S.ai.provider !== "none");
 const withTimeout = (p, ms = 25000) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
 async function fail(r) {
   let msg = ""; try { const j = await r.json(); msg = j.error?.message || j.error?.type || j.errors?.[0]?.message || j.message || j.detail || JSON.stringify(j).slice(0, 200); } catch {}
