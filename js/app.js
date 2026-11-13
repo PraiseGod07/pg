@@ -1,7 +1,7 @@
 // PG — app controller: views, command handling, reminders.
 import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1 } from "./store.js";
 import { CATS, EXERCISES, SPLITS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
-import { intent, parseSchedule, matchBlock, parseClock } from "./nlu.js";
+import { intent, parseSchedule, matchBlock, parseClock, normalize } from "./nlu.js";
 import { placeItems, conflicts, firstGap } from "./scheduler.js";
 import { Voice, chime } from "./voice.js";
 import * as C from "./coach.js";
@@ -10,6 +10,7 @@ import * as B from "./bible.js";
 import * as M from "./brain.js";
 import * as LN from "./learn.js";
 import * as F from "./food.js";
+import * as SC from "./school.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
 
 const $ = s => document.querySelector(s);
@@ -20,7 +21,10 @@ await hydrate();
 load();
 BS.bass(); B.bible(); M.notes(); LN.tracks();
 const addr = () => S.profile.address || "sir";
-const hello = () => `Hi, ${addr()}, what can I do for you today?`;
+const hello = () => `Hi, ${addr()}, what can I do for you?`;
+const lc = s => s ? s.charAt(0).toLowerCase() + s.slice(1) : s;
+const ucf = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+const pickOne = a => a[Math.floor(Math.random() * a.length)];
 
 // ================= Voice wiring =================
 const voice = new Voice({
@@ -28,7 +32,11 @@ const voice = new Voice({
   onHeard: t => { $("#heard").textContent = t ? "“" + t + "”" : ""; },
   onWake: () => { openAssistant(true); $("#heard").textContent = ""; },
   onGreet: () => { const g = hello(); pushMsg("pg", g); voice.say(g, () => voice.listen("command")); },
-  onIdle: () => { voice.stop(); voice.afterReply(); setStatus("Say “Hi PG”"); },
+  onIdle: () => {
+    if (voice.call) { const t = `I'm here if you need me, ${addr()}.`; pushMsg("pg", t); voice.say(t, () => voice.hangUp()); return; }
+    voice.stop(); voice.afterReply(); setStatus("Say “Hi PG”");
+  },
+  onHangUp: () => { ui.pending = null; paintVoice(voice.mode); },
   onCommand: text => { $("#heard").textContent = ""; run(text, true); },
   onError: code => {
     const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found." }[code];
@@ -40,10 +48,13 @@ voice.voiceURI = S.voice.voiceURI; voice.rate = S.voice.rate; voice.pickVoice();
 
 function paintVoice(m) {
   $("#orb").dataset.state = m; $("#dockOrb").dataset.state = m;
-  setStatus({ off: voice.supported ? "Tap to talk" : "Type to PG", wake: "Say “Hi PG”", command: "Listening…", thinking: "Thinking…", speaking: "Speaking…" }[m]);
-  $("#listenPill").textContent = m === "wake" ? "Listening for “Hi PG”" : m === "command" ? "Listening…" : "";
+  const onCall = voice.call && m !== "off" && m !== "wake";
+  setStatus(onCall ? { command: "Go ahead, I'm listening", thinking: "Thinking…", speaking: "Speaking · tap to cut in" }[m] : { off: voice.supported ? "Tap to talk" : "Type to PG", wake: "Say “Hi PG”", command: "Listening…", thinking: "Thinking…", speaking: "Speaking…" }[m]);
+  $("#listenPill").textContent = onCall ? "On a call with PG" : m === "wake" ? "Listening for “Hi PG”" : m === "command" ? "Listening…" : "";
+  $("#endCall").hidden = !onCall;
+  document.body.classList.toggle("on-call", onCall);
   if (m === "command" || m === "speaking" || m === "thinking") openAssistant(false);
-  if ((m === "wake" || m === "off") && ui.autoClose) { ui.autoClose = false; setTimeout(() => { if (voice.mode === "wake" || voice.mode === "off") closeAssistant(); }, 1800); }
+  if ((m === "wake" || m === "off") && ui.autoClose && !voice.call) { ui.autoClose = false; setTimeout(() => { if (voice.mode === "wake" || voice.mode === "off") closeAssistant(); }, 1800); }
   keepAwake();
 }
 function setStatus(t) { $("#orbStatus").textContent = t; }
@@ -63,7 +74,8 @@ function paintChat() {
   el.scrollTop = el.scrollHeight;
 }
 const SUGGEST = {
-  today: ["What's next?", "Read my schedule", "Today's Bible reading"],
+  today: ["What's next?", "What should I eat today?", "Is my plan realistic?"],
+  school: ["What's due?", "Plan my assignments", "I finish school at 4"],
   bass: ["What's my lesson?", "Lesson complete", "Not yet"],
   bible: ["Today's reading", "I read today's reading", "What did I learn?"],
   gym: ["What should I eat today?", "Make my shopping list", "Give me a recipe"],
@@ -118,7 +130,65 @@ function context() {
   return r ? r.cat : null;
 }
 
+const YES = /^(?:yes|yeah|yea|yep|yup|ya|sure|ok|okay|alright|all right|sounds good|that sounds good|sounds great|good|perfect|great|let's do (?:it|that)|do it|go ahead|please|fine|cool|that works|works for me|i like (?:it|that)|love it|deal|better|much better|that's better)(?: pg| sir| please| thanks?| thank you| then)*$/;
+const NO = /^(?:no|nah|nope|not really|no thanks?|no thank you|don't|do not|not now|maybe later|leave it|i'm good|it's fine|keep it)(?: pg| sir| thanks?)*$/;
+// Answers that only make sense after PG asked something
+async function followUp(p, bare, text, spoken) {
+  if (p.type === "food") {
+    if (YES.test(bare)) { F.like(p.k); ui.pending = { type: "food_list", k: p.k }; return reply(pickOne(["Great choice.", "Good one.", "Nice."]) + " Want me to add what you need to your shopping list?"), true; }
+    return false;
+  }
+  if (p.type === "food_list") {
+    if (YES.test(bare)) { if (!F.food().week.includes(p.k)) F.toggleWeek(p.k); F.build(); ui.gymTab = "list"; return reply(`Done. It's on your list. Anything else, ${addr()}?`, { view: "gym", spoken }), ui.pending = { type: "more" }, true; }
+    if (NO.test(bare)) return reply("Okay. Enjoy it."), true;
+    return false;
+  }
+  if (p.type === "fix") {
+    if (YES.test(bare)) {
+      const r = SC.fix(p.d); render();
+      const bits = [];
+      if (r.split) bits.push("split long study into 50 minute sessions with breaks");
+      if (r.moved) bits.push(`moved ${r.moved} session${r.moved > 1 ? "s" : ""} to ${r.to.join(" and ") || "later"}`);
+      return reply(bits.length ? `Done. I ${bits.join(" and ")}. It should feel doable now.` : "It already looks doable. I left it as is.", { view: "today", date: p.d, spoken }), true;
+    }
+    if (NO.test(bare)) return reply("Okay, I'll leave it as you planned."), true;
+    return false;
+  }
+  if (p.type === "actual") {
+    const min = SC.estIn(bare);
+    if (min) return tookReply(SC.tasks().find(t => t.id === p.tid), min, spoken), true;
+    if (NO.test(bare)) return reply("No problem."), true;
+    return false;
+  }
+  if (p.type === "due") {
+    const t = SC.tasks().find(x => x.id === p.tid);
+    const got = t && SC.parse(t.title + " due " + text)[0];
+    if (got && got.due) { t.due = got.due; if (got.dueMin != null) t.dueMin = got.dueMin; if (got.est) { t.guess = got.est; } save(); const res = SC.plan(); return reply(`Got it, due ${SC.fmt.dueText(t)}. ${SC.planBrief(res)}`, { view: "school", spoken }), true; }
+    return false;
+  }
+  if (p.type === "more") {
+    if (NO.test(bare) || /^(?:no )?(?:that's (?:it|all)|nothing(?: else)?|i'm good|all good)/.test(bare)) return reply(`Okay, ${addr()}. Talk soon.`, { then: () => voice.call ? voice.hangUp() : voice.afterReply() }), true;
+    if (YES.test(bare)) return reply("Go ahead."), true;
+    return false;
+  }
+  return false;
+}
+function tookReply(t, min, spoken) {
+  if (!t) return reply(`Noted, ${sayDur(min)}.`);
+  const off = SC.logActual(t, min), r = SC.ratio();
+  ui.lastTask = null;
+  const vs = t.guess ? `your guess of ${sayDur(t.guess)}` : `my plan of ${sayDur(t.plan)}`;
+  const rel = off > 1.15 ? `That's ${Math.round(off * 10) / 10} times ${vs}.` : off < 0.85 ? `That's quicker than ${vs}. Nice.` : `Right on ${vs}.`;
+  const next = r.learned ? ` From now on I'll plan assignments at ${r.r} times your guess.` : " One more like this and I'll start planning with your real pace.";
+  const res = SC.plan();
+  return reply(`${rel}${next}`, { view: "school", spoken });
+}
+function schoolReply(res, head, spoken) { render(); return reply((head ? head + " " : "") + SC.planBrief(res), { view: "school", spoken }); }
+
 async function handle(text, spoken) {
+  const bare0 = normalize(text).replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
+  const pend = ui.pending; ui.pending = null;
+  if (pend && await followUp(pend, bare0, text, spoken)) return;
   const it = intent(text);
   const d = ui.view === "today" ? ui.date : today();
   switch (it.type) {
@@ -127,8 +197,8 @@ async function handle(text, spoken) {
       if (S.voice.speak !== false) voice.say(g, () => voice.supported && spoken !== "typed" ? voice.listen("command") : voice.afterReply());
       return;
     }
-    case "dismiss": return reply("Okay.");
-    case "thanks": return reply(`Anytime, ${addr()}.`);
+    case "dismiss": return reply(it.bye || voice.call ? pickOne([`Okay, ${addr()}. I'm here if you need me.`, `Talk soon, ${addr()}.`, `Okay. Just say Hi PG when you need me.`]) : "Okay.", { then: () => voice.call ? voice.hangUp() : voice.afterReply() });
+    case "thanks": if (voice.call) ui.pending = { type: "more" }; return reply(voice.call ? `Anytime, ${addr()}. Anything else?` : `Anytime, ${addr()}.`);
     case "help": return reply("Tell me your day and I'll plan it. I also teach you bass, keep your Bible plan, coach the gym, plan your meals and shopping, and remember what you learn.");
     case "now": {
       const c = current(), nx = upcoming()[0];
@@ -165,7 +235,7 @@ async function handle(text, spoken) {
       if (it.type === "move") { const t = parseClock(it.time); const len = b.end - b.start; b.start = t; b.end = Math.min(1440, t + len); b.flex = false; msg = `Moved ${b.title} to ${sayTime(b.start)}.`; }
       if (it.type === "shift") { b.start += it.min; b.end = Math.min(1440, b.end + it.min); msg = `${b.title} now starts at ${sayTime(b.start)}.`; }
       if (it.type === "resize") { b.end = Math.min(1440, b.start + it.min); msg = `${b.title} is now ${sayTime(b.start)} to ${sayTime(b.end)}.`; }
-      if (it.type === "done") { b.done = true; msg = `Nice work. ${b.title} is done.`; const nx = upcoming(d).find(x => x.id !== b.id); if (nx) msg += ` Next is ${nx.title} at ${sayTime(nx.start)}.`; }
+      if (it.type === "done") { b.done = true; if (b.src === "school") SC.noteDone(b); msg = `Nice work. ${b.title} is done.`; const nx = upcoming(d).find(x => x.id !== b.id); if (nx) msg += ` Next is ${nx.title} at ${sayTime(nx.start)}.`; }
       save(); render(); undoable(snap, msg.split(".")[0] + ".");
       return reply(msg, { view: "today", date: d, spoken });
     }
@@ -239,7 +309,40 @@ async function handle(text, spoken) {
     }
     case "gym_info": ui.topic = "gym"; ui.gymTab = "workout"; return reply(C.gymBrief(today(), true) + " " + F.postLine(), { view: "gym", spoken });
     // ---- Food ----
-    case "food_info": ui.gymTab = "food"; return reply(F.brief(today(), gymToday()), { view: "gym", spoken });
+    case "food_info": case "food_meal": {
+      const W = { breakfast: "Breakfast", lunch: "Lunch", dinner: "Dinner", snack: "Snack" };
+      const c = F.chat(today(), gymToday(), it.when ? W[it.when] : null);
+      const m = F.todayMeals(today(), gymToday()).find(x => x.when === c.focus);
+      ui.food = { focus: c.focus, at: Date.now() }; ui.gymTab = "food"; ui.openRec = m ? m.r.k : null;
+      ui.pending = { type: "food", k: m ? m.r.k : null };
+      return reply(c.text, { view: "gym", spoken });
+    }
+    case "food_swap": {
+      const fresh = (ui.food && Date.now() - ui.food.at < 20 * 60e3) || /\b(?:breakfast|lunch|dinner|snack|meal|eat|food|recipe)\b/.test(it.text);
+      if (!fresh) return reply(/^(?:no|nah|nope)$/.test(it.text) ? "Okay." : `What would you like to change, ${addr()}?`);
+      const t = it.text, gym = gymToday(), ms = F.todayMeals(today(), gym);
+      let when = /breakfast|morning/.test(t) ? "Breakfast" : /lunch/.test(t) ? "Lunch" : /dinner|tonight/.test(t) ? "Dinner" : /snack/.test(t) ? (gym ? "Before the gym" : "Snack") : /after (?:the )?gym|post/.test(t) ? "After the gym" : null;
+      const tail = t.replace(/^.*?\b(?:feel like|want|fancy|mood for|feeling|sick of|tired of)\b\s*/, "");
+      const ingK = tail !== t ? F.findItem(tail) : null;
+      if (!when && ingK) when = (ms.find(m => m.r.ing.some(([k]) => k === ingK)) || {}).when;
+      if (!when) { const r = ms.find(m => tail.length > 3 && m.r.t.toLowerCase().includes(tail.split(" ")[0])); if (r) when = r.when; }
+      when = when || (ui.food && ui.food.focus) || "Dinner";
+      const FAM = { fish: ["fish", "salmon", "tuna"], salmon: ["salmon"], shrimp: ["shrimp"], beef: ["beef"], chicken: ["chicken"], pork: ["pork"], eggs: ["eggs"] };
+      const noList = /seafood/.test(t) ? ["fish", "salmon", "tuna", "shrimp"] : ingK ? (FAM[ingK] || [ingK]) : null;
+      if (!when && noList) when = (ms.find(m => m.r.ing.some(([k]) => noList.includes(k))) || {}).when;
+      const f = { gym, quick: /quick|faster|easier|easy|less time|lazy|tired|simple/.test(t), veg: /no meat|vegetarian|without meat|meat ?free|plant/.test(t), no: noList };
+      const sw = F.swap(when, f);
+      ui.food = { focus: when, at: Date.now() }; ui.gymTab = "food";
+      if (!sw) return reply(`I'm out of ideas for ${lc(when)} that fit that. Have a look at all recipes on screen.`, { view: "gym", spoken });
+      ui.openRec = sw.r.k; ui.pending = { type: "food", k: sw.r.k };
+      return reply(`${pickOne(["Okay", "No problem", "Fair enough", "Sure"])}. For ${when === "After the gym" || when === "Before the gym" ? lc(when).replace("the gym", "the gym,") : lc(when) + ","} maybe try ${lc(sw.r.t)} then. ${ucf(F.why({ when, r: sw.r }))}${sw.r.min <= 15 ? "" : `, about ${sw.r.min} minutes`}. How's that?`, { view: "gym", spoken });
+    }
+    case "food_avoid": {
+      const name = F.avoid(it.item);
+      if (!name) return reply(`Okay, noted.`);
+      F.build(); ui.gymTab = "food";
+      return reply(`Got it, no ${name} from now on. I'll keep it out of your meals and shopping list.`, { view: "gym", spoken });
+    }
     case "food_tip": { const t = F.tip(it.k); ui.gymTab = "food"; ui.openTip = it.k; return reply(t.d(), { view: "gym", spoken }); }
     case "weight": { const t = F.setWeight(it.kg); ui.gymTab = "food"; return reply(`Got it. Your target is about ${t} grams of protein a day.`, { view: "gym", spoken }); }
     case "recipe": {
@@ -248,7 +351,7 @@ async function handle(text, spoken) {
       ui.gymTab = "food"; ui.openRec = r.k;
       return reply(F.recipeBrief(r), { view: "gym", spoken });
     }
-    case "shop_make": { const ls = F.build(); ui.gymTab = "list"; const g = F.byStore(ls); return reply(`Your shopping list is ready, ${ls.length} items for the week. ${g.map(x => `${x.rows.length} ${{ wet: "from the wet market", super: "from Wellcome or PARKnSHOP", online: "online from HKTVmall or pandamart", other: "other" }[x.s]}`).join(", ")}.`, { view: "gym", spoken }); }
+    case "shop_make": { const ls = F.build(); ui.food = { focus: "Dinner", at: Date.now() }; ui.gymTab = "list"; const g = F.byStore(ls); return reply(`Your shopping list is ready, ${ls.length} items for the week. ${g.map(x => `${x.rows.length} ${{ wet: "from the wet market", super: "from Wellcome or PARKnSHOP", online: "online from HKTVmall or pandamart", other: "other" }[x.s]}`).join(", ")}.`, { view: "gym", spoken }); }
     case "shop_show": ui.gymTab = "list"; return reply(F.listBrief(), { view: "gym", spoken });
     case "shop_add": { const items = it.item.split(/\s*(?:,|\band\b)\s*/).filter(Boolean); const rows = items.map(x => F.add(x)); ui.gymTab = "list"; return reply(`Added ${rows.map(r => r.n.toLowerCase().replace(/ \(.+\)/, "")).join(", ")}.`, { view: "gym", spoken }); }
     case "shop_where": { const w = F.whereBrief(it.item); if (w) return reply(w); break; }
@@ -259,6 +362,50 @@ async function handle(text, spoken) {
       return reply(C.exerciseBrief(it.ex), { view: "gym", spoken });
     }
     case "review": return reply(reviewText(), { view: "today", date: today(), spoken });
+    // ---- School ----
+    case "school_add": {
+      const list = SC.parse(text);
+      if (!list.length) return scheduleFrom(text, spoken);
+      const added = SC.add(list);
+      added.filter(t => (t.kind === "exam" || t.kind === "quiz") && t.due && t.dueMin != null).forEach(t => {
+        if (!day(t.due).blocks.some(b => b.tid === t.id && b.src === "exam")) day(t.due).blocks.push({ id: uid(), title: t.title, cat: "class", start: t.dueMin, end: Math.min(1440, t.dueMin + (t.kind === "quiz" ? 30 : 90)), flex: false, done: false, date: t.due, src: "exam", tid: t.id });
+      });
+      const res = SC.plan();
+      const nodate = added.find(t => !t.due);
+      if (nodate) ui.pending = { type: "due", tid: nodate.id };
+      return schoolReply(res, added.length === 1 ? `Got it. ${added[0].title}${added[0].due ? `, due ${SC.fmt.dueText(added[0])}` : ""}. ${SC.whyTime(added[0])}` : `Got ${added.length} assignments: ${added.map(t => t.title).join(", ")}.${added.some(t => t.guess) ? (SC.ratio().learned ? ` I planned your guesses at ${SC.ratio().r} times, your real pace.` : " I added 50% to your time guesses, since most people underestimate.") : ""}`, spoken);
+    }
+    case "school_plan": return schoolReply(SC.plan(), "", spoken);
+    case "school_info": return reply(SC.brief(), { view: "school", spoken });
+    case "school_done": {
+      const t = SC.find(it.target);
+      if (!t) { const b = matchBlock(it.target, blocksOf(d)); if (b) { b.done = true; save(); render(); return reply(`Nice work. ${b.title} is done.`); } return reply(`I couldn't find ${it.target} in your assignments.`); }
+      SC.finish(t); render();
+      if (it.min) return tookReply(t, it.min, spoken);
+      ui.pending = { type: "actual", tid: t.id }; ui.lastTask = t.id;
+      return reply(`Nice work, ${addr()}. ${t.title} is done. Roughly how long did it take you in total?`, { view: "school", spoken });
+    }
+    case "school_took": {
+      const t = SC.tasks().find(x => x.id === ui.lastTask) || SC.tasks().filter(x => x.done).sort((a, b) => (b.doneOn || "").localeCompare(a.doneOn || "")).at(0);
+      return tookReply(t, it.min, spoken);
+    }
+    case "school_cap": SC.setCap(it.min); return schoolReply(SC.plan(), `Okay, at most ${sayDur(SC.sch().cap)} of study a day.`, spoken);
+    case "school_window": { const m = parseClock(it.time); SC.setWindow(m, it.we ? "we" : "wk"); return schoolReply(SC.plan(), `Got it. I'll plan study after ${sayTime(m)}${it.we ? " on weekends" : " on school days"}.`, spoken); }
+    case "school_pref": SC.setPref(it.p); return schoolReply(SC.plan(), `Noted, you focus best in the ${it.p}.`, spoken);
+    case "realistic": {
+      const dd = it.tomorrow ? addDays(today(), 1) : d;
+      const issues = SC.check(dd);
+      if (!issues.length) return reply(`${dd === today() ? "Today" : "That day"} looks doable. You have breaks, study is under ${sayDur(SC.sch().cap)}, and you'll get to bed on time.`, { view: "today", date: dd, spoken });
+      ui.pending = { type: "fix", d: dd };
+      return reply(`A few things. ${issues.map(ucf).join(". ")}. Want me to make it realistic?`, { view: "today", date: dd, spoken });
+    }
+    case "learned": {
+      const lines = [...SC.learnedLines(), ...F.learned()];
+      const n = M.notes().length;
+      if (n) lines.push(`you've saved ${n} note${n > 1 ? "s" : ""} with me`);
+      if (!lines.length) return reply(`Not much yet, ${addr()}. The more you tell me, like how long things really take and what food you like, the better I plan for you.`);
+      return reply(`So far I know ${lines.join(", ")}. I use all of it when I plan for you.`);
+    }
     default: return scheduleFrom(text, spoken);
   }
 }
@@ -356,6 +503,8 @@ async function scheduleFrom(text, spoken) {
   if (first("gym")) { ui.topic = "gym"; ui.gymTab = "workout"; parts.push(C.gymBrief(first("gym").date, true) + " " + F.postLine(first("gym").date)); if (solo) view = "gym"; }
   if (first("band")) parts.push(C.bandBrief(first("band").end - first("band").start));
   if (first("learn")) { const tr = LN.findTrack(first("learn").title.replace(/^learn\s+/i, "")); if (tr) { ui.topic = "learn"; parts.push(LN.brief(tr)); if (solo) view = "notes"; } }
+  const warn = SC.check(d0);
+  if (warn.length && all.some(b => b.cat === "study" || b.end > S.profile.dayEnd)) { parts.push(`Heads up: ${warn[0]}. Say make it realistic and I'll fix it.`); ui.pending = null; }
   render();
   undoable(snaps, `${res.added.length} added${res.updated.length ? ", " + res.updated.length + " updated" : ""}.`);
   const html = `<div>${esc(parts[0] || "")}</div>` + (all.length > 1 ? `<ul>${all.map(b => `<li>${esc(fmtTime(b.start))}–${esc(fmtTime(b.end))} · ${esc(b.title)}</li>`).join("")}</ul>` : "") + parts.slice(1).map(p => `<div style="margin-top:6px">${esc(p)}</div>`).join("");
@@ -409,11 +558,11 @@ async function aiLearn(topic) {
 
 // ================= Views =================
 function go(view, date) { ui.view = view; if (date) ui.date = date; render(); $("#main").scrollTo?.(0, 0); if (isMobile()) window.scrollTo(0, 0); }
-const TITLES = { today: "Today", bass: "Bass", bible: "Bible", gym: "Gym", notes: "Notes", settings: "Settings" };
+const TITLES = { today: "Today", school: "School", bass: "Bass", bible: "Bible", gym: "Gym", notes: "Notes", settings: "Settings" };
 function render() {
   if (!TITLES[ui.view]) ui.view = "today";
   $$("[data-view]").forEach(b => b.classList.toggle("on", b.dataset.view === ui.view));
-  $("#view").innerHTML = { today: viewToday, bass: viewBass, bible: viewBible, gym: viewGym, notes: viewNotes, settings: viewSettings }[ui.view]();
+  $("#view").innerHTML = { today: viewToday, school: viewSchool, bass: viewBass, bible: viewBible, gym: viewGym, notes: viewNotes, settings: viewSettings }[ui.view]();
   document.title = TITLES[ui.view] + " · PG";
   paintSuggest();
 }
@@ -461,6 +610,10 @@ function viewToday() {
     h += `<div class="tiles">
       <button class="tile" data-view="bass" style="${catVar("bass")}"><span class="eyebrow">Bass · ${BS.finished() ? "Done" : "Lesson " + BS.lessonNo()}</span><b>${esc(BS.finished() ? "Course complete" : ls.t)}</b>${bar(BS.pct())}</button>
       <button class="tile" data-view="bible" style="${catVar("bible")}"><span class="eyebrow">Bible${st ? " · " + st.pct + "%" : ""}</span><b>${esc(st ? (B.todays().doneToday ? "Done for today" : bibleRef()) : "Choose a book")}</b>${bar(st ? st.pct : 0)}</button></div>`;
+  }
+  if (isT && SC.pending().length) {
+    const t = SC.pending()[0];
+    h += `<button class="tile wide" data-view="school" style="${catVar("study")}"><span class="eyebrow">School · ${SC.pending().length} due</span><b>${esc(t.title)} · ${esc(t.due ? fmtDay(t.due) : "no date")}</b></button>`;
   }
   if (S.inbox.length) {
     h += `<h2 class="sec"><span>To-do</span></h2><div class="card">${S.inbox.map(t => `<div class="set-row"><div><div class="lbl">${esc(t.title)}</div><div class="sub">${fmtDur(t.dur || 30)}</div></div>
@@ -628,11 +781,35 @@ function viewNotes() {
   return h;
 }
 
+function viewSchool() {
+  const p = SC.pending(), nx = SC.upcomingStudy(), r = SC.ratio(), learned = SC.learnedLines();
+  const short = d => d === today() ? "Today" : d === addDays(today(), 1) ? "Tomorrow" : new Date(d + "T00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  const dueLbl = t => t.due ? `Due ${short(t.due)}${t.dueMin != null && t.dueMin < 1439 ? " · " + fmtTime(t.dueMin) : ""}` : "No date yet";
+  let h = `<div class="eyebrow">School</div><h1 class="title">${p.length ? `<em>${p.length}</em> assignment${p.length > 1 ? "s" : ""} to go.` : "Nothing due."}</h1>`;
+  if (nx) h += `<section class="now" aria-label="Next study session"><div class="eyebrow">Next study · ${esc(fmtDay(nx.date))}</div><div class="now-title">${esc(nx.title)}</div><div class="now-next"><span>${fmtTime(nx.start)} – ${fmtTime(nx.end)}</span><button class="btn sm" data-act="go" data-v="today">Timetable</button></div></section>`;
+  h += `<form class="row add-task" data-form="task"><input class="input" name="t" placeholder="History essay due Friday 5pm, 3 hours" aria-label="Add an assignment"><button class="btn primary">Add</button></form>`;
+  if (p.length) {
+    h += `<h2 class="sec"><span>Due</span><button class="btn sm ghost" data-act="replan">Re-plan</button></h2><div class="card list">`;
+    h += p.map(t => {
+      const ss = SC.sessionsOf(t), dn = ss.filter(b => b.done).length;
+      const pct = Math.min(100, Math.round((t.doneMin || 0) / Math.max(1, t.plan) * 100));
+      return `<div class="task"><div class="task-main"><div class="lbl">${esc(t.title)}</div>
+        <div class="sub">${esc(dueLbl(t))} · ${fmtDur(t.plan)} planned${ss.length ? ` · ${dn}/${ss.length} sessions` : ""}</div>${bar(pct)}</div>
+        <div class="row"><button class="btn sm" data-act="task-done" data-id="${t.id}">Done</button><button class="icon-btn" data-act="task-del" data-id="${t.id}" aria-label="Remove ${esc(t.title)}"><svg><use href="#i-x"/></svg></button></div></div>`;
+    }).join("") + `</div>`;
+  } else h += `<p class="note">Tell PG what's due, like: I have a math test next Tuesday and a biology report due the 20th.</p>`;
+  const done = SC.tasks().filter(t => t.done).slice(-3).reverse();
+  if (done.length) h += `<h2 class="sec"><span>Finished</span></h2><div class="card list">${done.map(t => `<div class="task done"><div class="lbl">${esc(t.title)}</div></div>`).join("")}</div>`;
+  h += `<p class="note">${esc(r.learned ? `You take about ${r.r}× your guesses, so PG plans with that.` : "PG adds 50% to your guesses until it learns your real pace.")}${learned.length > (r.learned ? 1 : 0) ? " " + esc(ucf(learned.filter(x => !/times what you guess/.test(x)).join(", ")) + ".") : ""}</p>`;
+  h += `<details class="fold"><summary>How PG plans</summary><div class="card list tips">${SC.RULES.map(x => `<div class="rule"><b>${esc(x.t)}</b><p>${esc(x.d)}</p><a class="faint tip-src" href="${esc(x.url)}" target="_blank" rel="noopener">Source</a></div>`).join("")}</div></details>`;
+  return h;
+}
 function viewSettings() {
   const vs = voice.voices();
   const tm = m => pad(Math.floor(m / 60)) + ":" + pad(m % 60);
   const sw = (act, on, label, dis) => `<label class="switch"><input type="checkbox" data-act="${act}" ${on ? "checked" : ""} ${dis ? "disabled" : ""} aria-label="${label}"><i></i></label>`;
-  return `<h1 class="title">Settings</h1>
+  return `<h1 class="title">More</h1>
+  <div class="tiles"><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button></div>
   <h2 class="sec"><span>Voice</span></h2><div class="card">
     <div class="set-row"><div class="lbl">Hands-free “Hi PG”${voice.supported ? "" : ` <span class="faint">· not supported here</span>`}</div>${sw("handsfree", S.voice.handsFree, "Hands-free wake word", !voice.supported)}</div>
     <div class="set-row"><div class="lbl">Speak replies</div>${sw("speak", S.voice.speak !== false, "Speak replies")}</div>
@@ -694,7 +871,10 @@ document.addEventListener("click", e => {
     case "day": ui.date = el.dataset.n === "0" ? today() : addDays(ui.date, +el.dataset.n); render(); break;
     case "add": openEditor(null); break;
     case "edit": if (e.target.closest(".check,.tag.link")) return; openEditor(id); break;
-    case "toggle": { e.stopPropagation(); const b = day(d).blocks.find(x => x.id === id); if (b) { b.done = !b.done; save(); render(); if (b.done) chime("ok"); } break; }
+    case "toggle": { e.stopPropagation(); const b = day(d).blocks.find(x => x.id === id); if (b) { b.done = !b.done; if (b.done && b.src === "school") SC.noteDone(b); save(); render(); if (b.done) chime("ok"); } break; }
+    case "task-done": { const t = SC.tasks().find(x => x.id === id); if (t) { SC.finish(t); ui.pending = { type: "actual", tid: t.id }; ui.lastTask = t.id; render(); openAssistant(); reply(`Nice work. How long did ${t.title} take you in total?`); } break; }
+    case "task-del": confirmSheet("Remove this assignment?", "Its study sessions come off your timetable.", "Remove", () => { SC.remove(id); render(); }); break;
+    case "replan": { const r = SC.plan(); render(); toast(`${r.placed.length} study sessions planned.`); break; }
     case "go": e.stopPropagation(); go(el.dataset.v); break;
     case "close-sheet": $("#sheet").close(); break;
     case "del-block": { const snap = snapshot(d); day(d).blocks = day(d).blocks.filter(x => x.id !== id); save(); $("#sheet").close(); render(); undoable(snap, "Deleted."); break; }
@@ -780,6 +960,7 @@ document.addEventListener("submit", e => {
   if (f.id === "composer") { e.preventDefault(); const t = $("#ask").value; $("#ask").value = ""; voice.kill(); run(t, "typed"); return; }
   if (f.dataset.form === "song") { e.preventDefault(); const n = f.song.value.trim(); if (n) { C.addSong(n); render(); } return; }
   if (f.dataset.form === "note") { e.preventDefault(); const t = f.t.value.trim(); if (t) { const n = M.add(t); ui.folder = "all"; ui.q = ""; render(); toast(`Saved to ${M.FOLDERS[n.folder].label}.`); } return; }
+  if (f.dataset.form === "task") { e.preventDefault(); const t = f.t.value.trim(); if (!t) return; const list = SC.parse(/\b(?:essay|report|test|exam|quiz|project|presentation|homework|assignment|paper|lab|reading|worksheet)\b/i.test(t) ? t : t + " assignment"); if (!list.length) { toast("Try: History essay due Friday 5pm."); return; } const added = SC.add(list); const r = SC.plan(); render(); toast(added.some(x => !x.due) ? "Added. When is it due? Tell PG." : `${r.placed.length} study sessions planned.`); return; }
   if (f.dataset.form === "kg") { e.preventDefault(); const kg = +f.kg.value; if (kg > 0) { const t = F.setWeight(kg); render(); toast(`Target: ${t} g of protein a day.`); } return; }
   if (f.dataset.form === "shop") { e.preventDefault(); const t = f.t.value.trim(); if (t) { F.add(t); render(); $("[data-form=shop] input")?.focus(); } return; }
   if (f.dataset.form === "bible-plan") { e.preventDefault(); B.setPlan(+f.book.value, +f.max.value); renameCoachBlocks(today()); render(); toast(`Reading ${B.stats().book}.`); return; }
@@ -803,6 +984,7 @@ document.addEventListener("submit", e => {
 $("#orb").addEventListener("click", () => orbTap());
 $("#dockOrb").addEventListener("click", () => { openAssistant(); orbTap(); });
 $("#asClose").addEventListener("click", closeAssistant);
+$("#endCall").addEventListener("click", () => { voice.hush(); voice.hangUp(); toast("Call ended."); });
 $("#scrim").addEventListener("click", closeAssistant);
 function orbTap() {
   if (!voice.supported) { openAssistant(); $("#ask").focus(); toast("Voice isn't available in this browser. Type to PG instead."); return; }

@@ -163,14 +163,82 @@ const ROT = {
   dinner: ["fish", "beef", "tomegg", "steamegg", "stew"],
   snack: ["yogurt"]
 };
-const pick = (slot, n) => recipe(ROT[slot][n % ROT[slot].length]);
+// Learned likes, dislikes and today's swaps
+export function prefs() { const f = food(); f.prefs = f.prefs || { no: {}, yes: {}, avoid: [] }; f.swap = f.swap && f.swap.date === today() ? f.swap : { date: today(), set: {}, skip: [] }; return f.prefs; }
+const FITS = { breakfast: ["breakfast"], lunch: ["lunch", "main"], pre: ["pre"], post: ["main"], dinner: ["main", "lunch"], snack: ["snack", "pre"] };
+const SLOT_OF = { Breakfast: "breakfast", Lunch: "lunch", "Before the gym": "pre", "After the gym": "post", Snack: "snack", Dinner: "dinner" };
+const MEAT = ["chicken", "fish", "salmon", "beef", "pork", "shrimp", "tuna"];
+const hasIng = (r, keys) => r.ing.some(([k]) => keys.includes(k));
+const ok = r => { const p = prefs(); return (p.no[r.k] || 0) < 2 && !hasIng(r, p.avoid); };
+function pick(slot, n) {
+  const rot = ROT[slot].map(recipe), good = rot.filter(ok);
+  if (good.length) return rot[n % rot.length] && ok(rot[n % rot.length]) ? rot[n % rot.length] : good[n % good.length];
+  return options(slot)[0] || rot[n % rot.length];
+}
+// Every recipe that can fill a meal, best first (things you liked rank higher)
+export function options(slot, f = {}) {
+  const p = prefs(), sw = food().swap;
+  return RECIPES.filter(r => FITS[slot].includes(r.slot) && ok(r) && !sw.skip.includes(r.k)
+    && (!f.quick || r.min <= 15) && (!f.veg || !hasIng(r, MEAT)) && (!f.no || !hasIng(r, f.no)) && (slot !== "post" || r.p >= 25))
+    .sort((a, b) => (p.yes[b.k] || 0) - (p.yes[a.k] || 0) || b.p - a.p);
+}
 export function todayMeals(date = today(), gym = false) {
-  const n = Math.floor(new Date(date + "T12:00").getTime() / 864e5);
-  const ms = [{ when: "Breakfast", r: pick("breakfast", n) }, { when: "Lunch", r: pick("lunch", n) }];
-  if (gym) ms.push({ when: "Before the gym", r: pick("pre", n) }, { when: "After the gym", r: pick("post", n) });
-  else ms.push({ when: "Snack", r: pick("snack", n) });
-  ms.push({ when: "Dinner", r: pick("dinner", n + 2) });
+  const n = Math.floor(new Date(date + "T12:00").getTime() / 864e5), sw = date === today() ? (prefs(), food().swap.set) : {};
+  const one = (when, slot, k) => ({ when, slot, r: (sw[when] && recipe(sw[when])) || pick(slot, k) });
+  const ms = [one("Breakfast", "breakfast", n), one("Lunch", "lunch", n)];
+  if (gym) ms.push(one("Before the gym", "pre", n), one("After the gym", "post", n));
+  else ms.push(one("Snack", "snack", n));
+  ms.push(one("Dinner", "dinner", n + 2));
   return ms;
+}
+// Why PG suggests a meal, in one short phrase
+export function why(m) {
+  const r = m.r, p = prefs();
+  if ((p.yes[r.k] || 0) >= 2) return "you've liked it before";
+  if (m.when === "Before the gym") return "it's easy on the stomach before training";
+  if (m.when === "After the gym") return `${r.p} grams of protein to help you recover`;
+  if (m.when === "Breakfast") return r.min <= 10 ? `it's ready in ${r.min} minutes with ${r.p} grams of protein` : `${r.p} grams of protein and you can make it ahead`;
+  if (r.f >= 8) return `${r.p} grams of protein and ${r.f} grams of fiber`;
+  return r.min <= 15 ? `it's quick, ${r.min} minutes, with ${r.p} grams of protein` : `${r.p} grams of protein`;
+}
+export const slotOf = when => SLOT_OF[when];
+// "What should I eat today?" as a conversation
+export function chat(date = today(), gym = false, only) {
+  const ms = todayMeals(date, gym);
+  if (only) { const m = ms.find(x => x.when === only) || ms.at(-1); return { text: `For ${lc(m.when)}, try ${lc(m.r.t)}, because ${why(m)}. Sound good?`, focus: m.when }; }
+  const pick3 = gym ? ms.filter(m => ["Breakfast", "After the gym", "Dinner"].includes(m.when)) : [ms[0], ms[1], ms.at(-1)];
+  const lines = pick3.map(m => `${m.when === "After the gym" ? "After the gym" : "For " + lc(m.when)}, ${lc(m.r.t)}, since ${why(m)}.`);
+  return { text: `${gym ? "It's a gym day." : "It's a rest day."} ${lines.join(" ")} That's about ${sum(ms, "p")} grams of protein out of your ${target()}. Want to change anything?`, focus: pick3.at(-1).when };
+}
+// Swap a meal for something else. Returns {r, when} or null.
+export function swap(when, f = {}) {
+  const ms = todayMeals(today(), when === "Before the gym" || when === "After the gym" || f.gym);
+  const m = ms.find(x => x.when === when) || ms.at(-1);
+  const p = prefs(), sw = food().swap;
+  p.no[m.r.k] = (p.no[m.r.k] || 0) + 1;
+  sw.skip.push(m.r.k);
+  const r = options(slotOf(m.when), f).find(x => x.k !== m.r.k && !ms.some(y => y.r.k === x.k));
+  if (!r) { save(); return null; }
+  sw.set[m.when] = r.k; save();
+  return { r, when: m.when, was: m.r };
+}
+export function like(k) { const p = prefs(); p.yes[k] = (p.yes[k] || 0) + 1; if (p.no[k]) p.no[k] = Math.max(0, p.no[k] - 1); save(); }
+export function avoid(q) {
+  const k = /\bmeat\b/.test(q) ? null : findItem(q);
+  const p = prefs();
+  if (/\b(?:meat|vegetarian)\b/.test(q)) MEAT.forEach(x => p.avoid.includes(x) || p.avoid.push(x));
+  else if (k && !p.avoid.includes(k)) p.avoid.push(k);
+  else if (!k) return null;
+  food().week = food().week.filter(x => ok(recipe(x)));
+  save();
+  return k ? ITEMS[k].n.toLowerCase().replace(/ \(.+\)|, .+$/, "") : "meat";
+}
+export function learned() {
+  const p = prefs(), out = [];
+  const liked = Object.entries(p.yes).filter(([, n]) => n >= 1).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k]) => lc(recipe(k)?.t || ""));
+  if (liked.length) out.push(`you like ${liked.join(" and ")}`);
+  if (p.avoid.length) out.push(`you don't eat ${p.avoid.map(k => ITEMS[k].n.toLowerCase().replace(/ \(.+\)|, .+$/, "")).join(", ")}`);
+  return out;
 }
 export const sum = (ms, m) => ms.reduce((a, x) => a + x.r[m], 0);
 

@@ -29,6 +29,7 @@
       <span class="mark">PG</span>
     </div>
     <button class="rail-btn" data-view="today" aria-label="Today"><svg><use href="#i-cal"/></svg><span>Today</span></button>
+    <button class="rail-btn" data-view="school" aria-label="School"><svg><use href="#i-school"/></svg><span>School</span></button>
     <button class="rail-btn" data-view="bass" aria-label="Bass"><svg><use href="#i-music"/></svg><span>Bass</span></button>
     <button class="rail-btn" data-view="bible" aria-label="Bible"><svg><use href="#i-book"/></svg><span>Bible</span></button>
     <button class="rail-btn" data-view="gym" aria-label="Gym"><svg><use href="#i-gym"/></svg><span>Gym</span></button>
@@ -56,6 +57,7 @@
       </button>
       <div class="orb-status" id="orbStatus">Tap to talk</div>
       <div class="orb-heard" id="heard" aria-live="polite"></div>
+      <button class="btn sm end-call" id="endCall" hidden>End call</button>
     </div>
     <div class="chat" id="chat" aria-live="polite"></div>
     <div class="suggest" id="suggest"></div>
@@ -68,11 +70,11 @@
   <!-- Mobile dock -->
   <nav class="dock" aria-label="Main">
     <button class="dock-btn" data-view="today"><svg><use href="#i-cal"/></svg><span>Today</span></button>
+    <button class="dock-btn" data-view="school"><svg><use href="#i-school"/></svg><span>School</span></button>
     <button class="dock-btn" data-view="bass"><svg><use href="#i-music"/></svg><span>Bass</span></button>
-    <button class="dock-btn" data-view="bible"><svg><use href="#i-book"/></svg><span>Bible</span></button>
     <button class="dock-orb" id="dockOrb" aria-label="Talk to PG" data-state="off"><svg><use href="#i-mic"/></svg></button>
+    <button class="dock-btn" data-view="bible"><svg><use href="#i-book"/></svg><span>Bible</span></button>
     <button class="dock-btn" data-view="gym"><svg><use href="#i-gym"/></svg><span>Gym</span></button>
-    <button class="dock-btn" data-view="notes"><svg><use href="#i-note"/></svg><span>Notes</span></button>
     <button class="dock-btn" data-view="settings"><svg><use href="#i-gear"/></svg><span>More</span></button>
   </nav>
 </div>
@@ -84,6 +86,7 @@
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
     <symbol id="i-cal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="16" rx="2.5"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4"/></symbol>
+    <symbol id="i-school" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 9L12 4.5 21.5 9 12 13.5z"/><path d="M6.5 11v5c1.5 1.6 3.4 2.4 5.5 2.4s4-.8 5.5-2.4v-5M21.5 9v5"/></symbol>
     <symbol id="i-gym" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 6.5v11M17.5 6.5v11M3.5 9v6M20.5 9v6M6.5 12h11"/></symbol>
     <symbol id="i-music" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></symbol>
     <symbol id="i-book" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H20v16H5.5A1.5 1.5 0 0 0 4 20.5z"/><path d="M4 20.5A1.5 1.5 0 0 0 5.5 22H20v-3M12 7v6M9 9.5h6"/></symbol>

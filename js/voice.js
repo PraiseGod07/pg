@@ -21,6 +21,7 @@ export class Voice {
     this.supported = !!SR;
     this.ttsSupported = typeof speechSynthesis !== "undefined";
     this.handsFree = false;
+    this.call = false;       // on a call: keep listening after every reply until you say bye
     this.mode = "off";       // off | wake | command | speaking | thinking
     this.rec = null; this.full = ""; this.offset = 0; this.timer = null; this.idleTimer = null;
     this.voice = null; this.voiceURI = ""; this.rate = 1;
@@ -70,7 +71,7 @@ export class Voice {
     try { r.start(); this.restartDelay = 250; } catch { this.rec = null; }
     if (mode === "command") {
       clearTimeout(this.idleTimer);
-      this.idleTimer = setTimeout(() => { if (this.mode === "command" && !this.cmd()) { this.h.onIdle?.(); } }, 9000);
+      this.idleTimer = setTimeout(() => { if (this.mode === "command" && !this.cmd()) { this.h.onIdle?.(); } }, this.call ? 10000 : 9000);
     }
   }
   cmd() { return this.full.slice(this.offset).replace(/^[\s,.!?]+/, "").trim(); }
@@ -82,6 +83,7 @@ export class Voice {
       const w = findWake(this.full);
       if (!w) { if (this.full.length > 400) this.listen("wake"); return; }
       this.offset = w.end;
+      this.call = true;
       this.set("command");
       chime("up");
       this.h.onWake?.();
@@ -95,7 +97,7 @@ export class Voice {
       // Woke with nothing else said: greet like Siri, then listen for the request
       this.timer = setTimeout(() => { if (this.mode === "command" && !this.cmd()) this.h.onGreet?.(); }, 1300);
     } else {
-      this.timer = setTimeout(() => this.finish(), lastFinal ? 2200 : 3200);
+      this.timer = setTimeout(() => this.finish(), lastFinal ? (this.call ? 1400 : 1900) : 2600);
     }
   }
   finish() {
@@ -107,9 +109,11 @@ export class Voice {
   }
   // Tap the orb: if already listening for a command, finish now; otherwise start a command.
   tap() {
-    if (this.mode === "speaking") { this.hush(); this.afterReply(); return; }
-    if (this.mode === "command") { if (this.cmd()) this.finish(); else { this.kill(); this.afterReply(); } return; }
+    if (this.mode === "speaking") { this.hush(); if (this.call) this.listen("command"); else this.afterReply(); return; }
+    if (this.mode === "command") { if (this.cmd()) this.finish(); else this.hangUp(); return; }
+    if (this.mode === "thinking") return;
     chime("up");
+    this.call = true;
     this.listen("command");
   }
   kill() {
@@ -118,7 +122,12 @@ export class Voice {
     if (r) { r.onend = null; r.onresult = null; r.onerror = null; try { r.abort(); } catch {} }
   }
   stop() { this.kill(); clearTimeout(this.idleTimer); this.set("off"); }
-  afterReply() { if (this.handsFree) this.listen("wake"); else this.set("off"); }
+  afterReply() {
+    if (this.call) { this.listen("command"); return; }
+    if (this.handsFree) this.listen("wake"); else this.set("off");
+  }
+  // End the call and go back to waiting for "Hi PG"
+  hangUp() { this.call = false; this.kill(); clearTimeout(this.idleTimer); chime("down"); this.h.onHangUp?.(); if (this.handsFree) this.listen("wake"); else this.set("off"); }
 
   // ---- speaking ----
   hush() { try { speechSynthesis.cancel(); } catch {} clearTimeout(this.sayTimer); }

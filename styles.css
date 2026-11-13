@@ -426,3 +426,22 @@ a.btn { color: var(--text); text-decoration: none; } a.btn.primary { color: var(
 .tip summary::-webkit-details-marker { display: none; }
 .tip p { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--muted); line-height: 1.5; }
 .tip-src { display: block; font-size: var(--text-xs); padding-bottom: var(--space-3); }
+
+/* ---- School ---- */
+.add-task { margin-top: var(--space-5); flex-wrap: nowrap; }
+.add-task .input { flex: 1; min-width: 0; }
+.task { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) 0; border-top: 1px solid var(--line); }
+.task:first-child { border-top: 0; }
+.task-main { flex: 1; min-width: 0; display: grid; gap: 6px; }
+.task .lbl { overflow-wrap: anywhere; }
+.task.done .lbl { color: var(--muted); text-decoration: line-through; }
+.task .row { flex-wrap: nowrap; flex-shrink: 0; }
+.tile.wide { width: 100%; margin-top: var(--space-3); }
+.tile.wide b { overflow-wrap: anywhere; }
+.rule { padding: var(--space-3) 0; border-top: 1px solid var(--line); }
+.rule:first-child { border-top: 0; }
+.rule b { display: block; font-size: var(--text-sm); }
+.rule p { margin: 4px 0; font-size: var(--text-sm); color: var(--muted); }
+.end-call { margin-top: var(--space-2); }
+body.on-call .orb-status { color: var(--accent); }
+.end-call[hidden] { display: none; }

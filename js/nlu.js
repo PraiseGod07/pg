@@ -1,3 +1,4 @@
+import { looksLikeSchool, estIn } from "./school.js";
 // PG language understanding: wake word, intents, and spoken-schedule parsing.
 // Works fully on-device. Built for messy speech-to-text (no punctuation, mis-heard words, wrong AM/PM).
 import { DEFAULT_MIN } from "./library.js";
@@ -33,6 +34,7 @@ export function normalize(raw) {
   t = t.replace(new RegExp(`\\b(${nw}) (o five|thirty five|forty five|fifty five|twenty five|fifteen|twenty|thirty|forty|fifty)\\b`, "g"), (_, h, m) => NUM[h] + ":" + String(MINW[m]).padStart(2, "0"));
   t = t.replace(new RegExp(`\\b(at|from|to|until|till|by|around|between|and) (${nw})\\b`, "g"), (_, p, h) => p + " " + NUM[h]);
   t = t.replace(new RegExp(`\\b(${nw}) ?(am|pm)\\b`, "g"), (_, h, ap) => NUM[h] + " " + ap);
+  t = t.replace(/\b(to|till|til|until|through|and|-)\s+midnight\b/g, "$1 24:00");
   t = t.replace(/\bnoon\b|\bmidday\b/g, "12 pm").replace(/\bmidnight\b/g, "12 am");
   // Day-part words become am/pm markers on the preceding time
   t = t.replace(/(\d)\s+(?:in the morning|this morning)\b/g, "$1 am");
@@ -65,6 +67,7 @@ export function normalize(raw) {
 const T_RE_SRC = "(\\d{1,2})(?::(\\d{2}))?\\s?(am|pm)?";
 function mention(h, m, mer) {
   h = +h; m = +(m || 0);
+  if (h === 24 && !m) return { h: 24, m: 0, mer: null };
   if (h > 23 || m > 59) return null;
   return { h, m, mer: mer || null };
 }
@@ -308,7 +311,7 @@ export function intent(raw) {
   const t = normalize(stripWake(raw));
   const bare = t.replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
   if (!bare) return { type: "greet" };
-  if (/^(?:stop|cancel|never ?mind|nothing|that's all|that is all|no thanks?|no that's it|shut up|be quiet|go to sleep)$/.test(bare)) return { type: "dismiss" };
+  if (/^(?:(?:ok(?:ay)? |alright |thanks? |thank you )?(?:bye|bye bye|goodbye|good bye|bye pg|see you|see ya|later|talk (?:to you )?later|catch you later)(?: pg)?|stop|stop listening|cancel|never ?mind|nothing|nothing else|no(?:pe)? that's (?:it|all)|that's (?:it|all)(?: for now)?(?: thanks?| thank you)?|that is all|i'?m good(?: thanks?)?|no thanks?|no that's it|end (?:the )?call|hang up|shut up|be quiet|go to sleep|good ?night(?: pg)?)(?: thanks?| thank you| pg| sir)*$/.test(bare)) return { type: "dismiss", bye: true };
   if (/^(?:thanks?|thank you|cheers|great|perfect|awesome|nice|cool|good job|got it)(?: (?:pg|so much|man|bro|sir))?$/.test(bare)) return { type: "thanks" };
   if (/\bwhat can you do\b|\bhow do (?:i|you) use\b|\bhelp me\s*$|^help$/.test(bare)) return { type: "help" };
   // ---- PG's memory: save notes and revelations ----
@@ -318,8 +321,21 @@ export function intent(raw) {
     return { type: "note", text: n[1].trim(), folder };
   }
   if (/\b(?:what (?:did|have) i (?:learn|learned|learnt|say|said|note|noted|save|saved|write|written)|what do i know|remind me (?:of )?what i (?:learned|learnt|said)|my (?:revelations|notes|lessons)|what (?:revelations?|notes) do i have)\b/.test(bare)) return { type: "recall", q: bare };
+  // ---- School: assignments and a realistic study timetable ----
+  let sm;
+  if (/\bwhat (?:have you|did you|do you) (?:learn(?:ed|t)?|know|remember) about me\b|\bwhat do you know about me\b/.test(bare)) return { type: "learned" };
+  if (/\b(?:make|is) (?:it|this|that|my (?:day|plan|schedule|timetable)) (?:more )?realistic\b|\bfix my (?:day|plan|schedule|timetable)\b|\b(?:is|was) (?:that|this|it|my plan|my day|my schedule|my timetable) (?:realistic|too much|doable)\b|\bunrealistic\b|\bmake (?:my )?(?:today|tomorrow|plan) realistic\b/.test(bare)) return { type: "realistic", tomorrow: /\btomorrow\b/.test(bare) };
+  if ((sm = bare.match(/\bi (?:can )?(?:only )?(?:study|focus|work)(?: for)? (?:at most |max |up to |about |around )?(.+?) (?:a|per|each) day\b/)) && estIn(sm[1])) return { type: "school_cap", min: estIn(sm[1]) };
+  if ((sm = bare.match(/\bi(?:'m| am) (?:usually |only )?free (?:after|from) (\d{1,2}(?::\d{2})?\s?(?:am|pm)?)(?: on (weekends?|weekdays?))?|\bi (?:finish|get out of|leave|get home from|get back from) (?:school|class|classes|uni|college|lectures?) (?:at|by|around) (\d{1,2}(?::\d{2})?\s?(?:am|pm)?)/))) return { type: "school_window", time: sm[1] || sm[3], we: /weekend/.test(sm[2] || "") };
+  if ((sm = bare.match(/\bi (?:study|focus|work|concentrate) (?:best|better) (?:in the |at )?(morning|evening|night|afternoon)s?\b/))) return { type: "school_pref", p: /morning/.test(sm[1]) ? "morning" : "evening" };
+  if (/\b(?:plan|make|build|create|generate|redo|update|organi[sz]e|do)\b.*\b(?:study (?:plan|timetable|schedule)|my assignments|my homework|revision|school ?work|timetable for (?:my )?(?:school|assignments|exams|homework)|school timetable)\b|\bplan my (?:study|studying|assignments|homework)\b/.test(bare) && !looksLikeSchool(bare)) return { type: "school_plan" };
+  if (/\bwhat (?:assignments|homework|is due|do i have due|'s due)\b|\bmy (?:assignments|deadlines)\b|\bwhat should i (?:study|work on)\b|\bwhen (?:is|are) (?:my )?.+ due\b/.test(bare)) return { type: "school_info" };
+  if (looksLikeSchool(bare)) return { type: "school_add", text: raw };
   // ---- Food, recipes and shopping ----
   let f;
+  if (/\b(?:i )?(?:don'?t|do not|didn'?t) (?:really )?(?:feel like|want|fancy)\b|\bnot (?:in the mood for|feeling)\b|\bsomething (?:else|different|quicker|faster|lighter|easier)\b|\b(?:another|other) (?:one|option|idea|meal|recipe)s?\b|\bchange (?:my |the )?(?:breakfast|lunch|dinner|meal)\b|\bi(?:'m| am) (?:sick|tired) of\b|^(?:no|nah|nope)\b.*\b(?:else|that|this|not)\b|^(?:no|nah|nope)$/.test(bare)) return { type: "food_swap", text: bare };
+  if ((f = bare.match(/\bi (?:don'?t|do not|can'?t|never) (?:like|eat|want)\s+(.+)$|\bi(?:'m| am) allergic to\s+(.+)$|\bi hate\s+(.+)$|\bno more\s+(.+)$/)) && !/\b(?:feel like|this|that|it|plan|schedule|timetable|lesson|gym)\b/.test(bare)) return { type: "food_avoid", item: f[1] || f[2] || f[3] || f[4] };
+  if ((f = bare.match(/\bwhat (?:should|can|do) i (?:eat|have|cook|make)(?: for)? (breakfast|lunch|dinner|a snack|snack|tonight)\b|\bwhat(?:'s| is) for (breakfast|lunch|dinner)\b/))) return { type: "food_meal", when: (f[1] || f[2]).replace(/^a /, "").replace("tonight", "dinner") };
   if ((f = bare.match(/^(?:please )?(?:add|put|include) (.+?) (?:to|on|in|into) (?:my |the )?(?:shopping|grocery|groceries|food)(?: list)?$/))) return { type: "shop_add", item: f[1] };
   if (/\b(?:make|create|generate|build|give me|prepare|do|write|draw up|plan)\b.*\b(?:shopping|grocery|groceries|food) list\b|\bshopping list for (?:the |this )?week\b|\bwhat (?:should|do) i (?:buy|shop for)\b/.test(bare)) return { type: "shop_make" };
   if (/\b(?:what(?:'s| is) on|read|show|open|check)\b.*\b(?:shopping|grocery) list\b|^(?:my |the )?(?:shopping|grocery) list$/.test(bare)) return { type: "shop_show" };
@@ -344,6 +360,8 @@ export function intent(raw) {
   if (/\b(?:what(?:'s| is| am i)? (?:my |today's )?(?:bass )?lesson|what am i (?:learning|practicing|practising) (?:today|on bass|tonight)|bass (?:plan|progress|lesson today))\b/.test(bare) && !/\b(?:at|from) \d/.test(bare)) return { type: "bass_info" };
   if (/^(?:(?:the |my |this )?(?:lesson|session|step|reading|it|that) )?(?:is )?(?:complete|completed|done|finished)(?: (?:it|the lesson|this lesson|today's lesson|the step|this step))?$|^(?:i )?(?:completed|finished|mastered|nailed|got) (?:it|the lesson|this lesson|today's lesson|the step|this step|that)$|^(?:lesson|step) (?:complete|completed|done)$|^i(?:'m| am)? done with (?:the |this |today's )?(?:lesson|step|bass lesson)$|^mark (?:it |the lesson )?(?:as )?complete$/.test(bare)) return { type: "complete" };
   if (/^(?:not yet|repeat(?: (?:it|the lesson|this lesson))?|i need more (?:time|practice)|same lesson(?: again)?|again tomorrow)$/.test(bare)) return { type: "repeat" };
+  if ((sm = bare.match(/\b(?:i )?(?:finished|completed|submitted|handed in|turned in|i'?m done with|done with|sent in)\s+(?:my |the )?(.*?\b(?:essay|paper|report|lab|presentation|project|assignment|homework|problem set|worksheet|exam|test|quiz|coursework)s?\b.*)$/))) return { type: "school_done", target: sm[1], min: estIn(bare) };
+  if ((sm = bare.match(/\b(?:it|that|this|the .+?) (?:took|taken) (?:me )?(?:about |around |like |roughly |almost |over )?(.+)$/)) && estIn(sm[1])) return { type: "school_took", min: estIn(sm[1]) };
   // ---- Learning anything ----
   const lr = bare.match(/^(?:i(?:'m| am) (?:now )?(?:learning|studying|trying to learn)|i (?:want|need|would like|'d like|wanna|plan) to (?:learn|study|get good at)|teach me|help me learn|i(?:'m| am) starting to learn|i(?:'ve| have) started learning)\s+(?:how to\s+|about\s+)?(.{2,60}?)$/);
   if (lr && !/\b(?:at|from|until|till) \d|\b\d+ (?:minutes|hours)\b/.test(bare)) {
