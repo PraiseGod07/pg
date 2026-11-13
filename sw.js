@@ -1,5 +1,5 @@
 // PG service worker: offline app shell, network-first for app files so updates arrive quickly.
-const CACHE = "pg-v2.9.0";
+const CACHE = "pg-v2.9.1";
 const SHELL = ["./", "./index.html", "./styles.css", "./manifest.webmanifest", "./icon.svg", "./icon-192.png", "./icon-512.png",
   "./js/app.js", "./js/nlu.js", "./js/scheduler.js", "./js/store.js", "./js/voice.js", "./js/coach.js", "./js/library.js", "./js/util.js",
   "./js/bass.js", "./js/bible.js", "./js/bibledata.js", "./js/brain.js", "./js/learn.js", "./js/food.js", "./js/school.js", "./js/speech.js", "./js/ai.js", "./js/agent.js", "./js/sync.js", "./js/config.js"];
