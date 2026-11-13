@@ -1,5 +1,6 @@
 // PG — app controller: views, command handling, reminders.
 import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1 } from "./store.js";
+import { speakable, isNatural } from "./speech.js";
 import { CATS, EXERCISES, SPLITS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
 import { intent, parseSchedule, matchBlock, parseClock, normalize } from "./nlu.js";
 import { placeItems, conflicts, firstGap } from "./scheduler.js";
@@ -87,7 +88,7 @@ function paintSuggest() {
     ? `<button class="chip" data-fill="${esc(s)}">${esc(s.replace(/: $/, ""))}</button>`
     : `<button class="chip" data-say="${esc(s)}">${esc(s)}</button>`).join("");
 }
-const speakable = t => t.replace(/\s*\([^)]*[\u3400-\u9fff][^)]*\)/g, "").replace(/[\u3400-\u9fff]+/g, "").replace(/(\d)–(\d)/g, "$1 to $2").replace(/°C/g, " degrees").replace(/“|”/g, "");
+// speakable() lives in speech.js
 function reply(text, opts = {}) {
   pushMsg("pg", text, opts.html);
   if (opts.view) { go(opts.view, opts.date); if (opts.spoken) ui.autoClose = isMobile(); }
@@ -373,7 +374,7 @@ async function handle(text, spoken) {
       const res = SC.plan();
       const nodate = added.find(t => !t.due);
       if (nodate) ui.pending = { type: "due", tid: nodate.id };
-      return schoolReply(res, added.length === 1 ? `Got it. ${added[0].title}${added[0].due ? `, due ${SC.fmt.dueText(added[0])}` : ""}. ${SC.whyTime(added[0])}` : `Got ${added.length} assignments: ${added.map(t => t.title).join(", ")}.${added.some(t => t.guess) ? (SC.ratio().learned ? ` I planned your guesses at ${SC.ratio().r} times, your real pace.` : " I added 50% to your time guesses, since most people underestimate.") : ""}`, spoken);
+      return schoolReply(res, added.length === 1 ? `Got it. ${added[0].title}${added[0].due ? `, due ${SC.fmt.dueText(added[0])}` : ""}. ${SC.whyTime(added[0])}` : `Got it, ${added.length} assignments: your ${andWords(added.map(t => lc(t.title)))}.${added.some(t => t.guess) ? (SC.ratio().learned ? ` I planned your guesses at ${SC.ratio().r} times, your real pace.` : " I added 50% to your time guesses, since most people underestimate.") : ""}`, spoken);
     }
     case "school_plan": return schoolReply(SC.plan(), "", spoken);
     case "school_info": return reply(SC.brief(), { view: "school", spoken });
@@ -482,7 +483,7 @@ async function scheduleFrom(text, spoken) {
   const all = [...res.added, ...res.updated].sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start);
   const d0 = dates[0];
   const parts = [];
-  if (all.length) parts.push((all.length > 1 ? `Done, ${addr()}. ` : "Done. ") + all.slice(0, 8).map(say).join(". ") + ".");
+  if (all.length) parts.push((all.length > 1 ? `Okay, ${addr()}, I added these. ` : pickOne(["Okay, I added it. ", "Got it. ", "Done. "])) + all.slice(0, 8).map(say).join(". ") + ".");
   if (res.unplaced.length) parts.push(`${res.unplaced.map(u => u.title).join(" and ")} didn't fit, so it's in your to-do list.`);
   const cf = conflicts(day(d0).blocks);
   const clash = all.find(b => cf.has(b.id));
@@ -817,7 +818,7 @@ function viewSettings() {
     <div class="set-row"><div class="lbl">Heads-up</div><select class="input" style="width:auto" data-act="heads" aria-label="Heads-up minutes">${[0, 5, 10, 15].map(m => `<option value="${m}" ${S.voice.heads === m ? "selected" : ""}>${m ? m + " min before" : "Off"}</option>`).join("")}</select></div>
     <div class="set-row"><div class="lbl">Keep screen awake</div>${sw("awake", S.voice.keepAwake, "Keep screen awake")}</div>
     <div class="grid2" style="margin-top:var(--space-3)">
-      <label class="field"><span>Voice</span><select class="input" data-act="voice">${vs.length ? vs.map(v => `<option value="${esc(v.voiceURI)}" ${voice.voice && voice.voice.voiceURI === v.voiceURI ? "selected" : ""}>${esc(v.name)}</option>`).join("") : `<option>System default</option>`}</select></label>
+      <label class="field"><span>Voice</span><select class="input" data-act="voice">${vs.length ? vs.map(v => `<option value="${esc(v.voiceURI)}" ${voice.voice && voice.voice.voiceURI === v.voiceURI ? "selected" : ""}>${esc(v.name)}${isNatural(v) ? " (natural)" : ""}</option>`).join("") : `<option>System default</option>`}</select></label>
       <label class="field"><span>Speed</span><select class="input" data-act="rate">${[0.9, 1, 1.1, 1.2].map(r => `<option value="${r}" ${S.voice.rate === r ? "selected" : ""}>${r}×</option>`).join("")}</select></label></div>
     <button class="btn sm" data-act="test-voice"><svg><use href="#i-speaker"/></svg>Test</button>
   </div>
@@ -1060,3 +1061,5 @@ setInterval(tick, 20000);
 if (S.voice.handsFree && voice.supported) { voice.handsFree = true; voice.listen("wake"); }
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
 window.PG = { run, S, voice };
+
+function andWords(a) { return a.length < 2 ? (a[0] || "") : a.slice(0, -1).join(", ") + " and your " + a.at(-1); }

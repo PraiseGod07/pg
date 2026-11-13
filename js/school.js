@@ -278,7 +278,7 @@ export function whyTime(t) {
   return `A ${t.kind} usually takes about ${sayDur(t.plan)}${kindAdj(t.kind) !== 1 ? " for you" : ""}.`;
 }
 export function addedBrief(added, res) {
-  const head = added.length === 1 ? `Got it. ${added[0].title}, due ${dueText(added[0])}.` : `Got ${added.length} assignments: ${added.map(t => `${t.title} due ${when(t.due)}`).join(", ")}.`;
+  const head = added.length === 1 ? `Got it. ${added[0].title}, due ${dueText(added[0])}.` : `Got it, ${added.length} assignments. ${andList(added.map(t => `${t.title} due ${when(t.due)}`))}.`;
   const why = added.length === 1 ? " " + whyTime(added[0]) : "";
   return head + why + " " + planBrief(res);
 }
@@ -385,3 +385,5 @@ export function fix(d) {
   return { split: changed, moved: moved.length, to: [...new Set(placedTo)].map(when) };
 }
 export const fmt = { when, dueText, time: fmtTime };
+
+function andList(a) { return a.length < 2 ? (a[0] || "") : a.slice(0, -1).join(", ") + " and " + a.at(-1); }

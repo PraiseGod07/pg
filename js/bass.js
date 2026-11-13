@@ -70,7 +70,7 @@ export function plan(min = 30) {
 export function brief(min = 30) {
   if (finished()) return "You've finished all 26 lessons. Keep learning songs by ear and work through the groove roadmap.";
   const p = plan(min);
-  return `Today is lesson ${p.n} of ${CURRICULUM.length}: ${p.lesson.t}. Warm up for ${p.steps[0].min} minutes, watch the video, then practice for ${p.steps[2].min} minutes. You're ready to move on when: ${p.pass} Say complete when you've got it.`;
+  return `Today is lesson ${p.n} of ${CURRICULUM.length}: ${p.lesson.t}. Warm up for ${p.steps[0].min} minutes, watch the video, then practice for ${p.steps[2].min} minutes. You're ready to move on when ${p.pass.charAt(0).toLowerCase() + p.pass.slice(1)} Say complete when you've got it.`;
 }
 
 export function complete() {

@@ -196,10 +196,10 @@ export function why(m) {
   const r = m.r, p = prefs();
   if ((p.yes[r.k] || 0) >= 2) return "you've liked it before";
   if (m.when === "Before the gym") return "it's easy on the stomach before training";
-  if (m.when === "After the gym") return `${r.p} grams of protein to help you recover`;
-  if (m.when === "Breakfast") return r.min <= 10 ? `it's ready in ${r.min} minutes with ${r.p} grams of protein` : `${r.p} grams of protein and you can make it ahead`;
-  if (r.f >= 8) return `${r.p} grams of protein and ${r.f} grams of fiber`;
-  return r.min <= 15 ? `it's quick, ${r.min} minutes, with ${r.p} grams of protein` : `${r.p} grams of protein`;
+  if (m.when === "After the gym") return `it has ${r.p} grams of protein to help you recover`;
+  if (m.when === "Breakfast") return r.min <= 10 ? `it's ready in ${r.min} minutes with ${r.p} grams of protein` : `it has ${r.p} grams of protein and you can make it ahead`;
+  if (r.f >= 8) return `it has ${r.p} grams of protein and ${r.f} grams of fiber`;
+  return r.min <= 15 ? `it's quick, about ${r.min} minutes, with ${r.p} grams of protein` : `it has ${r.p} grams of protein`;
 }
 export const slotOf = when => SLOT_OF[when];
 // "What should I eat today?" as a conversation

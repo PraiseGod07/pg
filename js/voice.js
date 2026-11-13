@@ -1,5 +1,6 @@
 // Voice engine: "Hi PG" wake word, command capture, and spoken replies.
 import { findWake } from "./nlu.js";
+import { chunks, voiceScore, isNatural } from "./speech.js";
 
 const SR = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
 let actx = null;
@@ -30,13 +31,10 @@ export class Voice {
   }
   set(mode) { this.mode = mode; this.h.onState?.(mode); }
 
-  voices() { return this.ttsSupported ? speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang)) : []; }
+  voices() { return this.ttsSupported ? speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang)).sort((a, b) => voiceScore(b) - voiceScore(a)) : []; }
   pickVoice() {
     const vs = this.voices();
-    this.voice = vs.find(v => v.voiceURI === this.voiceURI)
-      || vs.find(v => /daniel|google uk english male|arthur|oliver|guy|ryan|thomas|alex|aaron|microsoft (?:guy|ryan|david|mark)/i.test(v.name))
-      || vs.find(v => /en[-_](GB|US)/i.test(v.lang) && !/female|zira|susan|samantha|karen|moira|tessa|fiona|victoria/i.test(v.name))
-      || vs[0] || null;
+    this.voice = vs.find(v => v.voiceURI === this.voiceURI) || vs[0] || null;
   }
 
   // ---- listening ----
@@ -130,23 +128,31 @@ export class Voice {
   hangUp() { this.call = false; this.kill(); clearTimeout(this.idleTimer); chime("down"); this.h.onHangUp?.(); if (this.handsFree) this.listen("wake"); else this.set("off"); }
 
   // ---- speaking ----
-  hush() { try { speechSynthesis.cancel(); } catch {} clearTimeout(this.sayTimer); }
+  hush() { try { speechSynthesis.cancel(); } catch {} clearTimeout(this.sayTimer); clearInterval(this.keep); }
   say(text, then) {
     this.kill();
     if (!this.ttsSupported || !text) { then ? then() : this.afterReply(); return; }
     this.set("speaking");
     this.hush();
-    const parts = String(text).replace(/\s+/g, " ").match(/[^.!?]+[.!?]*/g) || [text];
+    const parts = chunks(text);
     let i = 0, done = false;
-    const end = () => { if (done) return; done = true; clearTimeout(this.sayTimer); then ? then() : this.afterReply(); };
+    const end = () => { if (done) return; done = true; clearTimeout(this.sayTimer); clearInterval(this.keep); then ? then() : this.afterReply(); };
+    // Chrome pauses long speech after ~15 s; a gentle resume keeps it going.
+    clearInterval(this.keep);
+    this.keep = setInterval(() => { try { if (speechSynthesis.speaking && !speechSynthesis.paused) { speechSynthesis.pause(); speechSynthesis.resume(); } } catch {} }, 10000);
     const next = () => {
+      if (done) return;
       if (i >= parts.length) { end(); return; }
-      const u = new SpeechSynthesisUtterance(parts[i++].trim());
-      if (this.voice) u.voice = this.voice;
-      u.rate = this.rate; u.pitch = 1;
-      u.onend = next; u.onerror = next;
+      const txt = parts[i++];
+      const u = new SpeechSynthesisUtterance(txt);
+      if (this.voice) { u.voice = this.voice; u.lang = this.voice.lang; }
+      // Natural voices sound best at their own pace; older voices get a touch slower and warmer.
+      const nat = this.voice && isNatural(this.voice);
+      u.rate = this.rate * (nat ? 1 : 0.96);
+      u.pitch = nat ? 1 : (/\?\s*$/.test(txt) ? 1.04 : 0.98);
+      u.onend = () => { clearTimeout(this.sayTimer); setTimeout(next, i < parts.length ? 90 : 0); }; u.onerror = next;
       clearTimeout(this.sayTimer);
-      this.sayTimer = setTimeout(next, 2500 + u.text.length * 95);
+      this.sayTimer = setTimeout(next, 4000 + txt.length * 85 / (u.rate || 1));
       speechSynthesis.speak(u);
     };
     setTimeout(next, 60);

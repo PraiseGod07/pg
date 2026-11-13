@@ -320,6 +320,8 @@ export function intent(raw) {
     const folder = /\b(?:spiritual|church|bible|revelation)\b/i.test(raw.slice(0, raw.length - n[1].length)) ? "spiritual" : null;
     return { type: "note", text: n[1].trim(), folder };
   }
+  if (/\b(?:what(?:'s| is)|how(?:'s| is)|tell me about|show me) my (?:day|morning|afternoon|evening)\b|\bmy day (?:today|tomorrow)\b|\bplan my day\b/.test(bare)) return { type: "day", tomorrow: /\btomorrow\b/.test(bare) };
+  if (/\bplan (?:out )?my week\b|\bmy week(?:ly)? (?:plan|timetable|schedule)\b/.test(bare)) return { type: "school_plan" };
   if (/\b(?:what (?:did|have) i (?:learn|learned|learnt|say|said|note|noted|save|saved|write|written)|what do i know|remind me (?:of )?what i (?:learned|learnt|said)|my (?:revelations|notes|lessons)|what (?:revelations?|notes) do i have)\b/.test(bare)) return { type: "recall", q: bare };
   // ---- School: assignments and a realistic study timetable ----
   let sm;
