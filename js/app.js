@@ -13,6 +13,7 @@ import * as LN from "./learn.js";
 import * as F from "./food.js";
 import * as SC from "./school.js";
 import * as AI from "./ai.js";
+import * as AG from "./agent.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
 
 const $ = s => document.querySelector(s);
@@ -21,9 +22,10 @@ const ui = { view: "today", date: today(), openEx: null, playing: new Set(), aut
 
 await hydrate();
 load();
+C.syncCustom();
 BS.bass(); B.bible(); M.notes(); LN.tracks();
 const addr = () => S.profile.address || "sir";
-const hello = () => `Hi, ${addr()}, what can I do for you today?`;
+const hello = () => `Hi ${addr()}. How may I help you?`;
 const lc = s => s ? s.charAt(0).toLowerCase() + s.slice(1) : s;
 const ucf = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 const pickOne = a => a[Math.floor(Math.random() * a.length)];
@@ -35,11 +37,13 @@ const voice = new Voice({
   onWake: () => { openAssistant(true); $("#heard").textContent = ""; },
   onGreet: () => { const g = hello(); pushMsg("pg", g); voice.say(g, () => voice.listen("command")); },
   onIdle: () => {
-    if (voice.call) { const t = `I'm here if you need me, ${addr()}.`; pushMsg("pg", t); voice.say(t, () => voice.hangUp()); return; }
+    // On a call, silence just means he's thinking. Wait patiently, check in once, then step back.
+    if (voice.call && !ui.checkedIn) { ui.checkedIn = true; voice.listen("command"); return; }
+    if (voice.call) { ui.checkedIn = false; const t = `I'll be here. Just say Hi PG when you need me, ${addr()}.`; pushMsg("pg", t); voice.say(t, () => voice.hangUp()); return; }
     voice.stop(); voice.afterReply(); setStatus("Say “Hi PG”");
   },
   onHangUp: () => { ui.pending = null; paintVoice(voice.mode); },
-  onCommand: text => { $("#heard").textContent = ""; run(text, true); },
+  onCommand: text => { ui.checkedIn = false; $("#heard").textContent = ""; run(text, true); },
   onError: code => {
     if (code === "blocked" && S.voice.handsFree) { needTap(); return; }
     const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found." }[code];
@@ -195,13 +199,22 @@ async function handle(text, spoken) {
   const pend = ui.pending; ui.pending = null;
   if (pend && await followUp(pend, bare0, text, spoken)) return;
   const it = intent(text);
-  const d = ui.view === "today" ? ui.date : today();
+  const d = ui.view === "today" && ui.pinDate ? ui.date : today();
+  // Add / delete / replace things on the timetable, in plain words
+  if (!["greet", "hush", "dismiss"].includes(it.type) && await localEdit(text, spoken)) return;
+  // With an AI key, PG thinks with the AI first so it can handle anything; the built-in brain is the backup.
+  if (AI.on() && !ui.quiet && !["greet", "hush", "dismiss", "clear"].includes(it.type)) {
+    setStatus("Thinking…");
+    try { const ans = await aiChat(text, M.search(text, 4)); if (ans) return reply(ans, { spoken }); return voice.afterReply(); }
+    catch (e) { console.warn(e); ui.aiFail = AI.friendlyError(e); }
+  }
   switch (it.type) {
     case "greet": {
       const g = hello(); pushMsg("pg", g);
       if (S.voice.speak !== false) voice.say(g, () => voice.supported && spoken !== "typed" ? voice.listen("command") : voice.afterReply());
       return;
     }
+    case "hush": return reply(voice.call ? pickOne(["Sure, go ahead.", "Okay, I'm listening.", `Go ahead, ${addr()}.`]) : "Okay.", { then: () => voice.call ? voice.listen("command") : voice.afterReply() });
     case "dismiss": return reply(it.bye || voice.call ? pickOne([`Okay, ${addr()}. I'm here if you need me.`, `Talk soon, ${addr()}.`, `Okay. Just say Hi PG when you need me.`]) : "Okay.", { then: () => voice.call ? voice.hangUp() : voice.afterReply() });
     case "thanks": if (voice.call) ui.pending = { type: "more" }; return reply(voice.call ? `Anytime, ${addr()}. Anything else?` : `Anytime, ${addr()}.`);
     case "help": return reply("Tell me your day and I'll plan it. I also teach you bass, keep your Bible plan, coach the gym, plan your meals and shopping, and remember what you learn.");
@@ -363,7 +376,7 @@ async function handle(text, spoken) {
     case "band_info": return reply(C.bandBrief(minsFor("band", 60)), { view: "bass", spoken });
     case "song_add": { const s = C.addSong(it.name); return reply(`Added ${s.name} to your songs.`, { view: "bass", spoken }); }
     case "howto": {
-      ui.openEx = it.ex; ui.playing.add(EXERCISES[it.ex].video.id);
+      ui.openEx = it.ex; if (EXERCISES[it.ex].video) ui.playing.add(EXERCISES[it.ex].video.id);
       return reply(C.exerciseBrief(it.ex), { view: "gym", spoken });
     }
     case "review": return reply(reviewText(), { view: "today", date: today(), spoken });
@@ -463,13 +476,18 @@ function renameCoachBlocks(d) {
 }
 
 async function scheduleFrom(text, spoken) {
-  const ctx = { date: ui.view === "today" ? ui.date : today(), today: today(), now: nowMin() };
-  let items = parseSchedule(text, ctx);
+  const ctx = { date: ui.view === "today" && ui.pinDate ? ui.date : today(), today: today(), now: nowMin() };
+  // "can you add reading at 9pm" -> "reading at 9pm", so the title is just "Reading"
+  const asked = text.replace(/^(?:(?:ok(?:ay)?|so|and|also|then|pg|hey|please)[ ,]+)*(?:(?:can|could|would|will) you (?:please )?|please |i want (?:you )?to |i need (?:you )?to |i'd like (?:you )?to |let's |go ahead and )?(?:add|put|schedule|book|pencil in|block out|block off|set up)\s+(?:in |me |a |an |some )?(?=\S)/i, "");
+  let items = parseSchedule(asked || text, ctx);
   let events = items.filter(i => i.kind === "event");
   // With the AI on, chatty or vague lines go to conversation instead of becoming calendar blocks.
   const chatty = /^(?:oh|um+|uh+|so|well|hmm+|maybe|i think|i feel|i'?m (?:so |really |kind of |a bit )?(?:tired|sad|stressed|bored|happy|excited|worried|feeling)|honestly|you know|to be honest|what do you think|do you think|should i|why|how come|tell me|can you explain)\b/i.test(text.trim()) || /\?\s*$/.test(text);
   const vague = events.some(e => e.cat === "other" && e.s == null && e.e == null);
-  if (AI.on() && !ui.quiet && events.length && (chatty || vague)) events = [];
+  // Only put things on the calendar when he clearly asks (a time, a day, or words like add / schedule / put).
+  const cue = /\b(?:add|schedule|put|plan|book|remind|block|set up|move|pencil|slot|fit|\d{1,2}(?::\d\d)? ?(?:am|pm|a\.m\.|p\.m\.)|at \d|from \d|for \d+ ?(?:min|minutes|hours?|h)\b|tomorrow|tonight|this (?:morning|afternoon|evening)|in the (?:morning|afternoon|evening)|later today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next week|due)\b/i.test(text);
+  const talkAbout = /\b(?:talk|chat|speak|tell me) (?:about|to you about)|\blet'?s talk\b/i.test(text);
+  if (AI.on() && !ui.quiet && events.length && (chatty || vague || talkAbout || !cue)) events = [];
   if (!events.length && AI.on() && !ui.quiet) {
     setStatus("Thinking…");
     try { const ans = await aiChat(text, M.search(text, 4)); if (ans) return reply(ans); }
@@ -565,12 +583,18 @@ He is a Christian student who plays bass, goes to the gym and wants high-protein
 
 ${aiContext(notes)}
 
-Reply ONLY with JSON: {"say": "what you say out loud", "do": ["plain commands for the app"], "remember": ["new lasting facts about him"]}.
+You can change anything in his app (timetable, gym exercises, Bible plan, bass, songs, shopping list, notes, food, school, settings) except API keys and private settings. When he asks for a change, do it with "ops" and say briefly what you did. If he asks for something you need to look up (like an exercise for a muscle), choose a well-known, safe option from your knowledge and add it. If a request is unclear, ask one short question instead of guessing.
+
+APP DATA (today is ${today()}):
+${AG.snapshot()}
+
+Reply ONLY with JSON: {"say": "what you say out loud", "ops": [direct changes], "do": ["plain commands for the app"], "remember": ["new lasting facts about him"]}.
+${AG.TOOLS}
 "do" is for when he clearly wants the app to act. Write each as a short command the app understands, for example "gym at 5pm", "bass lesson tomorrow at 6:30pm", "I have a history essay due Friday", "add eggs to my shopping list", "I don't eat pork", "is my plan realistic", "move gym to 7pm", "clear today". Leave it empty otherwise.
 "remember" is for lasting facts he reveals about himself (likes, habits, goals, people, how he feels about things). Write them as "You ..." sentences. Leave it empty if nothing new.`;
-  const raw = await AI.call(sys, [...history(10), { role: "user", content: text }], { json: true, max: 500 });
+  const raw = await AI.call(sys, [...history(10), { role: "user", content: text }], { json: true, max: 900 });
   const o = AI.parseJSON(raw) || { say: String(raw || "").trim() };
-  return { say: String(o.say || "").trim(), do: (o.do || []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (o.remember || []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
+  return { say: String(o.say || "").trim(), ops: Array.isArray(o.ops) ? o.ops : [], do: (o.do || []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (o.remember || []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
 }
 async function aiChat(text, notes = []) {
   const r = await aiTalk(text, notes);
@@ -580,11 +604,19 @@ async function aiChat(text, notes = []) {
 async function finishTalk(r) {
   r.remember.forEach(f => { if (!M.facts().some(n => n.text.toLowerCase() === f.toLowerCase())) M.add(f, { folder: "about" }); });
   const done = [];
+  if (r.ops?.length) {
+    const lines = AG.apply(r.ops, { onDone: undo => toast("PG made changes.", "Undo", () => { undo(); C.syncCustom(); render(); toast("Undone."); }) });
+    if (r.ops.some(o => /exercise/.test(o.op))) go("gym");
+    else if (r.ops.some(o => /block|clear_day/.test(o.op))) go("today", r.ops.map(o => o.date).find(x => /^\d{4}-/.test(x || "")) || today());
+    else render();
+    if (!r.say) done.push(...lines);
+  }
   for (const c of r.do) {
     ui.quiet = []; try { await handle(c, false); } catch (e) { console.warn(e); }
     done.push(...ui.quiet); ui.quiet = null;
   }
   if (r.do.length) render();
+  r.do = r.do || [];
   if (!r.say && !done.length) return null;
   if (done.length) pushMsg("pg", done.join(" "));
   return r.say || done.join(" ");
@@ -595,8 +627,130 @@ async function aiLearn(topic) {
   return (o.steps || []).filter(s => s.t).slice(0, 8);
 }
 
+
+// ================= Add / delete / replace in plain words =================
+const WD = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+const DEL_RE = /^(?:(?:ok(?:ay)?|so|and|also|please|pg|hey|actually|now|then|oh)[ ,]+)*(?:(?:can|could|would|will) you |please |i want (?:you )?to |i need (?:you )?to |i'd like (?:you )?to |let's |lets |go ahead and |just )?(delete|remove|cancel|drop|scrap|erase|clear|skip|ditch|take out|take off|take away|get rid of|forget about|no more|no)\b\s*(.*)$/;
+const NEG_RE = /^(?:(?:ok(?:ay)?|so|actually|honestly|pg|and|but|oh)[ ,]+)*i(?:'m| am)? ?(?:not (?:going|gonna|doing|able)|won't|will not|can't|cannot|don't (?:want|wanna|need|have time)|do not (?:want|need)|no longer|am not)\b(?: (?:to|be|going to|gonna|for))?(?: (?:go(?:ing)? to|go|do(?:ing)?|make it to|make|have|attend(?:ing)?|practi[cs]e|practi[cs]ing|study|studying|read(?:ing)?|play(?:ing)?|train(?:ing)?|hit|do the))?\s*(.*)$/;
+const TAKE_RE = /^(?:(?:can|could) you |please )?take (?:the |my )?(.+?) (?:off|out)\b(.*)$/;
+const REPL_RES = [
+  [/^(?:(?:ok(?:ay)?|so|actually|pg)[ ,]+)*(?:(?:can|could|would) you |please |let's |i want to )?(?:replace|swap|switch|exchange|change) (?:out )?(?:the |my )?(.+?) (?:with|for|into) (.+)$/, 1, 2],
+  [/^(?:(?:ok(?:ay)?|so|actually|pg)[ ,]+)*(?:instead of|rather than) (?:the |my )?(.+?)[, ]+(?:i'll |i will |let's |i want to |i wanna |put |add |do |have |schedule )?(.+)$/, 1, 2],
+  [/^(?:(?:ok(?:ay)?|so|actually|pg)[ ,]+)*(?:put |add |do |schedule |i'll do |i want )?(.+?) instead of (?:the |my )?(.+)$/, 2, 1]
+];
+const TIME_ONLY = /^(?:at |to |for )?\d{1,2}(?::\d\d)?\s?(?:am|pm)?(?: (?:today|tomorrow|tonight))?$/;
+const EDIT_CUE = /\b(?:delete|remove|cancel|drop|scrap|erase|skip|ditch|take (?:out|off|away)|get rid of|forget about|no more|replace|swap|instead of|rather than|not (?:going|gonna|doing)|won't|can't|cannot|don't (?:want|wanna|need)|take .+ off|clear)\b/;
+function dayOf(t) {
+  if (/\btomorrow\b/.test(t)) return { d: addDays(today(), 1), x: true };
+  if (/\b(?:today|tonight|this (?:morning|afternoon|evening))\b/.test(t)) return { d: today(), x: true };
+  const w = WD.findIndex(n => new RegExp("\\b" + n + "\\b").test(t));
+  if (w >= 0) { const n = new Date(today() + "T12:00").getDay(); return { d: addDays(today(), ((w - n + 7) % 7) || 7), x: true }; }
+  return { d: today(), x: false };
+}
+function clauseTime(t) { const m = t.match(/\b(\d{1,2})(?::(\d\d))?\s?(am|pm|o'?clock)\b|\bat (\d{1,2})(?::(\d\d))?\b/); if (!m) return null; return parseClock((m[1] || m[4]) + ":" + (m[2] || m[5] || "00") + (/[ap]m/.test(m[3] || "") ? " " + m[3] : "")); }
+// Which timetable items does he mean?
+function targets(raw, base) {
+  let t = " " + normalize(raw).replace(/[^a-z0-9: ']/g, " ") + " ";
+  const { d, x } = dayOf(t);
+  t = t.replace(/\b(?:today|tonight|tomorrow|this (?:morning|afternoon|evening)|(?:on )?(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)|(?:from|off|on|in|out of) (?:my |the )?(?:schedule|timetable|calendar|plan|day|list|agenda)|please|for now|any ?more|for (?:the )?day|i have|that i have|i had|i was|planned|scheduled|the|my|a|an|that|this)\b/g, " ").replace(/\s+/g, " ").trim();
+  const range = t.match(/\b(?:everything|all|anything|stuff)(?: else)?(?: that'?s)? (after|before|from|past|until|till) (.+)$/);
+  const pool = blocksOf(d);
+  if (range) { const at = clauseTime(range[2]) ?? parseClock(range[2]); if (at == null) return { d, list: [] }; return { d, list: pool.filter(b => /after|from|past/.test(range[1]) ? b.start >= at : b.start < at), range: true }; }
+  if (/^(?:everything|all|all of it|whole (?:day|thing)|it all|schedule|timetable)$/.test(t)) return { d, list: pool, all: true };
+  if (!t || /^(?:it|that|this|them|one)$/.test(t)) return { d, list: [] };
+  const at = clauseTime(t);
+  const name = t.replace(/\b(?:at )?\d{1,2}(?::\d\d)?\s?(?:am|pm|o'?clock)?\b/g, "").replace(/\b(?:at|session|block|thing|one|appointment|class session)\b/g, "").trim();
+  const every = /\b(?:all|every|each)\b/.test(t);
+  const days = x ? [d] : every ? Array.from({ length: 7 }, (_, i) => addDays(today(), i)) : Array.from({ length: 8 }, (_, i) => addDays(today(), i));
+  const out = [];
+  for (const dd of days) {
+    let cand = blocksOf(dd);
+    if (at != null) cand = cand.filter(b => Math.abs(b.start - at) <= 20 || (b.start <= at && at < b.end));
+    const hits = name.length > 1 ? cand.filter(b => matchBlock(name, [b])) : at != null ? cand : [];
+    if (hits.length) {
+      const best = name.length > 1 ? (matchBlock(name, hits) || hits[0]) : hits[0];
+      out.push(...(every ? hits : [best]).map(b => ({ b, d: dd })));
+      if (!every) break;   // nearest day only
+    }
+  }
+  return { d: out[0]?.d || d, list: out.map(o => o.b), pairs: out };
+}
+function splitClauses(text) {
+  return text.split(/\s*(?:[,;]|\.(?:\s|$)|\band then\b|\bthen\b|\band also\b|\balso\b|\band\b|\bplus\b|\bbut\b|\bafter that\b)\s*/i).map(x => x.trim()).filter(Boolean);
+}
+function exerciseCmd(c) {
+  const add = c.match(/^(?:(?:can|could) you |please )?(?:add|put|include|throw in) (?:in )?(?:a |an |the |some )?(.+?) (?:to|into|in|on) (?:my |the )?(?:(push|pull|legs?|upper|lower|full body) )?(?:day|workout|routine|exercises?|exercise list|gym(?: list| plan| day| routine)?)\b/);
+  if (add) { const r = C.addExercise({ name: add[1].replace(/\s+exercise$/, "") }, add[2] || ""); return `Added ${EXERCISES[r.key].name} to ${r.day?.name || "your workout"}.`; }
+  const rm = c.match(/^(?:(?:can|could) you |please )?(?:remove|delete|drop|take out|get rid of|skip) (?:the |my )?(.+?) (?:from|off|out of) (?:my |the )?(?:(push|pull|legs?|upper|lower|full body) )?(?:day|workout|routine|exercises?|exercise list|gym(?: list| plan| day| routine)?)\b/);
+  if (rm) { const r = C.removeExercise(rm[1], rm[2] || ""); return r ? `Removed ${EXERCISES[r.key].name} from your workout.` : `I couldn't find ${rm[1]} in your workout.`; }
+  return null;
+}
+async function localEdit(text, spoken) {
+  const low = normalize(text).replace(/[^a-z0-9: ',.;]/g, " ").replace(/\s+/g, " ").trim();
+  const ex = exerciseCmd(low.replace(/[,.;]/g, ""));
+  if (ex) { go("gym"); return reply(ex, { spoken }), true; }
+  if (!EDIT_CUE.test(low)) return false;
+  const clauses = splitClauses(low);
+  const snaps = {}, said = [], adds = [];
+  const snap = dd => { if (!snaps[dd]) snaps[dd] = snapshot(dd); };
+  let mode = null, acted = false, view = null;
+  const del = (tg, explicit, phrase) => {
+    if (!tg.list.length) { if (explicit) said.push(`I couldn't find ${phrase ? "“" + phrase + "”" : "that"} on your schedule.`); return false; }
+    const pairs = tg.pairs || tg.list.map(b => ({ b, d: tg.d }));
+    pairs.forEach(({ b, d: dd }) => { snap(dd); day(dd).blocks = day(dd).blocks.filter(x => x.id !== b.id); });
+    const names = [...new Set(pairs.map(p => p.b.title.split(" · ")[0]))];
+    const dd = pairs[0].d;
+    const when = dd === today() ? "" : dd === addDays(today(), 1) ? " tomorrow" : " on " + fmtDay(dd);
+    said.push(tg.all ? `Cleared everything${when || " today"}.` : tg.range ? `Removed ${pairs.length} ${pairs.length === 1 ? "item" : "items"}${when}: ${names.join(", ")}.` : `Removed ${names.join(" and ")}${when}.`);
+    view = dd; acted = true; return pairs;
+  };
+  for (const c of clauses) {
+    let m, done = false;
+    for (const [re, a, b] of REPL_RES) {
+      if (!(m = c.match(re))) continue;
+      const from = m[a], to = m[b];
+      if (TIME_ONLY.test(to.trim())) break;          // "change gym to 6pm" is a move
+      const tg = targets(from);
+      const gone = del(tg, true, from);
+      if (gone) { const g = gone[0]; const dd = g.d; const hasTime = clauseTime(to) != null; adds.push(to + (hasTime ? "" : ` at ${fmtTime(g.b.start)}`) + (dayOf(to).x ? "" : dd === today() ? " today" : dd === addDays(today(), 1) ? " tomorrow" : " on " + WD[new Date(dd + "T12:00").getDay()])); }
+      mode = null; done = true; break;
+    }
+    if (done) continue;
+    if ((m = c.match(TAKE_RE)) && !/\b(?:work|time|day|week)\b off/.test(c)) { del(targets(m[1] + " " + m[2]), true, m[1]); mode = "del"; continue; }
+    if ((m = c.match(DEL_RE))) {
+      const verb = m[1], rest = m[2].trim();
+      if (verb === "clear" && /^(?:my |the )?(?:whole )?(?:schedule|timetable|day|plan|today|tomorrow|everything|calendar)?(?: (?:today|tomorrow))?$/.test(rest)) return false;  // whole-day clear: handled below
+      const soft = /^(?:no|skip|forget about)$/.test(verb);
+      const tg = targets(rest);
+      if (!del(tg, !soft && rest.length > 0, rest) && soft && !acted) return false;
+      mode = "del"; continue;
+    }
+    if ((m = c.match(NEG_RE)) && m[1]) {
+      const tg = targets(m[1]);
+      if (tg.list.length) { del(tg, false); mode = "del"; continue; }
+      if (!acted && clauses.length === 1) return false;
+      continue;
+    }
+    // "remove gym and bass" -> "bass" carries the delete
+    if (mode === "del" && !/\b(?:add|put|schedule|plan|book|move|at \d|\d\s?(?:am|pm))\b/.test(c)) {
+      const tg = targets(c); if (tg.list.length) { del(tg, false); continue; }
+    }
+    mode = null;
+    if (/\b(?:add|put|schedule|plan|book|move|shift|push|pencil|slot|fit|make|change|\d{1,2}(?::\d\d)?\s?(?:am|pm)|at \d)\b/.test(c)) adds.push(c);
+  }
+  if (!acted && !adds.length && !said.length) return false;
+  // With an AI key, anything PG couldn't pin down goes to the AI instead of failing.
+  if (AI.on() && !ui.quiet && said.some(x => /^I couldn't find/.test(x))) { Object.values(snaps).forEach(sn => { day(sn.d).blocks = sn.blocks; }); return false; }
+  for (const a of adds) { ui.quiet = []; try { await handle(a, false); } catch (e) { console.warn(e); } said.push(...ui.quiet); ui.quiet = null; acted = true; }
+  save(); render();
+  const list = Object.values(snaps);
+  if (list.length) undoable(list, said[0]?.split(".")[0] + ".");
+  reply(said.join(" ") || "Done.", { view: "today", date: view || ui.date || today(), spoken });
+  return true;
+}
+
 // ================= Views =================
-function go(view, date) { ui.view = view; if (date) ui.date = date; render(); $("#main").scrollTo?.(0, 0); if (isMobile()) window.scrollTo(0, 0); }
+function go(view, date) { ui.view = view; if (date) { ui.date = date; ui.pinDate = false; } render(); $("#main").scrollTo?.(0, 0); if (isMobile()) window.scrollTo(0, 0); }
 const TITLES = { today: "Today", school: "School", bass: "Bass", bible: "Bible", gym: "Gym", notes: "Notes", settings: "Settings" };
 // Everything PG has learned, written into the "Learned things about PraiseGod" folder.
 function factList() {
@@ -685,7 +839,11 @@ function coachLink(b) {
   return v ? `<button class="tag link" data-act="go" data-v="${v[0]}">${v[1]}</button>` : "";
 }
 
-function videoHTML(v, title) {
+function videoHTML(v, title, search) {
+  if (!v || !v.id) {
+    const q = encodeURIComponent(search || title + " proper form");
+    return `<a class="video video-search" href="https://www.youtube.com/results?search_query=${q}" target="_blank" rel="noopener"><span class="play" style="position:static"><svg><use href="#i-play"/></svg></span><span>Watch ${esc(title)} videos on YouTube</span></a><div class="video-cap"><span>Added by PG</span><a href="https://www.youtube.com/results?search_query=${q}" target="_blank" rel="noopener">YouTube <svg><use href="#i-ext"/></svg></a></div>`;
+  }
   const playing = ui.playing.has(v.id);
   return `<div class="video">${playing
     ? `<iframe src="https://www.youtube-nocookie.com/embed/${v.id}?autoplay=1&rel=0&playsinline=1&modestbranding=1" title="${esc(title)}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen loading="lazy"></iframe>`
@@ -749,7 +907,7 @@ function viewWorkout() {
   const logged = S.gym.log.find(l => l.date === today());
   let h = `<div class="eyebrow">Gym · ${esc(sp.label)}</div>
     <h1 class="title">Today is <em>${esc(w.name.toLowerCase())}</em>.</h1>
-    <div class="split-chips" role="group" aria-label="Choose workout">${sp.days.map(x => `<button class="chip ${x === w ? "on" : ""}" data-act="gymday" data-k="${x.key}">${esc(x.name)}</button>`).join("")}</div>
+    <div class="split-chips" role="group" aria-label="Choose workout">${sp.days.map(x => `<button class="chip ${x.key === w.key ? "on" : ""}" data-act="gymday" data-k="${x.key}">${esc(x.name)}</button>`).join("")}</div>
     <div class="row act-row"><button class="btn" data-act="speak-gym"><svg><use href="#i-speaker"/></svg>Talk me through it</button>
     <button class="btn primary" data-act="gym-finish" ${logged ? "disabled" : ""}>${logged ? "Logged" : "Finish workout"}</button></div>
     <p class="note" style="margin-bottom:var(--space-5)">${esc(GYM_WARMUP)}</p>`;
@@ -764,8 +922,8 @@ function viewWorkout() {
         <span class="ex-name">${esc(e.name)}</span>
         <span class="ex-dose">${p.sets} × ${esc(p.reps)}</span>
       </button>
-      ${open ? `<div class="ex-body"><div>${videoHTML(e.video, e.name)}</div><div>
-        <ol class="cues">${e.cues.map(c => `<li>${esc(c)}</li>`).join("")}</ol>
+      ${open ? `<div class="ex-body"><div>${videoHTML(e.video, e.name, e.search)}</div><div>
+        ${e.muscles ? `<p class="note" style="margin:0 0 8px">Works: ${esc(e.muscles)}</p>` : ""}<ol class="cues">${e.cues.map(c => `<li>${esc(c)}</li>`).join("")}</ol>
         <div class="sets" role="group" aria-label="Sets">${Array.from({ length: p.sets }, (_, k) => `<button class="set ${sets[k] ? "on" : ""}" data-act="set" data-k="${p.ex}" data-i="${k}" aria-pressed="${!!sets[k]}">Set ${k + 1}</button>`).join("")}</div>
         <div class="weight"><label class="row" style="gap:6px">kg <input class="input tnum" type="number" inputmode="decimal" min="0" step="0.5" data-act="w" data-k="${p.ex}" value="${last ? esc(last.w) : ""}" aria-label="Weight in kg"></label>
           <span>${last ? `Last · ${esc(last.w)} kg` : ""}</span><span>Rest ${p.rest >= 60 ? Math.round(p.rest / 60 * 10) / 10 + " min" : p.rest + "s"}</span></div>
@@ -864,22 +1022,24 @@ function viewSchool() {
   return h;
 }
 function aiSettings() {
-  const st = ui.aiStatus || (AI.on() ? { ok: S.ai.ok, text: S.ai.ok ? `Connected to ${AI.PROVIDERS[S.ai.provider].label}` : "Saved. Tap Test to check it works." } : { text: "Not connected" });
-  const pv = S.ai.provider && S.ai.provider !== "none" ? S.ai.provider : "";
+  const st = ui.aiStatus || (AI.on() ? { ok: S.ai.ok, text: S.ai.ok ? `Connected to ${AI.label()}` : "Saved. Tap Test to check it works." } : { text: "Not connected" });
+  const pv = S.ai.provider && !["none", "auto"].includes(S.ai.provider) ? S.ai.provider : "";
   return `<h2 class="sec"><span>PG's AI brain</span></h2><div class="card ai-card">
-    <p class="note" style="margin-top:0">Paste an API key from OpenAI, Claude or Google Gemini so PG can hold real conversations. The key stays on this device only.</p>
+    <p class="note" style="margin-top:0">Paste an API key from any AI company, like ChatGPT, Claude, Gemini, Grok, DeepSeek, Groq, Mistral, Perplexity or OpenRouter, so PG can hold real conversations. PG figures out which one it is. The key stays on this device only.</p>
     <div class="ai-status ${st.ok ? "ok" : st.err ? "err" : ""}" role="status"><i></i><span>${esc(st.text)}${st.ok ? ` · ${esc(AI.modelOf())}` : ""}</span></div>
     <form class="ai-form" data-form="ai">
-      <label class="field"><span>API key</span><input class="input" name="key" type="password" data-act="ai-key-live" value="${esc(S.ai.key)}" placeholder="sk-…  or  sk-ant-…  or  AIza…" autocomplete="off" spellcheck="false" autocapitalize="off"></label>
-      <div class="grid2"><label class="field"><span>Provider</span><select class="input" name="provider"><option value="">Detect from key</option>${Object.entries(AI.PROVIDERS).map(([k, v]) => `<option value="${k}" ${pv === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
-      <label class="field"><span>Model <span class="faint">(optional)</span></span><input class="input" name="model" value="${esc(S.ai.model && AI.modelOf() === S.ai.model ? S.ai.model : "")}" placeholder="${esc(AI.PROVIDERS[pv || "openai"].model)}" autocomplete="off" spellcheck="false" autocapitalize="off"></label></div>
+      <label class="field"><span>API key</span><input class="input" name="key" type="password" data-act="ai-key-live" value="${esc(S.ai.key)}" placeholder="Paste your key here" autocomplete="off" spellcheck="false" autocapitalize="off"></label>
+      <div class="grid2"><label class="field"><span>Provider</span><select class="input" name="provider" data-act="ai-prov"><option value="">Detect from key</option>${Object.entries(AI.PROVIDERS).map(([k, v]) => `<option value="${k}" ${pv === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
+      <label class="field"><span>Model <span class="faint">(optional)</span></span><input class="input" name="model" value="${esc(S.ai.model && AI.modelOf() === S.ai.model ? S.ai.model : "")}" placeholder="${esc(pv ? (AI.PROVIDERS[pv].model || "PG picks one") : "PG picks one")}" autocomplete="off" spellcheck="false" autocapitalize="off"></label></div>
+      <label class="field" data-ai-base ${pv === "custom" ? "" : "hidden"}><span>Web address of the AI</span><input class="input" name="base" value="${esc(S.ai.base || "")}" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false" autocapitalize="off" inputmode="url"></label>
       <div class="row"><button class="btn primary" type="submit">Save and connect</button>${AI.on() ? `<button class="btn" type="button" data-act="ai-test">Test</button><button class="btn ghost" type="button" data-act="ai-clear">Remove key</button>` : ""}</div>
     </form>
-    <p class="note">Get a key: ${Object.values(AI.PROVIDERS).map(v => `<a href="${v.keyUrl}" target="_blank" rel="noopener">${esc(v.label)}</a>`).join(" · ")}</p></div>`;
+    <details class="fold"><summary>Where to get a key</summary><p class="note">${Object.values(AI.PROVIDERS).filter(v => v.keyUrl).map(v => `<a href="${v.keyUrl}" target="_blank" rel="noopener">${esc(v.label.replace(/ \(.*\)$/, ""))}</a>`).join(" · ")}. One OpenRouter key works with models from almost every company.</p></details></div>`;
 }
+function showBase(f) { const b = f?.querySelector("[data-ai-base]"); if (b) b.hidden = f.provider.value !== "custom"; }
 async function connectAI() {
   ui.aiStatus = { text: "Connecting…" }; render();
-  try { await AI.test(); S.ai.ok = true; save(); ui.aiStatus = null; render(); toast(`PG is connected to ${AI.PROVIDERS[S.ai.provider].label}.`); }
+  try { await AI.test(); S.ai.ok = true; save(); ui.aiStatus = null; render(); toast(`PG is connected to ${AI.label()}.`); }
   catch (e) { S.ai.ok = false; save(); ui.aiStatus = { err: true, text: AI.friendlyError(e) }; render(); }
 }
 function viewSettings() {
@@ -890,7 +1050,7 @@ function viewSettings() {
   <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} things PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button></div>
   ${aiSettings()}
   <h2 class="sec"><span>Voice</span></h2><div class="card">
-    <div class="set-row"><div class="lbl">Hands-free “Hi PG”${voice.supported ? "" : ` <span class="faint">· not supported here</span>`}</div>${sw("handsfree", S.voice.handsFree, "Hands-free wake word", !voice.supported)}</div>
+    <div class="set-row"><div class="lbl">Always listen for “Hi PG”<span class="faint" style="display:block;font-weight:400;font-size:var(--text-xs)">${voice.supported ? "Off means PG only listens after you press the button. Some phones beep when it's on." : "Not supported here"}</span></div>${sw("handsfree", S.voice.handsFree, "Hands-free wake word", !voice.supported)}</div>
     <div class="set-row"><div class="lbl">Speak replies</div>${sw("speak", S.voice.speak !== false, "Speak replies")}</div>
     <div class="set-row"><div class="lbl">Spoken reminders</div>${sw("alerts", S.voice.alerts, "Spoken reminders")}</div>
     <div class="set-row"><div class="lbl">Heads-up</div><select class="input" style="width:auto" data-act="heads" aria-label="Heads-up minutes">${[0, 5, 10, 15].map(m => `<option value="${m}" ${S.voice.heads === m ? "selected" : ""}>${m ? m + " min before" : "Off"}</option>`).join("")}</select></div>
@@ -942,7 +1102,7 @@ document.addEventListener("click", e => {
   const a = el.dataset.act, id = el.dataset.id;
   const d = ui.date;
   switch (a) {
-    case "day": ui.date = el.dataset.n === "0" ? today() : addDays(ui.date, +el.dataset.n); render(); break;
+    case "day": ui.date = el.dataset.n === "0" ? today() : addDays(ui.date, +el.dataset.n); ui.pinDate = ui.date !== today(); render(); break;
     case "add": openEditor(null); break;
     case "edit": if (e.target.closest(".check,.tag.link")) return; openEditor(id); break;
     case "toggle": { e.stopPropagation(); const b = day(d).blocks.find(x => x.id === id); if (b) { b.done = !b.done; if (b.done && b.src === "school") SC.noteDone(b); save(); render(); if (b.done) chime("ok"); } break; }
@@ -1030,7 +1190,8 @@ let qT;
 document.addEventListener("input", e => {
   const el = e.target;
   if (el.dataset.act === "song-p") { const row = el.closest(".song"); const st = stageOf(+el.value); const lab = row.querySelector(".song-stage"); lab.className = "song-stage " + st.tone; lab.innerHTML = `<span class="tnum">${el.value}%</span> · ${st.label}`; }
-  if (el.dataset.act === "ai-key-live") { const pv = AI.detect(el.value), sel = el.form?.provider; if (pv && sel && !sel.dataset.touched) sel.value = pv; }
+  if (el.dataset.act === "ai-key-live") { const pv = AI.detect(el.value), sel = el.form?.provider; if (sel && !sel.dataset.touched) { sel.value = pv || ""; showBase(el.form); } }
+  if (el.dataset.act === "ai-prov") { el.dataset.touched = 1; showBase(el.form); }
   if (el.name === "provider" && el.form?.dataset.form === "ai") el.dataset.touched = "1";
   if (el.dataset.act === "note-q") { clearTimeout(qT); qT = setTimeout(() => { ui.q = el.value; render(); const s = $(".search"); s.focus(); s.setSelectionRange(s.value.length, s.value.length); }, 250); }
 });
@@ -1041,9 +1202,10 @@ document.addEventListener("submit", e => {
     e.preventDefault();
     const key = f.key.value.trim();
     if (!key) { toast("Paste your API key first."); return; }
-    const prov = f.provider.value || AI.detect(key);
-    if (!prov) { ui.aiStatus = { err: true, text: "I couldn't tell which company that key is from. Pick the provider." }; render(); return; }
-    S.ai = { provider: prov, key, model: f.model.value.trim(), ok: false }; save();
+    const prov = f.provider.value || AI.detect(key) || "auto";
+    const base = f.base.value.trim();
+    if (prov === "custom" && !/^https:\/\//.test(base)) { ui.aiStatus = { err: true, text: "Paste the AI's web address. It starts with https:// and usually ends in /v1." }; render(); return; }
+    S.ai = { provider: prov, key, model: f.model.value.trim(), base, ok: false }; save();
     connectAI(); return;
   }
   if (f.dataset.form === "song") { e.preventDefault(); const n = f.song.value.trim(); if (n) { C.addSong(n); render(); } return; }
@@ -1076,6 +1238,13 @@ $("#endCall").addEventListener("click", () => { voice.hush(); voice.hangUp(); to
 $("#scrim").addEventListener("click", closeAssistant);
 function orbTap() {
   if (!voice.supported) { openAssistant(); $("#ask").focus(); toast("Voice isn't available in this browser. Type to PG instead."); return; }
+  // Press to talk: PG greets you, then listens. Nothing listens in the background.
+  if (voice.mode === "off" || voice.mode === "wake") {
+    voice.call = true; openAssistant(false);
+    const g = hello(); pushMsg("pg", g);
+    if (S.voice.speak !== false) voice.say(g, () => voice.listen("command")); else voice.listen("command");
+    return;
+  }
   voice.tap();
 }
 
@@ -1088,7 +1257,7 @@ function confirmSheet(title, body, cta, fn) {
 function restoreFrom(file) {
   if (!file) return;
   const r = new FileReader();
-  r.onload = () => { try { const o = JSON.parse(r.result); if (!o.days && Array.isArray(o.tasks)) { confirmSheet("Import PG Planner tasks?", "Open tasks from the old app will be added.", "Import", () => { importV1(o); render(); toast("Imported."); }); return; } if (!o.days) throw 0; confirmSheet("Restore this backup?", "It replaces everything on this device.", "Restore", () => { replace(o); load(); paintChat(); render(); toast("Restored."); }); } catch { toast("That file isn't a PG backup."); } };
+  r.onload = () => { try { const o = JSON.parse(r.result); if (!o.days && Array.isArray(o.tasks)) { confirmSheet("Import PG Planner tasks?", "Open tasks from the old app will be added.", "Import", () => { importV1(o); render(); toast("Imported."); }); return; } if (!o.days) throw 0; confirmSheet("Restore this backup?", "It replaces everything on this device.", "Restore", () => { replace(o); load(); C.syncCustom(); paintChat(); render(); toast("Restored."); }); } catch { toast("That file isn't a PG backup."); } };
   r.readAsText(file);
 }
 

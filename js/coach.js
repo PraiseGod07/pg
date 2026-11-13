@@ -2,10 +2,60 @@
 import { S, save } from "./store.js";
 import { SPLITS, EXERCISES, INSTRUMENTS, GYM_WARMUP, stageOf } from "./library.js";
 import { today, addDays, uid } from "./util.js";
+export { EXERCISES };
 
 // ---------- Gym ----------
 export function split() { return SPLITS[S.gym.split] || SPLITS.ppl; }
-export function workoutFor(date = today()) {
+// ---- Exercises PG adds or removes for you (kept on top of the built-in plan) ----
+export function custom() { S.gym.custom = S.gym.custom || { ex: {}, days: {} }; S.gym.custom.ex ||= {}; S.gym.custom.days ||= {}; return S.gym.custom; }
+export function syncCustom() { Object.entries(custom().ex).forEach(([k, v]) => { EXERCISES[k] = { muscles: "", cues: [], video: null, ...v, custom: true }; }); }
+function withCustom(d) {
+  if (!d) return d;
+  const c = custom().days[d.key]; if (!c) return d;
+  const drop = c.drop || [];
+  return { ...d, plan: [...d.plan.filter(p => !drop.includes(p.ex)), ...(c.add || []).filter(p => EXERCISES[p.ex] && !drop.includes(p.ex))] };
+}
+const slug = t => String(t).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ").map((w, i) => i ? w[0].toUpperCase() + w.slice(1) : w).join("") || "ex" + Date.now();
+// Find an exercise by key or by name ("cable fly", "the dips")
+export function findEx(q) {
+  if (!q) return null; if (EXERCISES[q]) return q;
+  const t = String(q).toLowerCase().replace(/^(the|a|an|my)\s+/, "").trim();
+  const hit = Object.entries(EXERCISES).find(([k, e]) => e.name.toLowerCase() === t) || Object.entries(EXERCISES).find(([k, e]) => e.name.toLowerCase().includes(t) || t.includes(e.name.toLowerCase())) || Object.entries(EXERCISES).find(([k, e]) => t.split(" ").filter(w => w.length > 3).every(w => e.name.toLowerCase().includes(w.slice(0, 5))));
+  return hit ? hit[0] : null;
+}
+export function dayKeyFor(word) {
+  const sp = split(), w = String(word || "").toLowerCase();
+  const d = sp.days.find(x => x.key === w || x.name.toLowerCase().startsWith(w) || x.focus.includes(w)) || null;
+  return d ? d.key : null;
+}
+// Add an exercise to a workout day. info: { name, muscles, cues[], search, sets, reps, rest }
+export function addExercise(info, dayKey) {
+  const dk = dayKeyFor(dayKey) || workoutFor().key;
+  let key = findEx(info.key || info.name);
+  if (!key) {
+    key = slug(info.name);
+    custom().ex[key] = { name: (s => s.charAt(0).toUpperCase() + s.slice(1))(String(info.name).trim().slice(0, 60)), muscles: String(info.muscles || "").slice(0, 80), cues: (info.cues || []).map(String).slice(0, 4), search: String(info.search || info.name + " proper form").slice(0, 100) };
+    syncCustom();
+  }
+  const c = custom().days[dk] = custom().days[dk] || { add: [], drop: [] };
+  c.drop = (c.drop || []).filter(x => x !== key);
+  const already = split().days.find(x => x.key === dk)?.plan.some(p => p.ex === key);
+  if (!already && !(c.add || []).some(p => p.ex === key)) (c.add = c.add || []).push({ ex: key, sets: Math.max(1, Math.min(8, +info.sets || 3)), reps: String(info.reps || "10–12"), rest: +info.rest || 60 });
+  save();
+  return { key, day: split().days.find(x => x.key === dk) };
+}
+export function removeExercise(q, dayKey) {
+  const key = findEx(q); if (!key) return null;
+  const days = dayKey ? [dayKeyFor(dayKey)].filter(Boolean) : split().days.filter(d => withCustom(d).plan.some(p => p.ex === key)).map(d => d.key);
+  if (!days.length) return null;
+  days.forEach(dk => { const c = custom().days[dk] = custom().days[dk] || { add: [], drop: [] }; c.add = (c.add || []).filter(p => p.ex !== key); if (!(c.drop ||= []).includes(key)) c.drop.push(key); });
+  save();
+  return { key, days };
+}
+export function planOf(dayKey) { return withCustom(split().days.find(x => x.key === dayKey)); }
+
+export function workoutFor(date = today()) { return withCustom(baseWorkout(date)); }
+function baseWorkout(date) {
   const sp = split();
   const logged = S.gym.log.find(l => l.date === date);
   if (S.gym.override && S.gym.overrideDate === date) {
@@ -29,7 +79,7 @@ export function setWeight(exKey, w, reps) { S.gym.weights[exKey] = { w, reps, da
 export function completeWorkout(date = today(), checked = {}) {
   const d = workoutFor(date), sp = split();
   if (!S.gym.log.find(l => l.date === date)) S.gym.log.push({ date, key: d.key, sets: checked });
-  S.gym.idx = (sp.days.indexOf(d) + 1) % sp.days.length;
+  S.gym.idx = (sp.days.findIndex(x => x.key === d.key) + 1) % sp.days.length;
   S.gym.override = null; save();
   return d;
 }

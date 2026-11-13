@@ -311,6 +311,8 @@ export function intent(raw) {
   const t = normalize(stripWake(raw));
   const bare = t.replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
   if (!bare) return { type: "greet" };
+  // "Can you stop" / "wait" means stop talking and listen, not end the call.
+  if (/^(?:(?:ok(?:ay)?|no|pg|hey|sorry)[ ,]*)*(?:(?:can|could|would) you |please |just )?(?:stop(?: talking| for a (?:sec|second|moment))?|wait(?: a (?:sec|second|minute|moment))?|hold on|hang on|cancel|never ?mind|shut up|be quiet|quiet|pause|shh+|one sec(?:ond)?|let me (?:talk|speak|finish|think)|listen(?: to me)?)(?: please| pg| sir| for a (?:sec|second|moment))*$/.test(bare)) return { type: "hush" };
   if (/^(?:(?:ok(?:ay)? |alright |thanks? |thank you )?(?:bye|bye bye|goodbye|good bye|bye pg|see you|see ya|later|talk (?:to you )?later|catch you later)(?: pg)?|stop|stop listening|cancel|never ?mind|nothing|nothing else|no(?:pe)? that's (?:it|all)|that's (?:it|all)(?: for now)?(?: thanks?| thank you)?|that is all|i'?m good(?: thanks?)?|no thanks?|no that's it|end (?:the )?call|hang up|shut up|be quiet|go to sleep|good ?night(?: pg)?)(?: thanks?| thank you| pg| sir)*$/.test(bare)) return { type: "dismiss", bye: true };
   if (/^(?:thanks?|thank you|cheers|great|perfect|awesome|nice|cool|good job|got it)(?: (?:pg|so much|man|bro|sir))?$/.test(bare)) return { type: "thanks" };
   if (/\bwhat can you do\b|\bhow do (?:i|you) use\b|\bhelp me\s*$|^help$/.test(bare)) return { type: "help" };
@@ -375,7 +377,7 @@ export function intent(raw) {
   if (/\bwhat(?:'s| is| do i have)? (?:coming )?(?:up )?next\b|\bwhat(?:'s| is) after (?:this|that)\b|\bwhat's coming up\b/.test(bare)) return { type: "next" };
   if (/\b(?:what(?:'s| is| does)|read|tell me|show me|go over)\b.*\b(?:schedule|timetable|plan|agenda|day look)\b|\bwhat do i have (?:today|tomorrow|on)\b/.test(bare))
     return { type: "day", tomorrow: /\btomorrow\b/.test(bare) };
-  if (/\b(?:clear|wipe|reset|erase|delete) (?:my |the |all |everything on )?(?:whole )?(?:schedule|timetable|day|plan|today|everything)\b|\bstart over\b/.test(bare)) return { type: "clear", tomorrow: /\btomorrow\b/.test(bare) };
+  if (/\b(?:clear|wipe|reset|erase|delete) (?:my |the |all |everything on )?(?:whole )?(?:schedule|timetable|day|plan|today|tomorrow|everything)\b|\bstart over\b/.test(bare)) return { type: "clear", tomorrow: /\btomorrow\b/.test(bare) };
   // gym / band coaching queries
   const split = bare.match(/\b(?:make it|switch to|change (?:it )?to|today is|let's do|do|it's|its|i want to do|i'll do)\s+(?:a\s+)?(push|pull|legs?|upper|lower|full body)(?: body)? day\b/);
   if (split) return { type: "gym_switch", day: split[1].replace(/^legs$/, "leg") };

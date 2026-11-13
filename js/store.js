@@ -28,7 +28,7 @@ export async function hydrate() {
 export const DEFAULTS = () => ({
   v: 2,
   profile: { address: "sir", name: "", dayStart: 420, dayEnd: 1380 },
-  voice: { handsFree: true, voiceURI: "", rate: 1, alerts: true, heads: 5, keepAwake: false },
+  voice: { handsFree: false, voiceURI: "", rate: 1, alerts: true, heads: 5, keepAwake: false },
   days: {},            // { "YYYY-MM-DD": { blocks: [...] } }
   inbox: [],           // unscheduled tasks
   gym: { split: "ppl", idx: 0, override: null, overrideDate: null, log: [] , weights: {} },
@@ -60,7 +60,8 @@ export function load() {
   
   S.chat = (S.chat || []).slice(-60);
   // v2.7: PG listens for "Hi PG" all the time by default
-  if (!S.voice.alwaysOn) { S.voice.alwaysOn = 1; S.voice.handsFree = true; }
+  // v2.8: no background listening. PG listens only after you press the button.
+  if ((S.voice.alwaysOn || 0) < 2) { S.voice.alwaysOn = 2; S.voice.handsFree = false; }
   return S;
 }
 
