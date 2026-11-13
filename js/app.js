@@ -9,17 +9,18 @@ import * as BS from "./bass.js";
 import * as B from "./bible.js";
 import * as M from "./brain.js";
 import * as LN from "./learn.js";
+import * as F from "./food.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
-const ui = { view: "today", date: today(), openEx: null, playing: new Set(), autoClose: false, topic: null, folder: "all", q: "" };
+const ui = { view: "today", date: today(), openEx: null, playing: new Set(), autoClose: false, topic: null, folder: "all", q: "", gymTab: "workout", openRec: null };
 
 await hydrate();
 load();
 BS.bass(); B.bible(); M.notes(); LN.tracks();
 const addr = () => S.profile.address || "sir";
-const hello = () => `Hi, ${addr()}. What can I do for you today?`;
+const hello = () => `Hi, ${addr()}, what can I do for you today?`;
 
 // ================= Voice wiring =================
 const voice = new Voice({
@@ -65,7 +66,7 @@ const SUGGEST = {
   today: ["What's next?", "Read my schedule", "Today's Bible reading"],
   bass: ["What's my lesson?", "Lesson complete", "Not yet"],
   bible: ["Today's reading", "I read today's reading", "What did I learn?"],
-  gym: ["What's today's workout?", "How do I do a squat?", "Switch to leg day"],
+  gym: ["What should I eat today?", "Make my shopping list", "Give me a recipe"],
   notes: ["What have I learned?", "Save a revelation: ", "I'm learning SolidWorks"],
   settings: ["Hi PG", "What's next?", "Read my schedule"]
 };
@@ -74,7 +75,7 @@ function paintSuggest() {
     ? `<button class="chip" data-fill="${esc(s)}">${esc(s.replace(/: $/, ""))}</button>`
     : `<button class="chip" data-say="${esc(s)}">${esc(s)}</button>`).join("");
 }
-const speakable = t => t.replace(/(\d)–(\d)/g, "$1 to $2").replace(/“|”/g, "");
+const speakable = t => t.replace(/\s*\([^)]*[\u3400-\u9fff][^)]*\)/g, "").replace(/[\u3400-\u9fff]+/g, "").replace(/(\d)–(\d)/g, "$1 to $2").replace(/“|”/g, "");
 function reply(text, opts = {}) {
   pushMsg("pg", text, opts.html);
   if (opts.view) { go(opts.view, opts.date); if (opts.spoken) ui.autoClose = isMobile(); }
@@ -127,7 +128,7 @@ async function handle(text, spoken) {
     }
     case "dismiss": return reply("Okay.");
     case "thanks": return reply(`Anytime, ${addr()}.`);
-    case "help": return reply("Tell me your day and I'll plan it. I also teach you bass, keep your Bible plan, coach the gym, and remember what you learn.");
+    case "help": return reply("Tell me your day and I'll plan it. I also teach you bass, keep your Bible plan, coach the gym, plan your meals and shopping, and remember what you learn.");
     case "now": {
       const c = current(), nx = upcoming()[0];
       if (c) return reply(`Right now it's ${c.title}, until ${sayTime(c.end)}.` + (nx ? ` Then ${nx.title} at ${sayTime(nx.start)}.` : ""), { view: "today", date: today(), spoken });
@@ -235,7 +236,20 @@ async function handle(text, spoken) {
       renameCoachBlocks(today()); ui.topic = "gym";
       return reply(`Switched. ${C.gymBrief(today(), true)}`, { view: "gym", spoken });
     }
-    case "gym_info": ui.topic = "gym"; return reply(C.gymBrief(today(), true), { view: "gym", spoken });
+    case "gym_info": ui.topic = "gym"; ui.gymTab = "workout"; return reply(C.gymBrief(today(), true) + " " + F.postLine(), { view: "gym", spoken });
+    // ---- Food ----
+    case "food_info": ui.gymTab = "food"; return reply(F.brief(), { view: "gym", spoken });
+    case "weight": { const t = F.setWeight(it.kg); ui.gymTab = "food"; return reply(`Got it. Your target is about ${t} grams of protein a day.`, { view: "gym", spoken }); }
+    case "recipe": {
+      let r = F.findRecipe(it.q);
+      if (!r) { const ms = F.todayMeals(); r = (/breakfast/.test(it.q) ? ms[0] : /lunch/.test(it.q) ? ms[1] : /after|post/.test(it.q) ? ms[3] : ms[4]).r; }
+      ui.gymTab = "food"; ui.openRec = r.k;
+      return reply(F.recipeBrief(r), { view: "gym", spoken });
+    }
+    case "shop_make": { const ls = F.build(); ui.gymTab = "list"; const g = F.byStore(ls); return reply(`Your shopping list is ready, ${ls.length} items for the week. ${g.map(x => `${x.rows.length} ${{ wet: "from the wet market", super: "from Wellcome or PARKnSHOP", online: "online from HKTVmall or pandamart", other: "other" }[x.s]}`).join(", ")}.`, { view: "gym", spoken }); }
+    case "shop_show": ui.gymTab = "list"; return reply(F.listBrief(), { view: "gym", spoken });
+    case "shop_add": { const items = it.item.split(/\s*(?:,|\band\b)\s*/).filter(Boolean); const rows = items.map(x => F.add(x)); ui.gymTab = "list"; return reply(`Added ${rows.map(r => r.n.toLowerCase().replace(/ \(.+\)/, "")).join(", ")}.`, { view: "gym", spoken }); }
+    case "shop_where": { const w = F.whereBrief(it.item); if (w) return reply(w); break; }
     case "band_info": return reply(C.bandBrief(minsFor("band", 60)), { view: "bass", spoken });
     case "song_add": { const s = C.addSong(it.name); return reply(`Added ${s.name} to your songs.`, { view: "bass", spoken }); }
     case "howto": {
@@ -337,7 +351,7 @@ async function scheduleFrom(text, spoken) {
     } else parts.push("Which book are we reading? Say: my plan is to read Ephesians.");
     if (solo) view = "bible";
   }
-  if (first("gym")) { ui.topic = "gym"; parts.push(C.gymBrief(first("gym").date, true)); if (solo) view = "gym"; }
+  if (first("gym")) { ui.topic = "gym"; ui.gymTab = "workout"; parts.push(C.gymBrief(first("gym").date, true) + " " + F.postLine(first("gym").date)); if (solo) view = "gym"; }
   if (first("band")) parts.push(C.bandBrief(first("band").end - first("band").start));
   if (first("learn")) { const tr = LN.findTrack(first("learn").title.replace(/^learn\s+/i, "")); if (tr) { ui.topic = "learn"; parts.push(LN.brief(tr)); if (solo) view = "notes"; } }
   render();
@@ -470,7 +484,51 @@ function gymProgress() {
   if (!S.gym.cur || S.gym.cur.date !== today()) S.gym.cur = { date: today(), sets: {} };
   return S.gym.cur;
 }
+const GYM_TABS = [["workout", "Workout"], ["food", "Food"], ["list", "Shopping"]];
 function viewGym() {
+  const tabs = `<div class="tabs" role="tablist">${GYM_TABS.map(([k, l]) => `<button role="tab" class="tab ${ui.gymTab === k ? "on" : ""}" aria-selected="${ui.gymTab === k}" data-act="gymtab" data-k="${k}">${l}</button>`).join("")}</div>`;
+  if (ui.gymTab === "food") return tabs + viewFood();
+  if (ui.gymTab === "list") return tabs + viewList();
+  return tabs + viewWorkout();
+}
+function recipeCard(r, label) {
+  const open = ui.openRec === r.k, on = F.food().week.includes(r.k);
+  return `<article class="rec ${open ? "open" : ""}"><button class="rec-head" data-act="rec" data-k="${r.k}" aria-expanded="${open}">
+    ${label ? `<span class="rec-when">${esc(label)}</span>` : ""}<span class="rec-t">${esc(r.t)}</span><span class="rec-p tnum">${r.p} g</span></button>
+    ${open ? `<div class="rec-body"><div class="faint rec-meta">${esc(r.zh)} · ${r.min} min · about ${r.p} g protein</div>
+      <ul class="ing">${r.ing.map(([k, a]) => { const it = F.ITEMS[k]; const q = it.unit && a ? F.fmtQty(a, it.unit) : ""; return `<li><span>${esc(it.n)}</span><span class="faint">${esc(q)}</span></li>`; }).join("")}</ul>
+      <ol class="cues">${r.steps.map(x => `<li>${esc(x)}</li>`).join("")}</ol>
+      <div class="row"><a class="btn sm" href="${esc(F.video(r))}" target="_blank" rel="noopener"><svg><use href="#i-play"/></svg>Watch how</a>
+      <button class="btn sm" data-act="speak-rec" data-k="${r.k}"><svg><use href="#i-speaker"/></svg>Read it</button>
+      <button class="btn sm ${on ? "" : "primary"}" data-act="rec-week" data-k="${r.k}">${on ? "On this week's list" : "Add to this week"}</button></div></div>` : ""}</article>`;
+}
+function viewFood() {
+  const ms = F.todayMeals(), f = F.food();
+  let h = `<div class="eyebrow">Food · Hong Kong</div><h1 class="title">About <em>${F.target()} g</em> of protein today.</h1>
+    <form class="row kg-form" data-form="kg"><span class="faint">Your weight</span><input class="input tnum" name="kg" type="number" inputmode="decimal" min="30" max="250" step="0.5" placeholder="kg" value="${f.kg || ""}" aria-label="Weight in kg"><span class="faint">kg</span><button class="btn sm">Save</button></form>
+    <h2 class="sec"><span>Today</span></h2>`;
+  h += ms.map(m => recipeCard(m.r, m.when)).join("");
+  h += `<p class="note">About ${F.mealsProtein(ms)} g across these meals.</p>`;
+  const inToday = ms.some(m => m.r.k === ui.openRec);
+  h += `<details class="fold" ${ui.openRec && !inToday ? "open" : ""}><summary>All recipes</summary>${F.RECIPES.map(r => recipeCard(r)).join("")}</details>`;
+  return h;
+}
+function viewList() {
+  const ls = F.list(), left = ls.filter(x => !x.got).length;
+  let h = `<div class="eyebrow">Shopping · This week</div><h1 class="title"><em>${left}</em> ${left === 1 ? "item" : "items"} to buy.</h1>
+    <form class="row add-note" data-form="shop"><input class="input" name="t" placeholder="Add an item" aria-label="Add an item"><button class="btn primary">Add</button></form>`;
+  F.byStore(ls).forEach(({ s, rows }) => {
+    h += `<h2 class="sec"><span>${esc(F.STORES[s].label)}</span></h2>${F.STORES[s].tip ? `<p class="note store-tip">${esc(F.STORES[s].tip)}</p>` : ""}<div class="card list">`;
+    h += rows.map(r => `<div class="shop ${r.got ? "got" : ""}"><button class="chk" data-act="shop-got" data-id="${r.id}" aria-pressed="${r.got}" aria-label="${r.got ? "Unmark" : "Mark"} ${esc(r.n)}">${r.got ? `<svg><use href="#i-check"/></svg>` : ""}</button>
+      <span class="shop-n">${esc(r.n)}${r.zh ? ` <span class="faint">${esc(r.zh)}</span>` : ""}</span><span class="faint tnum">${esc(r.qty)}</span>
+      <button class="x" data-act="shop-del" data-id="${r.id}" aria-label="Remove ${esc(r.n)}"><svg><use href="#i-x"/></svg></button></div>`).join("");
+    h += `</div>`;
+  });
+  if (!ls.length) h += `<p class="note">Your list is empty.</p>`;
+  h += `<div class="row act-row" style="margin-top:var(--space-5)"><button class="btn" data-act="shop-build">Rebuild from recipes</button>${ls.some(x => x.got) ? `<button class="btn" data-act="shop-clear">Clear bought</button>` : ""}</div>`;
+  return h;
+}
+function viewWorkout() {
   const sp = C.split(), w = C.workoutFor(today()), prog = gymProgress();
   const logged = S.gym.log.find(l => l.date === today());
   let h = `<div class="eyebrow">Gym · ${esc(sp.label)}</div>
@@ -650,6 +708,14 @@ document.addEventListener("click", e => {
     case "gymday": S.gym.override = el.dataset.k; S.gym.overrideDate = today(); save(); renameCoachBlocks(today()); render(); break;
     case "speak-gym": reply(C.gymBrief(today(), false)); break;
     case "gym-finish": completeCoach("gym"); break;
+    case "gymtab": ui.gymTab = el.dataset.k; render(); break;
+    case "rec": ui.openRec = ui.openRec === el.dataset.k ? null : el.dataset.k; render(); break;
+    case "speak-rec": reply(F.recipeBrief(F.recipe(el.dataset.k))); break;
+    case "rec-week": { const k = el.dataset.k; F.toggleWeek(k); F.build(); render(); toast(F.food().week.includes(k) ? "Added to this week's list." : "Removed from this week's list."); break; }
+    case "shop-got": F.toggle(id); render(); break;
+    case "shop-del": F.removeItem(id); render(); break;
+    case "shop-build": F.build(); render(); toast("List rebuilt."); break;
+    case "shop-clear": F.clearGot(); render(); break;
     case "bass-done": chime("ok"); completeCoach("bass"); break;
     case "bass-repeat": BS.logTry(); reply(`No problem. We'll stay on ${BS.lesson().t.toLowerCase()} next time.`); break;
     case "speak-bass": reply(BS.brief(minsFor("bass", 30))); break;
@@ -709,6 +775,8 @@ document.addEventListener("submit", e => {
   if (f.id === "composer") { e.preventDefault(); const t = $("#ask").value; $("#ask").value = ""; voice.kill(); run(t, "typed"); return; }
   if (f.dataset.form === "song") { e.preventDefault(); const n = f.song.value.trim(); if (n) { C.addSong(n); render(); } return; }
   if (f.dataset.form === "note") { e.preventDefault(); const t = f.t.value.trim(); if (t) { const n = M.add(t); ui.folder = "all"; ui.q = ""; render(); toast(`Saved to ${M.FOLDERS[n.folder].label}.`); } return; }
+  if (f.dataset.form === "kg") { e.preventDefault(); const kg = +f.kg.value; if (kg > 0) { const t = F.setWeight(kg); render(); toast(`Target: ${t} g of protein a day.`); } return; }
+  if (f.dataset.form === "shop") { e.preventDefault(); const t = f.t.value.trim(); if (t) { F.add(t); render(); $("[data-form=shop] input")?.focus(); } return; }
   if (f.dataset.form === "bible-plan") { e.preventDefault(); B.setPlan(+f.book.value, +f.max.value); renameCoachBlocks(today()); render(); toast(`Reading ${B.stats().book}.`); return; }
   if (f.dataset.form === "bible-upto") {
     e.preventDefault(); const ch = +f.ch.value, v = +f.v.value; if (!ch) return;

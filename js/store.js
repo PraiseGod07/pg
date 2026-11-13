@@ -37,6 +37,7 @@ export const DEFAULTS = () => ({
   bible: { plan: null, max: 3, version: "NKJV", history: [] },
   notes: [],
   learn: { tracks: [], active: null },
+  food: { kg: null, week: null, list: [], made: null },
   chat: [],
   ai: { provider: "none", key: "", model: "" }
 });

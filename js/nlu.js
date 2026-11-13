@@ -318,6 +318,15 @@ export function intent(raw) {
     return { type: "note", text: n[1].trim(), folder };
   }
   if (/\b(?:what (?:did|have) i (?:learn|learned|learnt|say|said|note|noted|save|saved|write|written)|what do i know|remind me (?:of )?what i (?:learned|learnt|said)|my (?:revelations|notes|lessons)|what (?:revelations?|notes) do i have)\b/.test(bare)) return { type: "recall", q: bare };
+  // ---- Food, recipes and shopping ----
+  let f;
+  if ((f = bare.match(/^(?:please )?(?:add|put|include) (.+?) (?:to|on|in|into) (?:my |the )?(?:shopping|grocery|groceries|food)(?: list)?$/))) return { type: "shop_add", item: f[1] };
+  if (/\b(?:make|create|generate|build|give me|prepare|do|write|draw up|plan)\b.*\b(?:shopping|grocery|groceries|food) list\b|\bshopping list for (?:the |this )?week\b|\bwhat (?:should|do) i (?:buy|shop for)\b/.test(bare)) return { type: "shop_make" };
+  if (/\b(?:what(?:'s| is) on|read|show|open|check)\b.*\b(?:shopping|grocery) list\b|^(?:my |the )?(?:shopping|grocery) list$/.test(bare)) return { type: "shop_show" };
+  if ((f = bare.match(/\bwhere (?:can|do|should|could) i (?:buy|get|find) (?:some |good |cheap )?(.+?)(?: in hong kong| in hk)?$/))) return { type: "shop_where", item: f[1] };
+  if ((f = bare.match(/\b(?:i weigh|my weight is|i(?:'m| am)(?: now)?) (\d+(?:\.\d+)?)\s?(kg|kgs|kilos?|kilograms?|lbs?|pounds)\b/))) return { type: "weight", kg: /^(?:lb|pound)/.test(f[2]) ? +f[1] * 0.4536 : +f[1] };
+  if ((f = bare.match(/\b(?:recipes?|how (?:do|can|should) i (?:cook|make|prepare)|what (?:should|can|do) i cook|what to cook|cook (?:for )?(?:dinner|lunch|breakfast|tonight)|teach me (?:to|how to) cook)\b(?:\s+(?:for|of|a|an|some|me))*\s*(.*)$/))) return { type: "recipe", q: f[1] };
+  if (/\b(?:what (?:should|can|do) i eat|what to eat|foods? (?:with|high in|for|that|rich in)|high protein|protein (?:foods?|target|goal|intake|meals?)|how much protein|meal plan|what should i have for (?:breakfast|lunch|dinner)|my diet|nutrition|eat (?:before|after) (?:the )?(?:gym|workout|training)|build muscle|gain muscle)\b/.test(bare) && !/\b(?:at|from) \d/.test(bare)) return { type: "food_info" };
   // ---- Bible ----
   const bk = bare.match(/\b(?:(?:my |the )?plan is to|i (?:want|need|plan|am going|'m going|will|would like|'d like) to|i(?:'m| am) (?:going to )?|let's|start|starting|begin|beginning)\s*(?:read|reading|study|studying|go through|going through|finish)\s+(?:through\s+)?(?:the\s+)?(?:whole\s+)?(?:book of\s+)?([1-3]?\s?[a-z]+(?: of [a-z]+)?)/);
   const mx = bare.match(/\b(?:max(?:imum)?|up to|at most|only)?\s*(?:of\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+chapters? (?:a|per|each|every) day\b/);

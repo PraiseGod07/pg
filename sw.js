@@ -1,8 +1,8 @@
 // PG service worker: offline app shell, network-first for app files so updates arrive quickly.
-const CACHE = "pg-v2.1.0";
+const CACHE = "pg-v2.2.0";
 const SHELL = ["./", "./index.html", "./styles.css", "./manifest.webmanifest", "./icon.svg", "./icon-192.png", "./icon-512.png",
   "./js/app.js", "./js/nlu.js", "./js/scheduler.js", "./js/store.js", "./js/voice.js", "./js/coach.js", "./js/library.js", "./js/util.js",
-  "./js/bass.js", "./js/bible.js", "./js/bibledata.js", "./js/brain.js", "./js/learn.js"];
+  "./js/bass.js", "./js/bible.js", "./js/bibledata.js", "./js/brain.js", "./js/learn.js", "./js/food.js"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE && k !== "pg-data").map(k => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener("fetch", e => {
