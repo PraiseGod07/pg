@@ -1,6 +1,6 @@
 // PG — app controller: views, command handling, reminders.
 import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1, flush } from "./store.js";
-import { speakable, isNatural } from "./speech.js";
+import { speakable, isNatural, isMale } from "./speech.js";
 import { CATS, EXERCISES, SPLITS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
 import { intent, parseSchedule, matchBlock, parseClock, normalize, isEndCall } from "./nlu.js";
 import { placeItems, conflicts, firstGap } from "./scheduler.js";
@@ -54,12 +54,12 @@ const voice = new Voice({
   onCommand: text => { ui.checkedIn = false; $("#heard").textContent = ""; run(text, true); },
   onError: code => {
     if (code === "blocked" && S.voice.handsFree) { needTap(); return; }
-    const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found." }[code];
+    const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found.", malevoice: "No recognised male voice is available yet. Open More, Voice setup. PG won't silently use a female voice.", speech: "Your device stopped speech. The complete reply is still in the conversation. Say or type: read your last reply." }[code];
     if (msg) toast(msg);
     if (code === "nomic") { S.voice.handsFree = false; save(); if (ui.view === "settings") render(); }
   }
 });
-voice.voiceURI = S.voice.voiceURI; voice.rate = S.voice.rate; voice.pickVoice();
+voice.voiceURI = S.voice.voiceURI; voice.verifiedVoiceURI = S.dev.maleVoiceURI; voice.rate = S.voice.rate; voice.pickVoice();
 // PG's natural voice and hearing run on PG Cloud once its code is version 2 or newer.
 const CV = { v: 0 };
 voice.cloudVoice = S.voice.cloudVoice || "apollo";
@@ -257,7 +257,7 @@ function sayCanto(zh) {
   try {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(zh), v = voice.yueVoice();
-    u.lang = v ? v.lang : "zh-HK"; if (v) u.voice = v; u.rate = 0.85;
+    u.lang = v ? v.lang.replace(/_/g, "-") : "zh-HK"; if (v) u.voice = v; u.rate = 0.85;
     speechSynthesis.speak(u);
   } catch { toast("This browser can't speak Cantonese."); }
 }
@@ -273,6 +273,16 @@ function askLine(it) {
 function needsAsk(items) { return items.find(i => i.kind === "event" && !i.ok && (missingOf(i).time || missingOf(i).len)); }
 
 async function followUp(p, bare, text, spoken) {
+  if (p.type === "schedule-review") {
+    if (YES.test(bare)) return await commitSchedule(p.items, spoken, p.replace || []), true;
+    if (NO.test(bare) || /^(?:cancel|never ?mind|stop)$/.test(bare)) return reply("Nothing changed, sir. Please give me the corrected activity, day, start and end time."), true;
+    return false;
+  }
+  if (p.type === "ai-calendar") {
+    if (YES.test(bare)) return reply(await finishTalk(p.r, true), { spoken }), true;
+    if (NO.test(bare) || /^(?:cancel|never ?mind|stop)$/.test(bare)) return reply("Nothing changed, sir."), true;
+    return false;
+  }
   if (p.type === "week-complete") {
     const at = parseClock(text);
     const options = blocksOf(today()).filter(b => p.ids.includes(b.id));
@@ -311,13 +321,13 @@ async function followUp(p, bare, text, spoken) {
       else if (p.tries >= 1) return false;
       else { ui.pending = { ...p, tries: (p.tries || 0) + 1 }; return reply(`Sorry, ${addr()}, I didn't get that. ${askLine(it)}`), true; }
       if (it.s != null && it.e != null) it.dur = it.e - it.s;
-      const still = missingOf(it);
-      if ((still.time || still.len) && it.asked) it.ok = true;   // asked twice already: he only gave part, so fit the rest
+      if (got?.ambiguous) it.ambiguous = true;
+      if (got?.invalidRange) it.invalidRange = true;
       it.asked = true;
     }
     const next = needsAsk(p.items);
     if (next) { ui.pending = { ...p, tries: 0 }; return reply(askLine(next)), true; }
-    await commitSchedule(p.items, spoken, p.replace || []);
+    await reviewSchedule(p.items, spoken, p.replace || []);
     return true;
   }
   if (p.type === "food") {
@@ -349,15 +359,15 @@ async function followUp(p, bare, text, spoken) {
   if (p.type === "due") {
     const t = SC.tasks().find(x => x.id === p.tid);
     const got = t && SC.parse(t.title + " due " + text)[0];
-    if (got && got.due) { t.due = got.due; if (got.dueMin != null) t.dueMin = got.dueMin; if (got.est) { t.guess = got.est; } save(); const res = SC.plan(); return reply(`Got it, due ${SC.fmt.dueText(t)}. ${SC.planBrief(res)}`, { view: "school", spoken }), true; }
+    if (got && got.due) { t.due = got.due; if (got.dueMin != null) t.dueMin = got.dueMin; if (got.est) { t.guess = got.est; } save(); return reply(`Saved, due ${SC.fmt.dueText(t)}. I haven't added any study times. Tell me when you want to work on it.`, { view: "school", spoken }), true; }
     return false;
   }
   if (p.type === "duetime") {
     const t = SC.tasks().find(x => x.id === p.tid); if (!t) return false;
     if (SC.looksLikeSchool(text) || bare.split(" ").length > 7) return false;   // a new request, not an answer
     const min = SC.timeIn(bare) ?? parseClock(bare);
-    if (min != null && min >= 0) { t.dueMin = min; save(); const res = SC.plan(); return reply(`Okay, due ${SC.fmt.dueText(t)}. ${SC.planBrief(res)}`, { view: "school", spoken }), true; }
-    if (NO.test(bare) || /\b(?:no (?:set )?time|don'?t know|not sure|any ?time|end of (?:the )?day|whenever)\b/.test(bare)) { const res = SC.plan(); return reply(`No problem. I'll have it done before then. ${SC.planBrief(res)}`, { view: "school", spoken }), true; }
+    if (min != null && min >= 0) { t.dueMin = min; save(); return reply(`Saved, due ${SC.fmt.dueText(t)}. No study times were added.`, { view: "school", spoken }), true; }
+    if (NO.test(bare) || /\b(?:no (?:set )?time|don'?t know|not sure|any ?time|end of (?:the )?day|whenever)\b/.test(bare)) return reply("Saved without a due time. No study times were added.", { view: "school", spoken }), true;
     return false;
   }
   if (p.type === "more") {
@@ -374,13 +384,20 @@ function tookReply(t, min, spoken) {
   const vs = t.guess ? `your guess of ${sayDur(t.guess)}` : `my plan of ${sayDur(t.plan)}`;
   const rel = off > 1.15 ? `That's ${Math.round(off * 10) / 10} times ${vs}.` : off < 0.85 ? `That's quicker than ${vs}. Nice.` : `Right on ${vs}.`;
   const next = r.learned ? ` From now on I'll plan assignments at ${r.r} times your guess.` : " One more like this and I'll start planning with your real pace.";
-  const res = SC.plan();
   return reply(`${rel}${next}`, { view: "school", spoken });
 }
 function schoolReply(res, head, spoken) { render(); return reply((head ? head + " " : "") + SC.planBrief(res), { view: "school", spoken }); }
 
 async function handle(text, spoken) {
   const bare0 = normalize(text).replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
+  if (/^(?:pg )?(?:what(?:'s| is) (?:the )?(?:time|date|day)(?: (?:is it|today|now|right now))?|what day is (?:it|today)|what(?:'s| is) today'?s date)$/.test(bare0)) {
+    const clock = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Hong_Kong", hour: "numeric", minute: "2-digit", hour12: true }).format(new Date());
+    return reply(`${addr()}, it's ${fmtDay(today(), true)}, ${clock}, Hong Kong time.`);
+  }
+  if (/^(?:please )?(?:read|repeat|say|speak)(?: out)? (?:your |the )?(?:last |whole |full |complete )?(?:reply|response|answer)(?: again| in full)?$/.test(bare0)) {
+    const last = [...S.chat].reverse().find(m => m.who === "pg");
+    if (last) { voice.say(speakable(last.text, true)); return; }
+  }
   if (isEndCall(bare0) || /^(?:(?:okay|ok|thanks|thank you|pg)[ ,]+)*(?:good ?night|goodbye|bye|hang up)(?: pg| sir| please| now)*$/.test(bare0)) { ui.pending = null; return endCall(); }
   const personal = M.capturePersonal(text);
   const remembered = M.personalAnswer(text);
@@ -454,9 +471,17 @@ async function handle(text, spoken) {
     return reply("Tell me the tasks and their minutes in this planner, choose the days and breaks, then press Build timetable. Your existing fixed commitments stay in place.");
   }
   // Add / delete / replace things on the timetable, in plain words
+  // Clear timetable declarations are deterministic, not an AI interpretation.
+  // "Assignment from 4 to 5" is a work session, not a made-up assignment deadline.
+  const timed = parseSchedule(text, { date: d, today: today(), now: nowMin() }).filter(x => x.kind === "event");
+  if (!ui.editing && (["schedule", "school_add"].includes(it.type) || /^(?:(?:can|could|would|will) you |please )?(?:add|put|schedule|book|block)\b/i.test(text))
+    && !/\b(?:due|deadline|move|shift|replace|instead|remove|delete|change|reschedule|don't|do not|didn't|did not)\b/i.test(text)
+    && !/^(?:what|when|why|how|where|should|is|are|do|does|tell me)\b/i.test(text)
+    && timed.some(x => x.s != null || x.e != null) && timed.every(x => x.cat !== "other"))
+    return scheduleFrom(text, spoken, true);
   if (!ui.editing && !["greet", "hush", "dismiss", "school_add"].includes(it.type) && await localEdit(text, spoken)) return;
-  // With an AI key, PG thinks with the AI first so it can handle anything; the built-in brain is the backup.
-  if (AI.on() && !ui.quiet && !["greet", "hush", "dismiss", "clear", "school_add"].includes(it.type)) {
+  // Known intents stay local. Only open-ended conversation needs a model request.
+  if (AI.on() && !ui.quiet && ["ask", "schedule"].includes(it.type)) {
     setStatus("Thinking…");
     try { const ans = await aiChat(text, M.search(text, 4)); if (ans) return reply(ans, { spoken }); return voice.afterReply(); }
     catch (e) { console.warn(e); ui.aiFail = AI.friendlyError(e); if (/Cloudflare AI isn't connected/.test(ui.aiFail) && !/^(?:what'?s next|read my schedule)/i.test(text.trim())) return reply(ui.aiFail); }
@@ -638,16 +663,12 @@ async function handle(text, spoken) {
       const list = SC.parse(text);
       if (!list.length) return scheduleFrom(text, spoken);
       const added = SC.add(list);
-      added.filter(t => (t.kind === "exam" || t.kind === "quiz") && t.due && t.dueMin != null).forEach(t => {
-        if (!day(t.due).blocks.some(b => b.tid === t.id && b.src === "exam")) day(t.due).blocks.push({ id: uid(), title: t.title, cat: "class", start: t.dueMin, end: Math.min(1440, t.dueMin + (t.kind === "quiz" ? 30 : 90)), flex: false, done: false, date: t.due, src: "exam", tid: t.id });
-      });
-      const res = SC.plan();
       const nodate = added.find(t => !t.due);
       if (nodate) ui.pending = { type: "due", tid: nodate.id };
       // Due day but no time: ask instead of guessing
       const notime = !nodate && added.length === 1 && added[0].due && added[0].dueMin == null && added[0].kind !== "exam" && added[0].kind !== "quiz" ? added[0] : null;
-      if (notime) { ui.pending = { type: "duetime", tid: notime.id }; render(); return reply(`Got it. ${notime.title}, due ${SC.fmt.dueText(notime)}. ${SC.planBrief(res)} What time is it due? If there's no set time, just say no.`, { view: "school", spoken }); }
-      return schoolReply(res, added.length === 1 ? `Got it. ${added[0].title}${added[0].due ? `, due ${SC.fmt.dueText(added[0])}` : ""}. ${SC.whyTime(added[0])}` : `Got it, ${added.length} assignments: your ${andWords(added.map(t => lc(t.title)))}.${added.some(t => t.guess) ? (SC.ratio().learned ? ` I planned your guesses at ${SC.ratio().r} times, your real pace.` : " I added 50% to your time guesses, since most people underestimate.") : ""}`, spoken);
+      if (notime) { ui.pending = { type: "duetime", tid: notime.id }; render(); return reply(`Saved ${notime.title}, due ${SC.fmt.dueText(notime)}. No study times added. What time is it due? If there's no set time, just say no.`, { view: "school", spoken }); }
+      return reply(`Saved ${added.map(t => t.title + (t.due ? `, due ${SC.fmt.dueText(t)}` : "")).join("; ")} in School. No study times added.${nodate ? ` When is ${nodate.title} due?` : " Tell me the days and times you want to study."}`, { view: "school", spoken });
     }
     case "school_plan": return schoolReply(SC.plan(), "", spoken);
     case "school_info": return reply(SC.brief(), { view: "school", spoken });
@@ -731,8 +752,8 @@ function renameCoachBlocks(d) {
   save();
 }
 
-async function scheduleFrom(text, spoken) {
-  const ctx = { date: ui.view === "today" && ui.pinDate ? ui.date : today(), today: today(), now: nowMin() };
+async function scheduleFrom(text, spoken, deterministic = false) {
+  const ctx = { date: spoken && spoken !== "typed" ? today() : ui.view === "today" && ui.pinDate ? ui.date : today(), today: today(), now: nowMin() };
   // "can you add reading at 9pm" -> "reading at 9pm", so the title is just "Reading"
   const asked = text.replace(/^(?:(?:ok(?:ay)?|so|and|also|then|pg|hey|please)[ ,]+)*(?:(?:can|could|would|will) you (?:please )?|please |i want (?:you )?to |i need (?:you )?to |i'd like (?:you )?to |let's |go ahead and )?(?:add|put|schedule|book|pencil in|block out|block off|set up)\s+(?:in |me |a |an |some )?(?=\S)/i, "");
   let items = parseSchedule(asked || text, ctx);
@@ -743,7 +764,7 @@ async function scheduleFrom(text, spoken) {
   // Only put things on the calendar when he clearly asks (a time, a day, or words like add / schedule / put).
   const cue = /\b(?:add|schedule|put|plan|book|remind|block|set up|move|pencil|slot|fit|\d{1,2}(?::\d\d)? ?(?:am|pm|a\.m\.|p\.m\.)|at \d|from \d|for \d+ ?(?:min|minutes|hours?|h)\b|tomorrow|tonight|this (?:morning|afternoon|evening)|in the (?:morning|afternoon|evening)|later today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next week|due)\b/i.test(text);
   const talkAbout = /\b(?:talk|chat|speak|tell me) (?:about|to you about)|\blet'?s talk\b/i.test(text);
-  if (AI.on() && !ui.quiet && events.length && (chatty || vague || talkAbout || !cue)) events = [];
+  if (!deterministic && AI.on() && !ui.quiet && events.length && (chatty || vague || talkAbout || !cue)) events = [];
   if (!events.length && AI.on() && !ui.quiet) {
     setStatus("Thinking…");
     try { const ans = await aiChat(text, M.search(text, 4)); if (ans) return reply(ans); }
@@ -757,7 +778,24 @@ async function scheduleFrom(text, spoken) {
   // Don't guess: ask for any missing time or length first.
   const gap = needsAsk(items);
   if (gap) { ui.pending = { type: "clarify", items, tries: 0 }; return reply(askLine(gap), { spoken }); }
-  return commitSchedule(items, spoken);
+  return reviewSchedule(items, spoken);
+}
+async function reviewSchedule(items, spoken, replacing = []) {
+  const events = items.filter(i => i.kind === "event");
+  if (events.some(i => i.invalidRange || i.e != null && i.s != null && i.e <= i.s))
+    return reply("Nothing saved. One end time is before its start time. Please give the day and the start and end times with AM or PM.");
+  const name = t => String(t).split(" · ")[0].toLowerCase().replace(/[^a-z0-9]/g, "");
+  const alternatives = events.flatMap(i => blocksOf(i.date).filter(b => !b.done && !b.routine
+    && name(b.title) === name(i.title) && (b.start !== i.s || b.end !== (i.e ?? i.s + i.dur))).map(b => ({ id: b.id, date: i.date })));
+  const inferredReplacement = alternatives.some(b => !replacing.some(old => old.id === b.id));
+  replacing = [...new Map([...replacing, ...alternatives].map(b => [b.id, b])).values()];
+  if (inferredReplacement || events.some(i => i.ambiguous) || spoken && spoken !== "typed") {
+    ui.pending = { type: "schedule-review", items, replace: replacing };
+    const previous = replacing.map(x => { const b = blocksOf(x.date).find(b => b.id === x.id); return b && { ...b, date: x.date }; }).filter(Boolean);
+    const replaceLine = previous.length ? ` This would replace ${previous.map(b => `${b.title} at ${sayTime(b.start)} on ${fmtDay(b.date, true)}`).join("; ")}.` : "";
+    return reply(`Not saved yet, ${addr()}. I heard: ` + events.map(i => `${i.title} on ${fmtDay(i.date, true)}, ${sayTime(i.s)} to ${sayTime(i.e ?? i.s + i.dur)}`).join("; ") + `.${replaceLine} Is that correct?`, { full: true });
+  }
+  return commitSchedule(items, spoken, replacing);
 }
 async function commitSchedule(items, spoken, replacing = []) {
   const events = items.filter(i => i.kind === "event");
@@ -883,7 +921,9 @@ ${AG.TOOLS}
 For homework, assignments, essays, projects and tests, use add_assignment and keep the exact name he gave. Never make up a due time or a timetable slot he didn't say.
 "remember" is ONLY for lasting things about him that will still be true next month: who he is (school, church, city, age, job), people in his life, likes and dislikes, food rules and allergies, habits and routines, goals and dreams, skills he's working on, strong opinions and values, and how he wants PG to talk or act. NOT for one-off questions, today's plans, passing moods, things he asked you to look up, or facts about the world. Write each as a "You ..." sentence. Leave it empty if nothing new.
 "topic" is a 1 to 3 word label for what his message is about, like "business", "premier league", "bass guitar", "bible", "fitness", "coding" or "cantonese". Use "" for small talk, greetings and simple app commands.`;
-  const raw = await AI.call(sys, [...history(10), { role: "user", content: live ? text + "\n\n(PG note: this needs live facts from the internet, so reply with a \"search\" query.)" : text }], { json: true, max: 900 });
+  const concise = "\nLatency matters: answer in 1 to 3 short sentences unless he explicitly asks for detail. Never reinterpret an explicit time, date, activity or AM/PM. A work session is not a deadline. Never invent extra study sessions. Ask one short question when unsure.";
+  const detailed = /\b(?:detail|thorough|step.by.step|full explanation|explain fully)\b/i.test(text);
+  const raw = await AI.call(sys + concise, [...history(6), { role: "user", content: live ? text + "\n\n(PG note: this needs live facts from the internet, so reply with a \"search\" query.)" : text }], { json: true, max: detailed ? 900 : 450 });
   const o = AI.parseJSON(raw) || { say: String(raw || "").trim() };
   {
     const heard = typeof o.heard === "string" ? o.heard.trim() : "";
@@ -910,7 +950,7 @@ For homework, assignments, essays, projects and tests, use add_assignment and ke
   if (typeof o.say === "string" && /[\u4e00-\u9fff]/.test(o.say)) o.say = o.say.replace(/\b(?:[a-z]{1,6}[1-6](?:\s+|(?=[^a-z0-9])|$)){2,}/gi, m => sayLike(m.trimEnd()) + (/\s$/.test(m) ? " " : ""));
   const r = { sources: web?.sources || [], say: String(o.say || "").trim(), ops: Array.isArray(o.ops) ? o.ops : [], do: (Array.isArray(o.do) ? o.do : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (Array.isArray(o.remember) ? o.remember : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
   // He asked for a change but the AI only talked (or said it couldn't): ask again, just for the changes.
-  if (!web && !r.ops.length && !r.do.length && (REFUSE.test(r.say) || (ACTION.test(text) && !/\?\s*$/.test(r.say)))) {
+  if (!web && !r.ops.length && !r.do.length && REFUSE.test(r.say) && ACTION.test(text)) {
     try {
       const raw2 = await AI.call(`You turn PraiseGod's request into changes to his PG app. You CAN change everything in the app below, so never refuse. Never assume: if the request is missing a detail the change needs (which day, start time, length, which item, amounts, sets and reps), make no change and put one short question asking for all the missing details in "say". Use the earlier conversation for details he already gave.
 APP DATA (today is ${today()}):
@@ -947,7 +987,21 @@ async function aiChat(text, notes = []) {
   return finishTalk(r);
 }
 // Run what the AI asked for quietly, then speak its reply.
-async function finishTalk(r) {
+async function finishTalk(r, confirmed = false) {
+  const calendar = (r.ops || []).filter(o => /block|clear_day|move_day|plan_week/.test(o.op || "") || /^(?:days|school)(?:\.|$)/.test(o.path || ""));
+  const commands = (r.do || []).filter(c => /\b(?:at|from|to|until|schedule|plan|timetable|study|assignment|church|move|remove|delete)\b|\d/.test(c));
+  if (!confirmed && (calendar.length || commands.length)) {
+    const summary = calendar.map(o => {
+      const old = Object.values(S.days).flatMap(d => d.blocks || []).find(b => b.id === o.id);
+      const time = x => x == null ? "" : typeof x === "number" ? sayTime(x) : x;
+      if (o.op === "plan_week") return `build week ${o.weekStart}: ${(o.tasks || []).map(t => `${t.title}, ${t.minutes} minutes, ${(t.days || []).join(", ")}`).join("; ")}, between ${o.start} and ${o.end}, ${o.focusMinutes} minutes work / ${o.breakMinutes} minutes rest`;
+      if (o.op === "move_day") return `move ${o.from} to ${o.to}`;
+      if (o.path) return `change ${o.path}: ${JSON.stringify(o.value ?? o.id)}`;
+      return `${o.op.replace(/_/g, " ")}: ${o.title || old?.title || o.id || "all entries"}, ${o.date || old?.date || today()}${o.start != null || old ? `, ${time(o.start ?? old?.start)} to ${time(o.end ?? old?.end)}` : ""}`;
+    }).concat(commands);
+    ui.pending = { type: "ai-calendar", r };
+    return `Not saved yet, ${addr()}. Please check: ${summary.join("; ")}. Is that correct?`;
+  }
   r.remember.forEach(f => { if (!M.facts().some(n => n.text.toLowerCase() === f.toLowerCase())) M.add(f, { folder: "about" }); });
   const done = [];
   if (r.ops?.length) {
@@ -1562,7 +1616,7 @@ function viewSettings() {
   <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} thing${M.facts().length === 1 ? "" : "s"} PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button><button class="tile" data-act="goals-open" style="${catVar("gym")}"><span class="eyebrow">Goals</span><b>${D.goals().length ? D.goals().length + " goal" + (D.goals().length > 1 ? "s" : "") : "Add your goals"}</b></button><button class="tile" data-act="canto-open" style="${catVar("social")}"><span class="eyebrow">Cantonese</span><b>${D.learned().length} learned</b></button></div>
   ${cloudSettings()}
   ${aiSettings()}
-  <h2 class="sec"><span>Voice</span></h2><div class="card">
+  <h2 class="sec"><span>Voice setup</span></h2><div class="card">
     <div class="set-row"><div class="lbl">Always listen for “Hi PG”<span class="faint" style="display:block;font-weight:400;font-size:var(--text-xs)">${voice.supported ? "Off means PG only listens after you press the button. Some phones beep when it's on." : "Not supported here"}</span></div>${sw("handsfree", S.voice.handsFree, "Hands-free wake word", !voice.supported)}</div>
     <div class="set-row"><div class="lbl">Speak replies</div>${sw("speak", S.voice.speak !== false, "Speak replies")}</div>
     <div class="set-row"><div class="lbl">Spoken reminders</div>${sw("alerts", S.voice.alerts, "Spoken reminders")}</div>
@@ -1570,10 +1624,13 @@ function viewSettings() {
     <div class="set-row"><div class="lbl">Keep screen awake</div>${sw("awake", S.voice.keepAwake, "Keep screen awake")}</div>
     ${naturalVoice()}
     <div class="grid2" style="margin-top:var(--space-3)" ${voice.cloud.ok() ? "hidden" : ""}>
-      <label class="field"><span>Voice</span><select class="input" data-act="voice">${vs.length ? vs.map(v => `<option value="${esc(v.voiceURI)}" ${voice.voice && voice.voice.voiceURI === v.voiceURI ? "selected" : ""}>${esc(v.name)}${isNatural(v) ? " (natural)" : ""}</option>`).join("") : `<option>System default</option>`}</select></label>
+      <label class="field"><span>Voice on this device</span><select class="input" data-act="voice"><option value="">Choose a voice</option>${vs.map(v => `<option value="${esc(v.voiceURI)}" ${(voice.voiceURI || voice.voice?.voiceURI) === v.voiceURI ? "selected" : ""}>${esc(v.name)}${isMale(v) ? " (male)" : ""}${isNatural(v) ? " (natural)" : ""}</option>`).join("")}</select></label>
       <label class="field"><span>Speed</span><select class="input" data-act="rate">${[0.9, 1, 1.1, 1.2].map(r => `<option value="${r}" ${S.voice.rate === r ? "selected" : ""}>${r}×</option>`).join("")}</select></label></div>
-    <p class="faint">Free device speech prefers a male voice when your phone or laptop provides one.</p>
-    <button class="btn sm" data-act="test-voice"><svg><use href="#i-speaker"/></svg>Test</button>
+    <p class="faint" role="status">${voice.voice ? `Free male voice: ${esc(voice.voice.name)}.` : "No recognised male English voice is available yet. PG will not silently switch to a female voice."} This choice stays on this device, not your other devices.</p>
+    <details><summary>Phone voice help</summary><p class="faint">Android: in phone Settings, search for Text-to-speech output. Open your speech engine settings, install English voice data and preview/select a male voice. Some Android browsers use the phone's default voice even when PG selects another one. iPhone: Settings, Accessibility, Read &amp; Speak (or Spoken Content), Voices, English. Download a male voice such as Daniel. Reopen PG, refresh voices and test it here. If the browser still doesn't expose that voice, use a supported browser or the phone's speech settings.</p><p class="faint">Generic voice names do not tell PG the gender. Choose a voice, press Test selected voice, and only confirm if you hear a male voice. No paid voice service is required. <a href="https://support.google.com/accessibility/android/answer/6006983?hl=en" target="_blank" rel="noopener">Android speech settings</a>; <a href="https://support.apple.com/en-gb/guide/iphone/iph96b214f0/ios" target="_blank" rel="noopener">Apple speech settings</a>.</p></details>
+    <button class="btn sm" data-act="refresh-voices">Refresh voices</button>
+    <button class="btn sm" data-act="test-voice"><svg><use href="#i-speaker"/></svg>Test selected voice</button>
+    <button class="btn sm" data-act="verify-male">This sounds male</button>
   </div>
   <h2 class="sec"><span>You</span></h2><div class="card"><div class="grid3">
     <label class="field"><span>PG calls you</span><input class="input" data-act="address" value="${esc(addr())}"></label>
@@ -1681,7 +1738,15 @@ document.addEventListener("click", e => {
     case "learn-done": { const tr = LN.tracks().find(t => t.id === id); const r = LN.complete(tr); render(); if (r) { chime("ok"); toast(r.next ? `Next: ${r.next.t}` : `${tr.topic} complete.`); } break; }
     case "learn-del": confirmSheet("Remove this learning plan?", "", "Remove", () => { LN.remove(id); render(); }); break;
     case "song-del": S.band.songs = S.band.songs.filter(s => s.id !== id); save(); render(); break;
-    case "test-voice": voice.player.unlock(); voice.say(hello()); break;
+    case "refresh-voices": voice.pickVoice(); render(); break;
+    case "test-voice": voice.player.unlock(); voice.say(hello(), undefined, true); break;
+    case "verify-male": {
+      const uri = document.querySelector('[data-act="voice"]')?.value;
+      if (!uri) { toast("Choose a voice and test it first."); break; }
+      S.voice.voiceURI = uri; S.dev.maleVoiceURI = uri;
+      voice.voiceURI = uri; voice.verifiedVoiceURI = uri; voice.pickVoice(); save(); render();
+      toast("Male voice confirmed for this device."); break;
+    }
     case "backup": {
       const a2 = document.createElement("a");
       a2.href = URL.createObjectURL(new Blob([JSON.stringify({ ...S, ai: { provider: "none", key: "", model: "" } }, null, 1)], { type: "application/json" }));
@@ -1782,7 +1847,7 @@ document.addEventListener("submit", e => {
   if (f.dataset.form === "goal") { e.preventDefault(); const t = f.g.value.trim(); if (t) { D.addGoal(t); openGoals(); render(); } return; }
   if (f.dataset.form === "song") { e.preventDefault(); const n = f.song.value.trim(); if (n) { C.addSong(n); render(); } return; }
   if (f.dataset.form === "note") { e.preventDefault(); const t = f.t.value.trim(); if (t) { const n = M.add(t); ui.folder = "all"; ui.q = ""; render(); toast(`Saved to ${M.FOLDERS[n.folder].label}.`); } return; }
-  if (f.dataset.form === "task") { e.preventDefault(); const t = f.t.value.trim(); if (!t) return; const list = SC.parse(/\b(?:essay|report|test|exam|quiz|project|presentation|homework|assignment|paper|lab|reading|worksheet)\b/i.test(t) ? t : t + " assignment"); if (!list.length) { toast("Try: History essay due Friday 5pm."); return; } const added = SC.add(list); const r = SC.plan(); render(); toast(added.some(x => !x.due) ? "Added. When is it due? Tell PG." : `${r.placed.length} study sessions planned.`); return; }
+  if (f.dataset.form === "task") { e.preventDefault(); const t = f.t.value.trim(); if (!t) return; const list = SC.parse(/\b(?:essay|report|test|exam|quiz|project|presentation|homework|assignment|paper|lab|reading|worksheet)\b/i.test(t) ? t : t + " assignment"); if (!list.length) { toast("Try: History essay due Friday 5pm."); return; } const added = SC.add(list); render(); toast(added.some(x => !x.due) ? "Saved in School. When is it due? Tell PG." : "Saved in School. No study times added."); return; }
   if (f.dataset.form === "kg") { e.preventDefault(); const kg = +f.kg.value; if (kg > 0) { const t = F.setWeight(kg); render(); toast(`Target: ${t} g of protein a day.`); } return; }
   if (f.dataset.form === "shop") { e.preventDefault(); const t = f.t.value.trim(); if (t) { F.add(t); render(); $("[data-form=shop] input")?.focus(); } return; }
   if (f.dataset.form === "bible-plan") { e.preventDefault(); B.setPlan(+f.book.value, +f.max.value); renameCoachBlocks(today()); render(); toast(`Reading ${B.stats().book}.`); return; }

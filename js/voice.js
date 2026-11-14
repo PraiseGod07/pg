@@ -44,8 +44,23 @@ export class Voice {
   voices() { return this.ttsSupported ? speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang)).sort((a, b) => voiceScore(b) - voiceScore(a)) : []; }
   pickVoice() {
     const vs = this.voices();
-    const males = vs.filter(isMale), pool = males.length ? males : vs;
-    this.voice = pool.find(v => v.voiceURI === this.voiceURI) || pool[0] || null;
+    const males = vs.filter(isMale);
+    // A generic Android voice can only be gender-verified by its owner on that device.
+    this.voice = vs.find(v => v.voiceURI === this.verifiedVoiceURI && v.voiceURI === this.voiceURI)
+      || males.find(v => v.voiceURI === this.voiceURI) || males[0] || null;
+  }
+  async readyVoice(id, preview = false) {
+    if (preview) {
+      this.voice = this.voices().find(v => v.voiceURI === this.voiceURI) || this.voice;
+      return !!this.voice;
+    }
+    // iOS/Android may populate voices after Start, without firing voiceschanged.
+    for (let i = 0; i < 12 && this.sayId === id; i++) {
+      this.pickVoice();
+      if (this.voice) return true;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return false;
   }
 
   // ---- listening ----
@@ -95,7 +110,7 @@ export class Voice {
     let t = "", lastFinal = true;
     for (let i = 0; i < e.results.length; i++) { t += e.results[i][0].transcript + " "; lastFinal = e.results[i].isFinal; }
     this.full = t.replace(/\s+/g, " ");
-    if (this.mode === "speaking") { this.checkBarge(); return; }
+    if (this.mode === "speaking") { if (lastFinal) this.checkBarge(); return; }
     if (this.mode === "wake") {
       const w = findWake(this.full);
       if (!w) { if (this.full.length > 400) this.listen("wake"); return; }
@@ -117,7 +132,10 @@ export class Voice {
     } else {
       // Ending the call should feel instant
       const quick = isEndCall(c) ? 500 : null;
-      this.timer = setTimeout(() => this.finish(), quick ?? (lastFinal ? (this.call ? 1400 : 1900) : 2600));
+      // A final short question/confirmation needs no multi-clause dictation wait.
+      const fast = /^(?:(?:hi|hey|okay|ok)[ ,]+pg[ ,]*)?(?:what|when|where|who|how|why|yes|yeah|yep|no|nope|thanks|thank you|hi|hello)\b/i.test(c)
+        && c.split(/\s+/).length <= 18 && !/\b(?:and then|from|until)\b/i.test(c);
+      this.timer = setTimeout(() => this.finish(), quick ?? (lastFinal ? (fast ? 300 : 1600) : 3000));
     }
   }
   finish() {
@@ -155,6 +173,7 @@ export class Voice {
   // While PG speaks, the mic stays open. Saying "stop", "wait", "hold on" cuts PG off and it listens.
   // Anything else you start saying (that isn't PG's own voice echoing back) also cuts in.
   barge() {
+    if (this.calm) return; // Opening a phone mic during playback can interrupt its audio session.
     if (this.useCloud()) { if (this.call && this.mode === "speaking") { this.mic.strict = true; this.mic.armed = !!this.mic.stream; } return; }
     if (!this.supported || this.calm || !(this.call || this.handsFree) || this.mode !== "speaking") return;
     this.listen("command", true);
@@ -168,7 +187,7 @@ export class Voice {
     const said = novel.join(" ");
     if (isEndCall(said)) { this.hush(); this.set("command"); this.offset = 0; this.full = said; this.finish(); return; }
     const stop = /\b(stop|wait|hold on|hang on|pause|shh+|quiet|enough|cancel|never ?mind|one sec(?:ond)?|excuse me|listen|pg|okay okay|ok ok|no no)\b/.test(said);
-    const talking = novel.length >= 3 && novel.length / heard.length > 0.5;
+    const talking = novel.length >= 5 && novel.length / heard.length > 0.65;
     if (!stop && !talking) return;
     this.hush();
     this.call = true;
@@ -184,7 +203,7 @@ export class Voice {
   }
 
   // ---- speaking ----
-  hush() { this.sayId = (this.sayId || 0) + 1; this.player.stop(); try { speechSynthesis.cancel(); } catch {} clearTimeout(this.sayTimer); clearInterval(this.keep); }
+  hush() { this.sayId = (this.sayId || 0) + 1; this.cancelSpeech?.(); this.player.stop(); try { speechSynthesis.cancel(); } catch {} clearTimeout(this.sayTimer); clearInterval(this.keep); }
   // Text can carry Cantonese for PG to say in a Hong Kong voice: ⟦yue:你好⟧
   parts(text) {
     const out = [];
@@ -196,22 +215,38 @@ export class Voice {
     return out;
   }
   yueVoice() { try { return speechSynthesis.getVoices().filter(v => /^(zh|yue)[-_](HK|Hant-HK)/i.test(v.lang) || /yue/i.test(v.lang)).sort((a, b) => voiceScore(b) - voiceScore(a))[0] || null; } catch { return null; } }
-  synth(p, id) {
-    return new Promise(res => {
+  synth(p, id, retry = 0) {
+    return new Promise((res, reject) => {
       if (!this.ttsSupported || this.sayId !== id) return res();
       const u = new SpeechSynthesisUtterance(p.t);
-      if (p.yue) { const v = this.yueVoice(); u.lang = v ? v.lang : "zh-HK"; if (v) u.voice = v; u.rate = 0.85; }
+      this.utterance = u; // Retain a strong reference until the browser has finished.
+      if (p.yue) { const v = this.yueVoice(); u.lang = v ? v.lang.replace(/_/g, "-") : "zh-HK"; if (v) u.voice = v; u.rate = 0.85; }
       else {
-        if (this.voice) { u.voice = this.voice; u.lang = this.voice.lang; }
+        if (this.voice) { u.voice = this.voice; u.lang = this.voice.lang.replace(/_/g, "-"); }
         const nat = this.voice && isNatural(this.voice);
         u.rate = this.rate * (nat ? 1 : 0.96); u.pitch = nat ? 1 : (/\?\s*$/.test(p.t) ? 1.04 : 0.98);
       }
-      const t = setTimeout(res, 4000 + p.t.length * 120 / (u.rate || 1));
-      u.onend = u.onerror = () => { clearTimeout(t); res(); };
-      speechSynthesis.speak(u);
+      let settled = false, at = 0, timer;
+      const finish = err => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        u.onend = u.onerror = u.onboundary = null;
+        if (this.utterance === u) { this.utterance = null; this.cancelSpeech = null; }
+        if (this.sayId !== id || !err) return res();
+        try { speechSynthesis.cancel(); } catch {}
+        if (!retry && !/not-allowed|voice-unavailable/.test(err)) {
+          this.synth({ ...p, t: p.t.slice(at) }, id, 1).then(res, reject);
+        } else reject(new Error(err));
+      };
+      this.cancelSpeech = () => finish();
+      u.onboundary = e => { if (e.name === "word" && Number.isInteger(e.charIndex)) at = e.charIndex; };
+      u.onend = () => finish();
+      u.onerror = e => finish(e.error || "speech-failed");
+      timer = setTimeout(() => finish("speech-timeout"), 8000 + p.t.length * 130 / (u.rate || 1));
+      try { speechSynthesis.speak(u); } catch { finish("speech-failed"); }
     });
   }
-  say(text, then) {
+  say(text, then, preview = false) {
     this.kill();
     const canCloud = this.cloud?.ok() && !this.cloudTtsBad;
     if ((!this.ttsSupported && !canCloud) || !text) { then ? then() : this.afterReply(); return; }
@@ -224,11 +259,15 @@ export class Voice {
     setTimeout(() => { if (this.sayId === id && this.mode === "speaking") this.barge(); }, 350);
     const end = () => { if (done || this.sayId !== id) return; done = true; this.kill(); clearInterval(this.keep); then ? then() : this.afterReply(); };
     clearInterval(this.keep);
-    this.keep = setInterval(() => { try { if (speechSynthesis.speaking && !speechSynthesis.paused) { speechSynthesis.pause(); speechSynthesis.resume(); } } catch {} }, 10000);
+    this.keep = setInterval(() => { try { if (speechSynthesis.paused) speechSynthesis.resume(); } catch {} }, 5000);
     // Natural cloud voice: fetch each phrase ahead so there are no gaps.
     const got = [];
     const fetchOne = i => got[i] ||= (parts[i] && !parts[i].yue && canCloud && !this.cloudTtsBad ? this.cloud.tts(parts[i].t, this.cloudVoice).catch(e => { if (e.status === 404 || e.status === 405) this.cloudTtsBad = true; return null; }) : Promise.resolve(null));
     (async () => {
+      if (!canCloud && !(await this.readyVoice(id, preview))) {
+        if (this.sayId === id) { this.h.onError?.("malevoice"); end(); }
+        return;
+      }
       for (let i = 0; i < parts.length; i++) {
         if (this.sayId !== id) return;
         const p = parts[i];
@@ -241,7 +280,7 @@ export class Voice {
         if (i + 1 < parts.length) await new Promise(r => setTimeout(r, 90));
       }
       end();
-    })();
+    })().catch(() => { if (this.sayId === id) { this.h.onError?.("speech"); end(); } });
   }
 
   // ---- cloud listening: one open mic for the whole call ----
@@ -286,7 +325,7 @@ export class Voice {
     const echo = this.spokenWords || new Set();
     const novel = heard.filter(w => !echo.has(w)), said = novel.join(" ");
     const stop = /\b(stop|wait|hold on|hang on|pause|shh+|quiet|enough|cancel|never ?mind|one sec(?:ond)?|excuse me|listen|pg|okay okay|ok ok|no no)\b/.test(said);
-    const talking = novel.length >= 2 && novel.length / heard.length > 0.5;
+    const talking = novel.length >= 5 && novel.length / heard.length > 0.65;
     if (!stop && !talking && !isEndCall(said)) return false;
     this.hush(); this.call = true;
     this.h.onInterrupt?.();

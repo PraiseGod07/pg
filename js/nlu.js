@@ -192,8 +192,8 @@ function dateFrom(seg, base) {
 function addDaysStr(s, n) { const d = new Date(s + "T00:00"); d.setDate(d.getDate() + n); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
 
 // ---------- AM/PM resolution ----------
-// Speech-to-text often gets AM/PM wrong. Choose the reading that makes the day flow forward,
-// with sensible hours and lengths. Explicit AM/PM is respected unless it breaks the timeline.
+// Suggest a reading for ambiguous speech. Explicit AM/PM is NEVER overridden.
+// Ambiguous readings are flagged for the app to read back before saving.
 function resolve(items, ctx) {
   const ms = [];
   items.forEach(it => ["start", "end", "by"].forEach(k => { if (it[k]) ms.push(it[k]); }));
@@ -239,6 +239,7 @@ function resolve(items, ctx) {
     const n = 1 << amb.length;
     for (let mask = 0; mask < n; mask++) {
       const ch = amb.map((_, i) => !!(mask & (1 << i)));
+      if (amb.some((x, i) => x.mer && (x.mer === "pm") !== ch[i])) continue;
       const c = cost(ch);
       if (c < bestC) { bestC = c; best = ch; }
     }
@@ -246,7 +247,14 @@ function resolve(items, ctx) {
     best = amb.map(x => x.mer ? x.mer === "pm" : x.h < 7 || x.h === 12);
   }
   const out = x => x ? (amb.includes(x) ? val(x, best[amb.indexOf(x)]) : val(x, false)) : null;
-  items.forEach(it => { it.s = out(it.start); it.e = out(it.end); it.b = out(it.by); });
+  items.forEach(it => {
+    it.s = out(it.start); it.e = out(it.end); it.b = out(it.by);
+    it.ambiguous = ["start", "end", "by"].some(k => {
+      const x = it[k];
+      return x && x.h >= 1 && x.h <= 12 && !x.mer && (!x.inherit || (out(x) >= 720 ? "pm" : "am") !== x.inherit);
+    });
+    it.invalidRange = it.s != null && it.e != null && it.e <= it.s;
+  });
 }
 
 // ---------- Public: schedule parsing ----------

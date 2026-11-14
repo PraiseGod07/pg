@@ -38,24 +38,19 @@ export function speakable(t, full) {
     .replace(/[“”"]/g, "").replace(/:\s+(?=[A-Z])/g, ", ")
     .replace(/\s*\n+\s*/g, ". ").replace(/\.\s*\./g, ".")
     .replace(/\s+([,.?])/g, "$1").replace(/\s{2,}/g, " ").trim();
-  s = yue.length || full ? s : trimForVoice(s);
   return s.replace(/\s*qqyue(\d+)qq\s*/g, (_, i) => ` ⟦yue:${yue[+i]}⟧ `).trim();
 }
-// Long replies: say the first part, then point to the screen like a person would.
-function trimForVoice(s, max = 420) {
-  if (s.length <= max) return s;
-  const sents = s.match(/[^.?]+(?:[.?]+|$)/g) || [s];
-  let out = "";
-  for (const x of sents) { if ((out + x).length > max && out) break; out += x; }
-  const tail = /\?\s*$/.test(s) ? " " + sents.at(-1).trim() : "";
-  return (out.trim() + " The rest is on your screen." + (tail && !out.includes(tail.trim()) ? tail : "")).trim();
-}
-// Group sentences into natural phrases so the voice doesn't stop after every one.
-export function chunks(s, max = 190) {
+// Bound EVERY utterance, including a long sentence with no punctuation.
+// Short phrases avoid mobile/Chromium long-utterance stalls without losing words.
+export function chunks(s, max = 150) {
   const sents = String(s).replace(/\s+/g, " ").match(/(?:[^.?]|\.(?=\d)|\b(?:Mr|Mrs|Dr|St|No)\.)+(?:[.?]+|$)/g) || [s];
   const out = []; let cur = "";
   for (let x of sents) { x = x.trim(); if (!x) continue;
-    if (cur && (cur + " " + x).length > max) { out.push(cur); cur = x; } else cur = cur ? cur + " " + x : x; }
+    for (const word of x.split(/\s+/).flatMap(w => w.length > max ? w.match(new RegExp(`.{1,${max}}`, "g")) : [w])) {
+      if (cur && (cur + " " + word).length > max) { out.push(cur); cur = ""; }
+      cur = cur ? cur + " " + word : word;
+    }
+  }
   if (cur) out.push(cur);
   return out;
 }
@@ -74,6 +69,9 @@ export function voiceScore(v) {
   else if (/female|samantha|victoria|zira|susan|hazel|karen|moira|tessa|salli|jenny|aria|sonia|libby|sinji/i.test(n)) s -= 200;
   return s;
 }
-export const isMale = v => /\bmale\b|andrew|brian|guy|ryan|christopher|eric|davis|daniel|arthur|evan|aaron|oliver|nathan|thomas|\btom\b|\balex\b|david|george|james|mark|fred|rishi|ravi|danny|wanlung|wan lung|yunlong/i.test(v?.name || "")
-  && !/\bfemale\b/i.test(v?.name || "");
+export const isMale = v => {
+  const id = `${v?.name || ""} ${v?.voiceURI || ""}`;
+  return !/\bfemale\b/i.test(id) && (/\bmale\b|andrew|brian|\bguy\b|ryan|christopher|eric|davis|daniel|arthur|evan|aaron|oliver|nathan|thomas|\btom\b|\balex\b|david|george|james|mark|fred|rishi|ravi|danny|wanlung|wan lung|yunlong/i.test(id)
+    || /en[-_]au[-_]x[-_](?:aub|aud)|en[-_]gb[-_]x[-_](?:gbb|gbd|rjs)|en[-_]in[-_]x[-_](?:end|ene)|en[-_]us[-_]x[-_](?:iol|iom|tpd)/i.test(id));
+};
 export const isNatural = v => /natural|neural|online|premium|enhanced|siri/i.test(v?.name || "");
