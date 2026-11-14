@@ -99,10 +99,11 @@ export function goalsLine() {
 
 // ---- end-of-call extras ----
 export function verse() {
-  const used = dl().verses = (dl().verses || []).slice(-40);
-  const pool = VERSES.map((v, i) => i).filter(i => !used.includes(i));
-  const i = pool[Math.floor(Math.random() * pool.length)] ?? 0;
-  used.push(i); save(true);
+  const date = today();
+  const ordinal = Math.floor(Date.parse(date + "T00:00:00Z") / 86400000);
+  const i = ((ordinal % VERSES.length) + VERSES.length) % VERSES.length;
+  const days = dl().verseDays || (dl().verseDays = {});
+  if (days[date] == null) { days[date] = i; save(); }
   return { ref: VERSES[i][0], text: VERSES[i][1] };
 }
 export const canto = () => (S.canto = S.canto || { learned: [] });
@@ -116,6 +117,16 @@ export function teachTwo() {
   pick.forEach(i => canto().learned.push({ i, date: today() }));
   save();
   return pick.map(i => ({ i, zh: CANTO[i][0], jp: sayLike(CANTO[i][1]), en: CANTO[i][2] }));
+}
+// One lesson for the entire local calendar day, repeated at every goodbye.
+// Deterministic date selection keeps phone and laptop on the same sentence.
+export function teachDaily() {
+  const date = today();
+  const ordinal = Math.floor(Date.parse(date + "T00:00:00Z") / 86400000);
+  const record = { i: ((ordinal % CANTO.length) + CANTO.length) % CANTO.length, date };
+  if (!canto().learned.some(x => x.date === date && x.i === record.i)) { canto().learned.push(record); save(); }
+  const [zh, jp, en] = CANTO[record.i] || CANTO[0];
+  return { i: record.i, zh, jp: sayLike(jp), en };
 }
 export function learned() {
   const seen = new Set(), out = [];

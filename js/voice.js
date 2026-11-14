@@ -1,6 +1,6 @@
 // Voice engine: "Hi PG" wake word, command capture, and spoken replies.
 import { findWake, isEndCall } from "./nlu.js";
-import { chunks, voiceScore, isNatural } from "./speech.js";
+import { chunks, voiceScore, isNatural, isMale } from "./speech.js";
 import { Mic, Player } from "./cloudvoice.js";
 
 const SR = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -44,7 +44,8 @@ export class Voice {
   voices() { return this.ttsSupported ? speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang)).sort((a, b) => voiceScore(b) - voiceScore(a)) : []; }
   pickVoice() {
     const vs = this.voices();
-    this.voice = vs.find(v => v.voiceURI === this.voiceURI) || vs[0] || null;
+    const males = vs.filter(isMale), pool = males.length ? males : vs;
+    this.voice = pool.find(v => v.voiceURI === this.voiceURI) || pool[0] || null;
   }
 
   // ---- listening ----
@@ -194,7 +195,7 @@ export class Voice {
     });
     return out;
   }
-  yueVoice() { try { return speechSynthesis.getVoices().find(v => /^(zh|yue)[-_](HK|Hant-HK)/i.test(v.lang) || /yue/i.test(v.lang)) || null; } catch { return null; } }
+  yueVoice() { try { return speechSynthesis.getVoices().filter(v => /^(zh|yue)[-_](HK|Hant-HK)/i.test(v.lang) || /yue/i.test(v.lang)).sort((a, b) => voiceScore(b) - voiceScore(a))[0] || null; } catch { return null; } }
   synth(p, id) {
     return new Promise(res => {
       if (!this.ttsSupported || this.sayId !== id) return res();

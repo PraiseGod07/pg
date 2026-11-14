@@ -21,7 +21,13 @@ export async function hydrate() {
   try {
     const c = await caches.open(BOX);
     const r = await c.match(URL_FOR(KEY));
-    if (r) mem[KEY] = await r.text();
+    let raw = r ? await r.text() : "";
+    try { if (raw) JSON.parse(raw); } catch { raw = ""; }
+    if (raw) mem[KEY] = raw;
+    else {
+      const backup = await c.match(URL_FOR(KEY + ".recovery"));
+      if (backup) { const text = await backup.text(); JSON.parse(text); mem[KEY] = text; }
+    }
   } catch {}
 }
 
@@ -90,10 +96,17 @@ export function importV1(o) {
 
 const hooks = [];
 export const onSave = f => hooks.push(f);
+// Wait for durable browser writes before a command reports completion.
+export const flush = () => writing;
+export function checkpoint() {
+  const raw = JSON.stringify(S);
+  ls.set(KEY + ".recovery", raw);
+}
 // quiet = bookkeeping only (sync status), not a change worth sending to other devices
 export function save(quiet) { if (!quiet) S.t = Date.now(); ls.set(KEY, JSON.stringify(S)); if (!quiet) hooks.forEach(f => { try { f(); } catch {} }); }
 // Take data from PG Cloud while keeping this device's own settings
 export function adopt(o, t) {
+  checkpoint();
   const dev = S.dev, vu = S.voice?.voiceURI || "";
   const next = merge(DEFAULTS(), o);
   for (const k of Object.keys(S)) delete S[k];
@@ -102,7 +115,17 @@ export function adopt(o, t) {
 }
 // Lock this device and clear its copy of the data
 export function wipe() { const fresh = DEFAULTS(); for (const k of Object.keys(S)) delete S[k]; Object.assign(S, fresh); S.dev.seen = 1; save(true); }
-export function day(d = today()) { return (S.days[d] = S.days[d] || { blocks: [] }); }
+export function day(d = today()) {
+  const value = (S.days[d] = S.days[d] || { blocks: [] });
+  for (const r of (S.routines || []).filter(r => !r.disabled && Number.isFinite(r.start) && (!r.from || r.from <= d))) {
+    const id = `routine:${r.id}:${d}`;
+    if (!value.blocks.some(b => b.id === id)) value.blocks.push({
+      id, routine: r.id, title: r.title, cat: r.cat || "other", start: r.start,
+      end: r.start + r.minutes, date: d, done: false, flex: false, src: "routine"
+    });
+  }
+  return value;
+}
 export function sortedBlocks(d = today()) { return day(d).blocks.slice().sort((a, b) => a.start - b.start || a.end - b.end); }
 export function reset() { const dev = S.dev; S = DEFAULTS(); S.dev = dev; save(); }
 export function replace(o) { const dev = S.dev; S = merge(DEFAULTS(), o); S.dev = dev; save(); }

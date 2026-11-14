@@ -1,9 +1,17 @@
 // Shared helpers: dates, minutes-of-day, formatting.
 export const pad = n => String(n).padStart(2, "0");
 export const ymd = d => d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
-export const today = () => ymd(new Date());
+export const TIME_ZONE = "Asia/Hong_Kong";
+export const today = () => {
+  const p = new Intl.DateTimeFormat("en-CA", { timeZone: TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+  const get = k => p.find(x => x.type === k).value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+};
 export const addDays = (s, n) => { const d = new Date(s + "T00:00"); d.setDate(d.getDate() + n); return ymd(d); };
-export const nowMin = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
+export const nowMin = () => {
+  const p = new Intl.DateTimeFormat("en-GB", { timeZone: TIME_ZONE, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date());
+  return +p.find(x => x.type === "hour").value * 60 + +p.find(x => x.type === "minute").value;
+};
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 export const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 export const clamp = (v, a, b) => Math.max(a, Math.min(b, v));

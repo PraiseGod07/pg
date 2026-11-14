@@ -8,9 +8,9 @@
 //    and is stored only as a salted hash in your database. Wrong guesses are limited.
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, OPTIONS", "Access-Control-Allow-Headers": "authorization, content-type", "Access-Control-Max-Age": "86400" };
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-const VERSION = 4;
+const VERSION = 5;
 const VOICES = /^(amalthea|andromeda|apollo|arcas|aries|asteria|athena|atlas|aurora|callista|cora|cordelia|delia|draco|electra|harmonia|helena|hera|hermes|hyperion|iris|janus|juno|jupiter|luna|mars|minerva|neptune|odysseus|ophelia|orion|orpheus|pandora|phoebe|pluto|saturn|thalia|theia|vesta|zeus)$/;
-const out = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { ...CORS, "content-type": "application/json" } });
+const out = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { ...CORS, "content-type": "application/json", "cache-control": "no-store" } });
 const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
 const rand = n => hex(crypto.getRandomValues(new Uint8Array(n)));
 async function hash(s, salt) {
@@ -122,11 +122,28 @@ export default {
     const tok = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
     if (!tok || !(await db.prepare("SELECT 1 FROM dev WHERE tok = ?").bind(await sha(tok)).first())) return out({ error: { message: "Locked. Enter your passcode." } }, 401);
 
-    if (path === "/state" && req.method === "GET") { const s = await get(db, "state"); return out({ t: s?.t || 0, data: s ? JSON.parse(s.v) : null }); }
+    if (path === "/state" && req.method === "GET") { const s = await get(db, "state"); return out({ t: s?.t || 0, data: s ? JSON.parse(s.v) : null, sync: 2 }); }
     if (path === "/state" && req.method === "PUT") {
       const b = await req.json(), cur = await get(db, "state");
-      if (cur && b.t < cur.t) return out({ t: cur.t, data: JSON.parse(cur.v), stale: true }, 409);
-      await put(db, "state", JSON.stringify(b.data), b.t); return out({ t: b.t });
+      if (!b.data || typeof b.data !== "object" || Array.isArray(b.data))
+        return out({ error: { message: "Invalid PG state." } }, 400);
+      if (b.sync !== 2 || !Number.isSafeInteger(b.base))
+        return out({ error: { message: "Reopen PG to update before syncing. This prevents an older device erasing your data." } }, 426);
+      if ((cur?.t || 0) !== b.base)
+        return out({ t: cur?.t || 0, data: cur ? JSON.parse(cur.v) : null, stale: true, sync: 2 }, 409);
+      // Recovery snapshot of the first state replaced each hour. Uses the
+      // existing kv schema; no migrations, deletions, or renamed columns.
+      if (cur) await db.prepare("INSERT INTO kv (k, v, t) VALUES (?, ?, ?) ON CONFLICT(k) DO NOTHING")
+        .bind("recovery:" + Math.floor(Date.now() / 3600000), cur.v, cur.t).run();
+      const t = Math.max(Date.now(), (cur?.t || 0) + 1);
+      const result = cur
+        ? await db.prepare("UPDATE kv SET v = ?, t = ? WHERE k = ? AND t = ?").bind(JSON.stringify(b.data), t, "state", b.base).run()
+        : await db.prepare("INSERT INTO kv (k, v, t) VALUES (?, ?, ?) ON CONFLICT(k) DO NOTHING").bind("state", JSON.stringify(b.data), t).run();
+      if (!result.meta?.changes) {
+        const latest = await get(db, "state");
+        return out({ t: latest?.t || 0, data: latest ? JSON.parse(latest.v) : null, stale: true, sync: 2 }, 409);
+      }
+      return out({ t, sync: 2 });
     }
     if (path === "/devices" && req.method === "DELETE") { await db.prepare("DELETE FROM dev WHERE tok != ?").bind(await sha(tok)).run(); return out({ ok: true }); }
 
@@ -148,7 +165,7 @@ export default {
       const b = await req.json().catch(() => ({})), text = String(b.text || "").slice(0, 1900);
       if (!text.trim()) return out({ error: { message: "No text." } }, 400);
       try {
-        let a = await env.AI.run("@cf/deepgram/aura-2-en", { text, speaker: VOICES.test(b.voice || "") ? b.voice : "luna", encoding: "mp3" });
+        let a = await env.AI.run("@cf/deepgram/aura-2-en", { text, speaker: VOICES.test(b.voice || "") ? b.voice : "orion", encoding: "mp3" });
         if (a instanceof Response) a = a.body;
         else if (a?.audio) a = Uint8Array.from(atob(a.audio), c => c.charCodeAt(0));
         return new Response(a, { headers: { ...CORS, "content-type": "audio/mpeg", "cache-control": "no-store" } });
@@ -160,6 +177,17 @@ export default {
       const q = String(b.q || "").trim().slice(0, 200);
       if (!q) return out({ results: [] });
       try { return out(await web(q, !!b.news)); } catch (e) { return out({ error: { message: String(e?.message || e) } }, 502); }
+    }
+    // Confirm a public YouTube video before embedding it. No API key needed.
+    if (path === "/v1/video" && req.method === "GET") {
+      const id = new URL(req.url).searchParams.get("id") || "";
+      if (!/^[\w-]{11}$/.test(id)) return out({ error: { message: "Invalid video ID." } }, 400);
+      try {
+        const r = await fetch("https://www.youtube.com/oembed?format=json&url=" + encodeURIComponent("https://www.youtube.com/watch?v=" + id));
+        if (!r.ok) return out({ error: { message: "This video is unavailable." } }, 404);
+        const v = await r.json();
+        return out({ id, title: String(v.title || "").slice(0, 300), by: String(v.author_name || "YouTube").slice(0, 100) });
+      } catch { return out({ error: { message: "Couldn't check the video." } }, 502); }
     }
     // Live weather, for phones that can't reach Open-Meteo directly
     if (path === "/v1/weather" && req.method === "GET") {

@@ -1,5 +1,5 @@
 // PG — app controller: views, command handling, reminders.
-import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1 } from "./store.js";
+import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1, flush } from "./store.js";
 import { speakable, isNatural } from "./speech.js";
 import { CATS, EXERCISES, SPLITS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
 import { intent, parseSchedule, matchBlock, parseClock, normalize, isEndCall } from "./nlu.js";
@@ -20,6 +20,7 @@ import * as WEB from "./web.js";
 import * as HR from "./hearing.js";
 import { sayLike } from "./canto.js";
 import * as D from "./daily.js";
+import { weekOf, planWeek, planSummary } from "./timetable.js";
 import { cloudApi, VOICES as CLOUD_VOICES } from "./cloudvoice.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
 
@@ -88,7 +89,7 @@ const isMobile = () => matchMedia("(max-width: 960px)").matches;
 function openAssistant() { if (!isMobile()) return; $("#assistant").classList.add("open"); $("#scrim").hidden = false; }
 function closeAssistant() { $("#assistant").classList.remove("open"); $("#scrim").hidden = true; }
 function pushMsg(who, text, html) {
-  S.chat.push({ who, text, html: html || "", t: Date.now() });
+  S.chat.push({ id: uid(), who, text, html: html || "", t: Date.now() });
   S.chat = S.chat.slice(-60); save();
   paintChat();
 }
@@ -143,7 +144,7 @@ async function run(text, spoken = false) {
   ui.turn = { before: new Set(dates.flatMap(d => (S.days[d]?.blocks || []).map(b => b.id))), dates };
   try { await handle(text, spoken); }
   catch (e) { console.error(e); reply("Sorry, something went wrong. Please try that again."); }
-  finally { ui.turn = null; }
+  finally { ui.turn = null; await flush(); if (SY.on()) SY.push(); }
 }
 
 const blocksOf = d => sortedBlocks(d);
@@ -177,19 +178,19 @@ const NO = /^(?:no|nah|nope|not really|no thanks?|no thank you|don't|do not|not 
 // Answers that only make sense after PG asked something
 // ================= Daily companion =================
 const zhSay = z => `⟦yue:${z}⟧`;
-// Ending the call: a verse in the morning, two Cantonese sentences in the evening.
+// Hong Kong clock: the same verse through 21:00; one Cantonese sentence from 21:01.
 function endCall() {
-  const h = new Date().getHours(), hang = { then: () => voice.hangUp() };
-  if (h >= 4 && h < 12) {
+  const minute = nowMin(), hang = { then: () => voice.hangUp() };
+  if (minute <= 21 * 60) {
     const v = D.verse();
     const t = `Before you go, ${addr()}, here's a verse for your day. ${v.ref}: ${v.text} ${pickOne(["Have a blessed day.", "Go well today.", "Have a great day."])}`;
     return reply(t, { ...hang, full: true });
   }
-  if (h >= 17 || h < 4) {
-    const two = D.teachTwo(), bye = h >= 21 || h < 4 ? "Good night" : "Have a good evening";
-    const text = `Before you go, ${addr()}, here are two Cantonese sentences for tonight. 1. ${two[0].zh} (say it: ${two[0].jp}) means "${two[0].en}" 2. ${two[1].zh} (say it: ${two[1].jp}) means "${two[1].en}" I saved them under Cantonese in More. ${bye}.`;
-    const html = `<div>Before you go, ${esc(addr())}, here are two Cantonese sentences for tonight.</div><ol class="canto-list">${two.map(c => `<li><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">Say it: ${esc(c.jp)}</span><span>${esc(c.en)}</span></li>`).join("")}</ol><div>I saved them under Cantonese in More. ${bye}.</div>`;
-    const sp = `Before you go, ${addr()}, here are two Cantonese sentences for tonight. The first one. ${zhSay(two[0].zh)} It means: ${two[0].en.replace(/\(.*?\)/g, "")} Once more. ${zhSay(two[0].zh)} The second one. ${zhSay(two[1].zh)} It means: ${two[1].en.replace(/\(.*?\)/g, "")} Once more. ${zhSay(two[1].zh)} I saved them for you under Cantonese. ${bye}, ${addr()}.`;
+  if (minute > 21 * 60) {
+    const c = D.teachDaily(), bye = "Good night";
+    const text = `Today's Cantonese, ${addr()}: ${c.zh} (say it: ${c.jp}) means "${c.en}" This is the same sentence for today. ${bye}.`;
+    const html = `<div>Today's Cantonese. Practise this same sentence today.</div>${cantoCard(c)}<div>${bye}, ${esc(addr())}.</div>`;
+    const sp = `Today's Cantonese, ${addr()}. ${zhSay(c.zh)} It means: ${c.en.replace(/\(.*?\)/g, "")} Once more. ${zhSay(c.zh)} ${bye}.`;
     return reply(text, { ...hang, html, speak: speakable(sp, true) });
   }
   return reply(pickOne([`You're welcome, ${addr()}. Talk soon.`, `Anytime, ${addr()}. Ending the call.`, `My pleasure, ${addr()}. Bye for now.`]), hang);
@@ -221,25 +222,27 @@ async function daily(text, bare, spoken) {
     const g = D.goals();
     return reply(g.length ? `Your goals are: ${g.map(x => x.text).join(". ")}.` : "You haven't told me any goals yet. Say, my goal is, and I'll save it."), true;
   }
-  if (/\bteach me (?:some |two |2 |a few |more )?(?:cantonese|canto)\b|\bcantonese (?:lesson|sentences?) (?:now|please)\b/.test(b)) {
-    const two = D.teachTwo();
-    const text = `Here are two. 1. ${two[0].zh} (say it: ${two[0].jp}) means "${two[0].en}" 2. ${two[1].zh} (say it: ${two[1].jp}) means "${two[1].en}" I saved them under Cantonese.`;
-    const sp = `Here are two. ${zhSay(two[0].zh)} It means: ${two[0].en.replace(/\(.*?\)/g, "")} ${zhSay(two[1].zh)} It means: ${two[1].en.replace(/\(.*?\)/g, "")} I saved them under Cantonese.`;
-    return reply(text, { speak: speakable(sp, true), html: `<ol class="canto-list">${two.map(c => `<li><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">Say it: ${esc(c.jp)}</span><span>${esc(c.en)}</span></li>`).join("")}</ol>` }), true;
+  if (/\bteach me (?:some |one |two |2 |a few |more )?(?:cantonese|canto)\b|\bcantonese (?:lesson|sentences?) (?:now|please)\b/.test(b)) {
+    const c = D.teachDaily();
+    return reply(`Today's sentence: ${c.zh} (say it: ${c.jp}) means "${c.en}" We'll practise this one today.`,
+      { speak: speakable(`Today's sentence. ${zhSay(c.zh)} It means: ${c.en} Once more. ${zhSay(c.zh)}`, true), html: cantoCard(c) }), true;
   }
   if (/\b(?:what|which) cantonese (?:have i|did i) (?:learn|learned|learnt)|\b(?:show|open|read) (?:me )?my cantonese\b|\bmy cantonese (?:sentences|words|list)\b/.test(b)) {
     const l = D.learned();
     openCanto();
-    if (!l.length) return reply("You haven't learned any yet. In the evening, when you end the call, I'll teach you two."), true;
+    if (!l.length) return reply("You haven't learned any yet. After 9:01 PM, ending a call gives you one sentence to practise that day."), true;
     return reply(`You've learned ${l.length} sentence${l.length === 1 ? "" : "s"}. The latest: ${l[0].zh} means "${l[0].en}"`, { speak: speakable(`You've learned ${l.length}. The latest one. ${zhSay(l[0].zh)} It means: ${l[0].en}`, true) }), true;
   }
   return false;
 }
+function cantoCard(c) {
+  return `<ol class="canto-list"><li><button class="canto-play" data-act="canto-play" data-zh="${esc(c.zh)}" aria-label="Play ${esc(c.en)}"><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">Say it: ${esc(c.jp)}</span><span>${esc(c.en)}</span><span class="faint">Tap to hear it</span></button></li></ol>`;
+}
 function openCanto() {
   const l = D.learned(), sh = $("#sheet");
-  sh.innerHTML = `<h3>Cantonese</h3><p class="note" style="margin:0 0 8px">${l.length} of ${D.CANTO_N} learned. Tap a sentence to hear it.</p>
-    ${l.length ? `<ol class="canto-list">${l.map(c => `<li><button class="canto-play" data-act="canto-play" data-zh="${esc(c.zh)}" aria-label="Play ${esc(c.en)}"><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">Say it: ${esc(c.jp)}</span><span>${esc(c.en)}</span></button></li>`).join("")}</ol>` : `<p class="note">Nothing yet. In the evening, say end the call and PG teaches you two sentences.</p>`}
-    <div class="sheet-actions"><button class="btn" data-act="canto-more">Teach me two now</button><button class="btn ghost" data-act="close-sheet">Close</button></div>`;
+  sh.innerHTML = `<h3>Cantonese</h3><p class="note" style="margin:0 0 8px">One sentence per day. Repeat it throughout today. ${l.length} of ${D.CANTO_N} saved. Tap a sentence to hear it.</p>
+    ${l.length ? `<ol class="canto-list">${l.map(c => `<li><button class="canto-play" data-act="canto-play" data-zh="${esc(c.zh)}" aria-label="Play ${esc(c.en)}"><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">Say it: ${esc(c.jp)}</span><span>${esc(c.en)}</span></button></li>`).join("")}</ol>` : `<p class="note">Nothing yet. After 9:01 PM, ending a call teaches one sentence for that day.</p>`}
+    <div class="sheet-actions"><button class="btn" data-act="canto-more">Practise today's sentence</button><button class="btn ghost" data-act="close-sheet">Close</button></div>`;
   if (!sh.open) sh.showModal();
 }
 function openGoals() {
@@ -270,6 +273,15 @@ function askLine(it) {
 function needsAsk(items) { return items.find(i => i.kind === "event" && !i.ok && (missingOf(i).time || missingOf(i).len)); }
 
 async function followUp(p, bare, text, spoken) {
+  if (p.type === "week-complete") {
+    const at = parseClock(text);
+    const options = blocksOf(today()).filter(b => p.ids.includes(b.id));
+    const found = options.filter(b => b.start === at);
+    if (found.length !== 1) { ui.pending = p; return reply("What was the start time of the session you finished?"), true; }
+    found[0].done = true;
+    if (found[0].src === "school") SC.noteDone(found[0]);
+    save(); reply(`Marked ${found[0].title} at ${sayTime(found[0].start)} as done.`, { view: "today", date: today(), spoken }); return true;
+  }
   if (p.type === "didyou") {
     const [id, ...rest] = p.ids, f = Object.keys(S.days).map(d => (S.days[d].blocks || []).find(x => x.id === id)).find(Boolean);
     let head = "";
@@ -305,7 +317,7 @@ async function followUp(p, bare, text, spoken) {
     }
     const next = needsAsk(p.items);
     if (next) { ui.pending = { ...p, tries: 0 }; return reply(askLine(next)), true; }
-    await commitSchedule(p.items, spoken);
+    await commitSchedule(p.items, spoken, p.replace || []);
     return true;
   }
   if (p.type === "food") {
@@ -369,14 +381,80 @@ function schoolReply(res, head, spoken) { render(); return reply((head ? head + 
 
 async function handle(text, spoken) {
   const bare0 = normalize(text).replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
-  if (isEndCall(bare0)) { ui.pending = null; return endCall(); }
+  if (isEndCall(bare0) || /^(?:(?:okay|ok|thanks|thank you|pg)[ ,]+)*(?:good ?night|goodbye|bye|hang up)(?: pg| sir| please| now)*$/.test(bare0)) { ui.pending = null; return endCall(); }
+  const personal = M.capturePersonal(text);
+  const remembered = M.personalAnswer(text);
+  if (remembered) return reply(remembered);
+  if (personal && (!AI.on() || text.length < 180 && !/\b(?:how|why|what|should|could|can you|help me)\b/i.test(text)))
+    return reply(`Saved, ${addr()}. ${personal.text}`);
+  // Daily reminders are definitions, separate from any single day's timetable.
+  const dailyReminder = text.match(/^(?:(?:pg|please|can you)[, ]+)*(?:remind me to|remind me|add (?:a )?daily reminder (?:to|for)) (.+?) (?:every day|daily)(?: at (.+?))?[.!]?$/i)
+    || text.match(/^(?:please )?remind me (?:every day|daily) to (.+?)(?: at (.+?))?[.!]?$/i);
+  if (dailyReminder) {
+    const start = dailyReminder[2] ? parseClock(dailyReminder[2]) : null;
+    if (dailyReminder[2] && start == null) return reply("What time should the daily reminder be?");
+    const result = AG.apply([{ op: "add_routine", title: dailyReminder[1], start, minutes: 5 }]);
+    render(); return reply(result.join(" "), { view: "today", date: today(), spoken });
+  }
+  const stopRoutine = text.match(/^(?:please )?(?:stop reminding me to|stop the daily reminder (?:to|for)|remove (?:the |my )?daily reminder (?:to|for)) (.+?)(?: every day)?[.!]?$/i);
+  if (stopRoutine) {
+    const q = stopRoutine[1].trim().toLowerCase();
+    const r = (S.routines || []).find(r => !r.disabled && (r.title.toLowerCase() === q || r.title.toLowerCase().includes(q)));
+    if (!r) return reply("Which daily reminder should I stop?");
+    const result = AG.apply([{ op: "remove_routine", id: r.id }]); render(); return reply(result.join(" "));
+  }
   const pend = ui.pending; ui.pending = null;
   if (pend && await followUp(pend, bare0, text, spoken)) return;
   if (await daily(text, bare0, spoken)) return;
   const it = intent(text);
   const d = ui.view === "today" && ui.pinDate ? ui.date : today();
+  // Read/check the actual saved timetable before consulting the model.
+  if (it.type === "now" || /\bwhat (?:am i supposed to|am i meant to|should i|do i need to) (?:be )?(?:do|doing)\b.*\b(?:now|at the moment)\b/i.test(text)) {
+    const active = live(today()).filter(b => b.start <= nowMin() && nowMin() < b.end), next = upcoming()[0];
+    let answer;
+    if (active.length > 1) answer = `${addr()}, your timetable has overlapping entries right now: ` + active.map(b => `${b.title} until ${sayTime(b.end)}`).join("; ") + ". Which one should take priority?";
+    else if (active.length) answer = `${addr()}, according to your timetable, you should be ${active[0].cat === "rest" ? "taking a rest break" : "doing " + active[0].title} right now, until ${sayTime(active[0].end)}.`
+      + (next ? ` Next is ${next.title} at ${sayTime(next.start)}.` : "");
+    else answer = `${addr()}, you have no unfinished activity scheduled right now.` + (next ? ` Next is ${next.title} at ${sayTime(next.start)}.` : " There is nothing else scheduled today.");
+    return reply(answer, { view: "today", date: today(), spoken, full: true });
+  }
+  if (it.type === "next") {
+    const next = upcoming()[0];
+    return reply(next ? `${addr()}, next is ${next.title} at ${sayTime(next.start)}, until ${sayTime(next.end)}.` : `There is nothing else scheduled today, ${addr()}.`, { view: "today", date: today(), spoken });
+  }
+  if (it.type === "day" || /^(?:pg[,]? )?(?:what do i have (?:on )?today|what(?:'s| is) (?:on )?my (?:timetable|schedule)(?: today)?)[?.!]*$/i.test(text.trim())) {
+    const dd = it.tomorrow ? addDays(today(), 1) : today(), entries = blocksOf(dd).filter(b => !b.skipped);
+    return reply(entries.length ? `${addr()}, ${dd === today() ? "today" : "tomorrow"} you have ` + entries.map(b =>
+      `${b.title} from ${sayTime(b.start)} to ${sayTime(b.end)}${b.done ? ", completed" : ""}`).join("; ") + "."
+      : `${addr()}, nothing is scheduled ${dd === today() ? "today" : "tomorrow"}.`, { view: "today", date: dd, spoken, full: true });
+  }
+  const finished = text.match(/^(?:(?:okay|ok|pg|pga)[, ]+)*(?:i(?:'ve| have)? (?:done|finished|completed)|mark) (.+?)(?: as (?:done|complete))?[.!]?$/i);
+  if (finished) {
+    const target = finished[1].replace(/\s+today$/i, "").replace(/^(?:the|my)\s+/i, "").trim();
+    const pool = blocksOf(today()).filter(b => !b.done && !b.skipped);
+    const exact = pool.filter(b => b.title.toLowerCase() === target.toLowerCase());
+    const candidates = exact.length ? exact : pool.filter(b => b.title.toLowerCase().includes(target.toLowerCase()));
+    if (candidates.length === 1) {
+      const block = candidates[0]; block.done = true;
+      if (block.src === "school") SC.noteDone(block);
+      save(); return reply(`Marked ${block.title} as done, ${addr()}.`, { view: "today", date: today(), spoken });
+    }
+    if (candidates.length > 1) {
+      ui.pending = { type: "week-complete", ids: candidates.map(b => b.id) };
+      return reply(`Which ${target} session did you finish: ${candidates.map(b => sayTime(b.start)).join(" or ")}?`);
+    }
+    const routines = (S.routines || []).filter(r => !r.disabled && r.start == null && r.title.toLowerCase().includes(target.toLowerCase()));
+    if (routines.length === 1) {
+      S.routineDone ||= {}; S.routineDone[`${routines[0].id}:${today()}`] = true;
+      save(); return reply(`Marked ${routines[0].title} as done for today, ${addr()}. It stays as a daily reminder.`, { view: "today", date: today(), spoken });
+    }
+  }
+  if (/\b(?:build|create|generate|regenerate|rebuild|compile|plan)\b/i.test(text) && /\b(?:weekly|week|timetable)\b/i.test(text) && !AI.on()) {
+    openWeekPlanner();
+    return reply("Tell me the tasks and their minutes in this planner, choose the days and breaks, then press Build timetable. Your existing fixed commitments stay in place.");
+  }
   // Add / delete / replace things on the timetable, in plain words
-  if (!["greet", "hush", "dismiss"].includes(it.type) && await localEdit(text, spoken)) return;
+  if (!ui.editing && !["greet", "hush", "dismiss", "school_add"].includes(it.type) && await localEdit(text, spoken)) return;
   // With an AI key, PG thinks with the AI first so it can handle anything; the built-in brain is the backup.
   if (AI.on() && !ui.quiet && !["greet", "hush", "dismiss", "clear", "school_add"].includes(it.type)) {
     setStatus("Thinking…");
@@ -681,10 +759,11 @@ async function scheduleFrom(text, spoken) {
   if (gap) { ui.pending = { type: "clarify", items, tries: 0 }; return reply(askLine(gap), { spoken }); }
   return commitSchedule(items, spoken);
 }
-async function commitSchedule(items, spoken) {
+async function commitSchedule(items, spoken, replacing = []) {
   const events = items.filter(i => i.kind === "event");
-  const dates = [...new Set(events.map(e => e.date))];
+  const dates = [...new Set([...events.map(e => e.date), ...replacing.map(b => b.date)])];
   const snaps = dates.map(snapshot);
+  for (const old of replacing) day(old.date).blocks = day(old.date).blocks.filter(b => b.id !== old.id);
   const res = placeItems(items, day, { today: today(), now: nowMin(), dayStart: S.profile.dayStart, dayEnd: S.profile.dayEnd });
   dates.forEach(renameCoachBlocks);
   res.unplaced.forEach(u => S.inbox.push({ id: uid(), title: u.title, cat: u.cat, dur: u.dur, date: u.date }));
@@ -750,13 +829,14 @@ function aiContext(notes = []) {
   let meals = ""; try { meals = F.todayMeals(d, false).map(m => `${m.when}: ${m.r.t}`).join("; "); } catch {}
   const facts = M.facts().slice(0, 25).map(n => "- " + n.text).join("\n") || "- nothing yet";
   const mem = notes.length ? notes.map(n => `- ${n.date} (${M.FOLDERS[n.folder].label}): ${n.text}`).join("\n") : "";
-  return `Now: ${new Date().toLocaleString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })}. He lives in Hong Kong.
+  return `Now: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Hong_Kong", weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })} Hong Kong time (UTC+8). Today is ${today()}. Do not use the server timezone or infer the date from his greeting. He lives in Hong Kong.
 Today's timetable: ${sched}.
 Assignments: ${due}.
 Today's suggested meals: ${meals || "none"}.
 His goals: ${D.goals().map(g => g.text).join("; ") || "none saved yet"}.
 Learned things about PraiseGod:
-${facts}${mem ? `\nHis saved notes that may apply:\n${mem}` : ""}`;
+${facts}${mem ? `\nHis saved notes that may apply:\n${mem}` : ""}
+These are permanent memories, even if this is a new call. Use them to answer personal questions. Never say you don't know his personal life when the answer is here.`;
 }
 const REFUSE = /\b(?:can(?:'|’|no)t|cannot|unable to|not able to|don't have (?:the )?(?:ability|access|permission)|no way to|outside (?:of )?my|beyond my)\b/i;
 const ACTION = /\b(?:add|put|include|insert|create|make|schedule|book|plan|set|change|edit|update|rename|move|shift|push back|swap|replace|switch|remove|delete|drop|cancel|clear|take (?:out|off|away)|get rid of|increase|decrease|raise|lower|turn (?:on|off)|mark|log|save|write down|note)\b/i;
@@ -770,6 +850,12 @@ async function aiTalk(text, notes = [], web = null, live = false) {
 Speak naturally and warmly, like a smart friend who knows him well. You can talk about ANYTHING he brings up: faith and the Bible, life, feelings, relationships, school subjects, science, history, tech and coding, money, business, health, fitness, food, music, sports, news, ideas, jokes, advice or just casual chat. Give real, thoughtful answers with substance, share your view when he asks, and keep the conversation going like a real person would. Never refuse a normal topic or steer him back to the app. For business (starting or growing a business, marketing, sales, pricing, money, investing, companies, side hustles, creator products), answer like a sharp business mentor with clear, practical steps; search the internet for real company facts, numbers, prices and market news.
 His words come from voice recognition or quick typing, so some words may be misheard or misspelled, like "corner" when he said "call", "jim" for "gym", "base" for "bass", or a word that sounds alike but makes no sense in the sentence. Work out what he really meant from the whole sentence and the conversation so far, act on that, and don't mention the mistake. When you changed any word, put his corrected sentence in "heard". When you write Cantonese, give the Chinese characters, then an easy English-style "say it" spelling with NO tone numbers (for example 你好 "say it: nay hoh" means hello), then the meaning. Never use Jyutping numbers like nei5. You have the internet. When answering needs current or exact facts you aren't sure of (news, weather, sports, prices, people, recent events, places, opening hours, anything "latest" or "today", or anything after 2024), don't guess: reply with "search" set to a short web search query and "say" empty, and you'll get live results back. Write the query like a good Google search with the key words only, and put in the year or date when he says "this year", "today" or "latest" (today is ${today()}). Never say you can't access the internet. When you search, leave "say" empty: never say "let me check" or "one moment", because you get the results straight away.
 Never promise to do something later ("I'll add", "I'll look"). Either do it now with "ops"/"do" in this same reply, or ask the question you need answered.
+Personal memories: save explicit disclosures immediately in "remember", even if they are about relationships or faith. "I love Maya" means save "You love Maya." This is about his life, not a one-off question. Never wait for repeated mentions of a personal fact. Do not save hypothetical examples or questions as facts.
+Assignments must be saved in School with add_assignment, never just a calendar block. Save the known title and deadline now; ask for any missing due date/time or study estimate without discarding the assignment.
+For moving a whole timetable, use move_day with from and to. Do not recreate its items with add_block. A move removes the old entries and preserves IDs.
+Daily reminders use add_routine. They survive clearing or moving the timetable, and are stopped only when he explicitly asks. An untimed daily habit can be saved as a checklist, without inventing a time.
+The weekly table and checklist share the same saved blocks. For weekly generation/regeneration use plan_week, not a pile of add_block operations. Ask for missing task durations, eligible days, daily start/end times and preferred work/break lengths before planning. Existing weekly_plans contain confirmed settings and task lists; reuse those and include prior tasks when he adds more, unless he explicitly removes them. Keep fixed commitments, completed work and daily routines. Do not promise more work than fits; report any unallocated minutes. For advice: UNC's calendar guidance recommends fixed commitments first, time estimates, color coding, buffer time and readjusting: https://learningcenter.unc.edu/tips-and-tools/using-planners . Cornell recommends balanced activities, spreading work and real breaks: https://lsc.cornell.edu/how-to-study/studying-for-and-taking-exams/guidelines-for-creating-a-study-schedule/ . These are principles, not permission to invent his personal availability or durations.
+Gym edits must use add_exercise with the exact gym day, real exercise name, cues, sets and reps. Do not call it saved if you did not return an operation. Do not claim an "inner chest" muscle can be isolated or that one exercise will open a chest gap. Explain that chest development is overall and the shape varies. Any videoId must come from his actual YouTube URL or live internet results, never an invented ID. Video search links are searches, not a fetched or watched video.
 Every exercise you add with add_exercise automatically gets a "Watch on YouTube" form-video button in his Gym tab, made from its "search" field (for example "incline dumbbell press proper form"). So when he asks for videos, add the exercise with a good "search", and tell him the video button is on the exercise in the Gym tab. Exercises already in his plan already have that video button.${web ? `
 
 LIVE INTERNET RESULTS for his question, fetched just now (${new Date().toString().slice(0, 24)}):
@@ -789,12 +875,12 @@ When he tells you a goal, save it with {"op":"push","path":"goals","value":{"tex
 APP DATA (today is ${today()}):
 ${AG.snapshot()}
 
-Example: he says "add an exercise for my lower chest" -> {"say":"Sure, sir. Decline push-ups are great for the lower chest. Which gym day should they go on, and how many sets and reps?","ops":[],"do":[],"remember":[]}
-Then he says "push day, 3 sets of 10 to 15" -> {"say":"Done, sir. Decline push-ups are on push day, 3 sets of 10 to 15.","ops":[{"op":"add_exercise","day":"push","name":"Decline push-up","muscles":"Lower chest, triceps","cues":["Feet up on a bench","Lower your chest to the floor slowly","Push up hard and squeeze"],"search":"decline push up proper form","sets":3,"reps":"10-15","rest":60}]}
+Example: he says "add an exercise for my chest" -> {"say":"We could use a cable chest fly, sir. Should I add it to push day, and how many sets and reps would you like?","ops":[],"do":[],"remember":[]}
+Then he says "push day, 3 sets of 10 to 15" -> {"say":"","ops":[{"op":"add_exercise","day":"push","name":"Cable chest fly","muscles":"Chest","cues":["Use a comfortable light load","Keep a slight bend in your elbows","Bring your hands together under control without shoulder pain"],"search":"cable chest fly proper form","sets":3,"reps":"10-15","rest":60}]}
 Reply ONLY with JSON: {"say": "what you say out loud", "ops": [direct changes], "do": ["plain commands for the app"], "remember": ["new lasting facts about him"], "search": "web search query, only when you need the internet", "heard": "his corrected sentence, only if you fixed a misheard word", "topic": "what this is about"}.
 ${AG.TOOLS}
 "do" is for when he clearly wants the app to act. Write each as a short command the app understands, for example "gym at 5pm", "bass lesson tomorrow at 6:30pm", "I have a history essay due Friday", "add eggs to my shopping list", "I don't eat pork", "is my plan realistic", "move gym to 7pm", "clear today". Leave it empty otherwise.
-For homework, assignments, essays, projects and tests, put his words in "do" (for example "I have an assignment called Code AI due Monday") and keep the name he gave. Never make up a due time or a timetable slot he didn't say.
+For homework, assignments, essays, projects and tests, use add_assignment and keep the exact name he gave. Never make up a due time or a timetable slot he didn't say.
 "remember" is ONLY for lasting things about him that will still be true next month: who he is (school, church, city, age, job), people in his life, likes and dislikes, food rules and allergies, habits and routines, goals and dreams, skills he's working on, strong opinions and values, and how he wants PG to talk or act. NOT for one-off questions, today's plans, passing moods, things he asked you to look up, or facts about the world. Write each as a "You ..." sentence. Leave it empty if nothing new.
 "topic" is a 1 to 3 word label for what his message is about, like "business", "premier league", "bass guitar", "bible", "fitness", "coding" or "cantonese". Use "" for small talk, greetings and simple app commands.`;
   const raw = await AI.call(sys, [...history(10), { role: "user", content: live ? text + "\n\n(PG note: this needs live facts from the internet, so reply with a \"search\" query.)" : text }], { json: true, max: 900 });
@@ -851,6 +937,13 @@ async function aiChat(text, notes = []) {
   try { r = await aiTalk(text, notes, web, !web && WEB.LIVE_RE.test(text) && !ACTION.test(text)); }
   catch (e) { if (web?.spoken) { ui.sources = web.sources; return web.spoken; } throw e; }   // AI down: still give the live weather
   ui.sources = r.sources?.length && r.say ? r.sources : null;
+  for (const op of r.ops || []) if (op.op === "add_exercise") {
+    // Discard invented IDs. Keep only a user-supplied URL or a validated lookup.
+    const supplied = text.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/))([\w-]{11})/i)?.[1];
+    const video = await WEB.exerciseVideo(op.name, supplied).catch(() => null);
+    delete op.videoId;
+    if (video) { op.videoId = video.id; op.videoBy = video.by; }
+  }
   return finishTalk(r);
 }
 // Run what the AI asked for quietly, then speak its reply.
@@ -859,10 +952,18 @@ async function finishTalk(r) {
   const done = [];
   if (r.ops?.length) {
     const lines = AG.apply(r.ops, { onDone: undo => toast("PG made changes.", "Undo", () => { undo(); C.syncCustom(); render(); toast("Undone."); }) });
-    if (r.ops.some(o => /exercise/.test(o.op))) go("gym");
+    if (r.ops.some(o => /exercise/.test(o.op))) {
+      const added = r.ops.find(o => o.op === "add_exercise");
+      if (added?.day) C.switchDay(C.dayKeyFor(added.day) || added.day);
+      const ex = added && C.findEx(added.name); if (ex) ui.openEx = ex;
+      go("gym");
+    }
+    else if (r.ops.some(o => o.op === "add_assignment")) go("school");
+    else if (r.ops.some(o => o.op === "plan_week")) go("today", r.ops.find(o => o.op === "plan_week").weekStart || today());
     else if (r.ops.some(o => /block|clear_day/.test(o.op))) go("today", r.ops.map(o => o.date).find(x => /^\d{4}-/.test(x || "")) || today());
     else render();
-    if (!r.say) done.push(...lines);
+    // The application, not the model, is the authority on whether a write succeeded.
+    done.push(...lines);
   }
   for (const c of r.do) {
     ui.quiet = []; try { await handle(c, false); } catch (e) { console.warn(e); }
@@ -871,8 +972,10 @@ async function finishTalk(r) {
   if (r.do.length) render();
   r.do = r.do || [];
   if (!r.say && !done.length) return null;
-  if (done.length) pushMsg("pg", done.join(" "));
-  return r.say || done.join(" ");
+  if (done.length) return [...new Set(done)].join(" ");
+  if (!r.ops.length && !r.do.length && /^(?:done|added|saved|updated|moved|removed|deleted|i(?:'ve| have) (?:added|saved|updated|moved|removed))/i.test(r.say) && !r.remember.length)
+    return `I haven't saved a change yet, ${addr()}. What exactly should I change?`;
+  return r.say;
 }
 async function aiLearn(topic) {
   const raw = await callAI(`Make a beginner-to-advanced learning plan. Return JSON {"steps":[{"t":"short step title","d":"one sentence","q":"a YouTube search query for this step"}]} with 6 to 8 steps.`, topic, true);
@@ -935,13 +1038,28 @@ function exerciseCmd(c) {
   const add = c.match(/^(?:(?:can|could) you |please )?(?:add|put|include|throw in) (?:in )?(?:a |an |the |some )?(.+?) (?:to|into|in|on) (?:my |the )?(?:(push|pull|legs?|upper|lower|full body) )?(?:day|workout|routine|exercises?|exercise list|gym(?: list| plan| day| routine)?)\b/);
   // Vague asks ("an exercise for my chest") need the AI to choose one
   if (add && /^(?:new |another |one more |good |better )?(?:exercises?|workouts?|moves?|something|one|it|that|this)\b|\bfor (?:my |the )?/i.test(add[1])) return AI.on() ? "@ai" : "Tell me which exercise to add, like cable crossovers to push day. Or connect an AI in Settings and I'll pick one for you.";
-  if (add) { const r = C.addExercise({ name: add[1].replace(/\s+exercise$/, "") }, add[2] || ""); return `Added ${EXERCISES[r.key].name} to ${r.day?.name || "your workout"}.`; }
+  if (add) {
+    if (AI.on() && !ui.quiet) return "@ai";
+    const sets = c.match(/(\d+) sets? (?:of )?(\d+(?:\s*(?:to|-)\s*\d+)?)/);
+    if (!add[2] || !sets) return "Which gym day, and how many sets and reps should I use?";
+    const r = C.addExercise({ name: add[1].replace(/\s+exercise$/, ""), sets: +sets[1], reps: sets[2] }, add[2]);
+    return `${r.existing ? "Already saved" : "Added"} ${EXERCISES[r.key].name} on ${r.day.name}.`;
+  }
   const rm = c.match(/^(?:(?:can|could) you |please )?(?:remove|delete|drop|take out|get rid of|skip) (?:the |my )?(.+?) (?:from|off|out of) (?:my |the )?(?:(push|pull|legs?|upper|lower|full body) )?(?:day|workout|routine|exercises?|exercise list|gym(?: list| plan| day| routine)?)\b/);
   if (rm) { const r = C.removeExercise(rm[1], rm[2] || ""); return r ? `Removed ${EXERCISES[r.key].name} from your workout.` : `I couldn't find ${rm[1]} in your workout.`; }
   return null;
 }
 async function localEdit(text, spoken) {
-  const low = normalize(text).replace(/[^a-z0-9: ',.;]/g, " ").replace(/\s+/g, " ").trim();
+  const low = normalize(text).replace(/[^a-z0-9: ',.;-]/g, " ").replace(/\s+/g, " ").trim();
+  // Whole-day moves are atomic and never routed through the add-item parser.
+  if (/\b(?:move|shift|transfer|reschedule)\b/.test(low) && /\b(?:schedule|timetable|everything|all (?:the |my )?(?:items|things|blocks))\b/.test(low)) {
+    const m = low.match(/\bfrom (today|tomorrow|\d{4}-\d{2}-\d{2}) (?:and |over )?(?:to|into|onto) (today|tomorrow|\d{4}-\d{2}-\d{2})\b/)
+      || low.match(/\b(tomorrow)'?s? (?:schedule|timetable|plans?) (?:back )?to (today)\b/);
+    if (m) { const lines = AG.apply([{ op: "move_day", from: m[1], to: m[2] }]); return reply(lines.join(" "), { view: "today", date: m[2] === "today" ? today() : addDays(today(), 1), spoken }), true; }
+    // Let the AI resolve unstructured wording, without a partial delete/add.
+    if (AI.on() && !ui.quiet) return false;
+    return reply("Which day should I move the timetable from, and which day should it go to?"), true;
+  }
   const ex = exerciseCmd(low.replace(/[,.;]/g, ""));
   if (ex === "@ai") return false;
   if (ex) { go("gym"); return reply(ex, { spoken }), true; }
@@ -967,6 +1085,17 @@ async function localEdit(text, spoken) {
       const from = m[a], to = m[b];
       if (TIME_ONLY.test(to.trim())) break;          // "change gym to 6pm" is a move
       const tg = targets(from);
+      if (tg.list.length) {
+        const old = (tg.pairs || tg.list.map(b => ({ b, d: tg.d })))[0];
+        const proposed = to + (clauseTime(to) != null ? "" : ` at ${fmtTime(old.b.start)}`);
+        const items = parseSchedule(proposed, { date: old.d, today: today(), now: nowMin() });
+        const gap = needsAsk(items);
+        if (gap) {
+          Object.values(snaps).forEach(sn => { day(sn.d).blocks = sn.blocks; });
+          ui.pending = { type: "clarify", items, tries: 0, replace: (tg.pairs || tg.list.map(b => ({ b, d: tg.d }))).map(o => ({ id: o.b.id, date: o.d })) };
+          return reply(askLine(gap) + " I haven't removed the original item yet.", { spoken }), true;
+        }
+      }
       const gone = del(tg, true, from);
       if (gone) { const g = gone[0]; const dd = g.d; const hasTime = clauseTime(to) != null; adds.push(to + (hasTime ? "" : ` at ${fmtTime(g.b.start)}`) + (dayOf(to).x ? "" : dd === today() ? " today" : dd === addDays(today(), 1) ? " tomorrow" : " on " + WD[new Date(dd + "T12:00").getDay()])); }
       mode = null; done = true; break;
@@ -997,7 +1126,12 @@ async function localEdit(text, spoken) {
   if (!acted && !adds.length && !said.length) return false;
   // With an AI key, anything PG couldn't pin down goes to the AI instead of failing.
   if (AI.on() && !ui.quiet && said.some(x => /^I couldn't find/.test(x))) { Object.values(snaps).forEach(sn => { day(sn.d).blocks = sn.blocks; }); return false; }
-  for (const a of adds) { ui.quiet = []; try { await handle(a, false); } catch (e) { console.warn(e); } said.push(...ui.quiet); ui.quiet = null; acted = true; }
+  for (const a of adds) {
+    ui.quiet = []; ui.editing = true;
+    try { await handle(a, false); } catch (e) { console.warn(e); }
+    finally { ui.editing = false; }
+    said.push(...ui.quiet); ui.quiet = null; acted = true;
+  }
   save(); render();
   const list = Object.values(snaps);
   if (list.length) undoable(list, said[0]?.split(".")[0] + ".");
@@ -1006,7 +1140,7 @@ async function localEdit(text, spoken) {
 }
 
 // ================= Views =================
-function go(view, date) { ui.view = view; if (date) { ui.date = date; ui.pinDate = false; } render(); $("#main").scrollTo?.(0, 0); if (isMobile()) window.scrollTo(0, 0); }
+function go(view, date) { ui.view = view; if (date) { ui.date = date; ui.pinDate = date !== today(); } render(); $("#main").scrollTo?.(0, 0); if (isMobile()) window.scrollTo(0, 0); }
 const TITLES = { today: "Today", school: "School", bass: "Bass", bible: "Bible", gym: "Gym", notes: "Notes", settings: "Settings" };
 // Everything PG has learned, written into the "Learned things about PraiseGod" folder.
 function factList() {
@@ -1027,14 +1161,18 @@ function factList() {
 }
 function syncFacts() { try { M.syncFacts(factList()); } catch (e) { console.warn(e); } }
 function render() {
+  const oldWeek = $(".week-scroll");
+  const scroll = oldWeek ? { week: oldWeek.dataset.week, x: oldWeek.scrollLeft, y: oldWeek.scrollTop } : null;
   syncFacts();
   if (!TITLES[ui.view]) ui.view = "today";
   $$("[data-view]").forEach(b => b.classList.toggle("on", b.dataset.view === ui.view));
   $("#view").innerHTML = { today: viewToday, school: viewSchool, bass: viewBass, bible: viewBible, gym: viewGym, notes: viewNotes, settings: viewSettings }[ui.view]();
+  const newWeek = $(".week-scroll");
+  if (newWeek && scroll?.week === newWeek.dataset.week) { newWeek.scrollLeft = scroll.x; newWeek.scrollTop = scroll.y; }
   document.title = TITLES[ui.view] + " · PG";
   paintSuggest();
 }
-function greeting() { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"; }
+function greeting() { const h = Math.floor(nowMin() / 60); return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"; }
 const catVar = c => `--c:${(CATS[c] || CATS.other).color}`;
 const bar = p => `<div class="bar"><i style="width:${p}%"></i></div>`;
 
@@ -1047,18 +1185,17 @@ function viewToday() {
     ${isT ? "" : `<button class="chip" data-act="day" data-n="0">Today</button>`}
     <button class="icon-btn" data-act="day" data-n="1" aria-label="Next day"><svg><use href="#i-right"/></svg></button></div></div>
     <h1 class="title">${isT ? `${greeting()}, <em>${esc(addr())}</em>.` : esc(fmtDay(d))}</h1>`;
+  h += weeklyTable(d);
   if (cur) {
     const pct = Math.round((n - cur.start) / (cur.end - cur.start) * 100);
-    h += `<section class="now" aria-label="Happening now"><div class="eyebrow">Now · until ${fmtTime(cur.end)}</div><div class="now-title">${esc(cur.title)}</div>${bar(pct)}
-      <div class="now-next"><span>${nx ? `Next · ${esc(nx.title)} at ${fmtTime(nx.start)}` : "Last one today"}</span>${coachLink(cur)}</div></section>`;
+    h += `<p class="note" aria-label="Happening now">Now: ${esc(cur.title)}, until ${fmtTime(cur.end)} · ${pct}% through. ${coachLink(cur)}</p>`;
   } else if (nx) {
-    h += `<section class="now" aria-label="Up next"><div class="eyebrow">Next · in ${fmtDur(nx.start - n)}</div><div class="now-title">${esc(nx.title)}</div>
-      <div class="now-next"><span>${fmtTime(nx.start)} – ${fmtTime(nx.end)}</span>${coachLink(nx)}</div></section>`;
+    h += `<p class="note" aria-label="Up next">Next: ${esc(nx.title)}, ${fmtTime(nx.start)} to ${fmtTime(nx.end)} · in ${fmtDur(nx.start - n)}. ${coachLink(nx)}</p>`;
   }
   if (!bl.length) {
     h += `<div class="empty"><p>${isT ? "Your day is open." : "Nothing planned."}</p><button class="btn" data-act="add"><svg><use href="#i-plus"/></svg>Add</button></div>`;
   } else {
-    h += `<h2 class="sec"><span>Schedule</span><button class="btn sm ghost" data-act="add" aria-label="Add a block"><svg><use href="#i-plus"/></svg>Add</button></h2><div class="timeline">`;
+    h += `<h2 class="sec"><span>${isT ? "Today's checklist" : "Daily checklist"} · ${bl.filter(b => b.done).length}/${bl.length}</span><button class="btn sm ghost" data-act="add" aria-label="Add a block"><svg><use href="#i-plus"/></svg>Add</button></h2><div class="timeline">`;
     let nowDrawn = !isT;
     for (const b of bl) {
       if (!nowDrawn && n < b.start) { h += nowLine(n); nowDrawn = true; }
@@ -1083,11 +1220,64 @@ function viewToday() {
     const t = SC.pending()[0];
     h += `<button class="tile wide" data-view="school" style="${catVar("study")}"><span class="eyebrow">School · ${SC.pending().length} due</span><b>${esc(t.title)} · ${esc(t.due ? fmtDay(t.due) : "no date")}</b></button>`;
   }
+  const routines = (S.routines || []).filter(r => !r.disabled && r.start == null);
+  if (routines.length) h += `<h2 class="sec"><span>Every day</span></h2><div class="card"><p class="note">Daily reminders stay here. Checking one off only completes it for this day.</p>${routines.map(r => {
+    const done = S.routineDone?.[`${r.id}:${d}`];
+    return `<div class="set-row"><span>${esc(r.title)}</span><button class="btn sm" data-act="routine-check" data-id="${esc(r.id)}" aria-pressed="${!!done}">${done ? "Done today" : "Mark done"}</button></div>`;
+  }).join("")}</div>`;
   if (S.inbox.length) {
     h += `<h2 class="sec"><span>To-do</span></h2><div class="card">${S.inbox.map(t => `<div class="set-row"><div><div class="lbl">${esc(t.title)}</div><div class="sub">${fmtDur(t.dur || 30)}</div></div>
       <div class="row"><button class="btn sm" data-act="fit" data-id="${t.id}">Fit in</button><button class="btn sm ghost" data-act="inbox-del" data-id="${t.id}">Remove</button></div></div>`).join("")}</div>`;
   }
   return h;
+}
+function weeklyTable(date) {
+  const week = weekOf(date), dates = Array.from({ length: 7 }, (_, i) => addDays(week, i));
+  const entries = dates.flatMap(d => blocksOf(d).filter(b => !b.skipped));
+  const from = Math.max(0, Math.floor(Math.min(S.profile.dayStart, ...entries.map(b => b.start)) / 60) * 60);
+  const until = Math.min(1440, Math.ceil(Math.max(S.profile.dayEnd, ...entries.map(b => b.end)) / 60) * 60);
+  const span = Math.max(60, until - from), height = span * 1.2;
+  const categories = [...new Set(entries.map(b => b.cat))];
+  const pending = S.weekPlans?.[week]?.missing || [];
+  return `<section class="week-panel" aria-label="Weekly timetable">
+    <div class="week-heading"><div><h2>Weekly timetable</h2><p class="note">${esc(fmtDay(week))} to ${esc(fmtDay(dates[6]))} · Hong Kong time</p></div>
+      <div class="row"><button class="icon-btn" data-act="week" data-n="-1" aria-label="Previous week"><svg><use href="#i-left"/></svg></button><button class="icon-btn" data-act="week" data-n="1" aria-label="Next week"><svg><use href="#i-right"/></svg></button><button class="btn sm primary" data-act="week-plan">${S.weekPlans?.[week] ? "Rebuild week" : "Plan week"}</button></div></div>
+    <div class="week-scroll" data-week="${week}" role="region" tabindex="0" aria-label="Scrollable weekly timetable, Monday to Sunday">
+      <div class="week-grid" role="table" aria-label="Weekly timetable">
+        <div class="week-head" role="row"><div role="columnheader">Time</div>${dates.map((d, i) => `<button role="columnheader" class="${d === today() ? "is-today" : ""} ${d === date ? "selected" : ""}" data-act="week-day" data-date="${d}" aria-label="Show checklist for ${esc(fmtDay(d, true))}">${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][i]}<b>${+d.slice(-2)}</b></button>`).join("")}</div>
+        <div class="week-body" role="row" style="height:${height}px">
+          <div class="week-times" role="rowheader">${Array.from({ length: span / 60 }, (_, i) => `<span style="top:${i * 72}px">${fmtTime(from + i * 60)}</span>`).join("")}</div>
+          ${dates.map(d => {
+            const blocks = blocksOf(d).filter(b => !b.skipped), overlapping = conflicts(blocks);
+            return `<div class="week-column ${d === today() ? "is-today" : ""}" role="cell" aria-label="${esc(fmtDay(d, true))}">${blocks.map(b => `<button class="week-event ${b.done ? "done" : ""} ${b.end - b.start < 30 ? "short" : ""} ${overlapping.has(b.id) ? "overlap" : ""}" style="${catVar(b.cat)};top:${(b.start - from) * 1.2}px;height:${Math.max(12, (b.end - b.start) * 1.2 - 1)}px" data-act="week-edit" data-date="${d}" data-id="${esc(b.id)}" title="${esc(b.title)} · ${fmtTime(b.start)} to ${fmtTime(b.end)}${b.done ? " · completed" : ""}${overlapping.has(b.id) ? " · overlaps another item" : ""}"><strong>${b.done ? "Done: " : ""}${esc(b.title)}</strong><small>${fmtTime(b.start)} to ${fmtTime(b.end)}${overlapping.has(b.id) ? " · Overlap" : ""}</small></button>`).join("")}</div>`;
+          }).join("")}
+        </div>
+      </div>
+    </div>
+    <div class="week-legend">${categories.map(c => `<span style="${catVar(c)}"><i></i>${esc((CATS[c] || CATS.other).label)}</span>`).join("")}<span>Blank space is free, not a scheduled break.</span></div>
+    ${!entries.length ? `<p class="note">Your week is open. Add commitments or press Plan week to allocate tasks and rest.</p>` : ""}
+    ${pending.length ? `<p class="week-warning">Unallocated: ${pending.map(t => `${esc(t.title)} (${t.minutes} minutes)`).join(", ")}. Rebuild with more time or fewer tasks.</p>` : ""}
+    <p class="note week-hint">Scroll for more hours or days. Tap an item to edit it; use the checklist to mark it done.</p>
+  </section>`;
+}
+function openWeekPlanner() {
+  const week = weekOf(ui.date), previous = S.weekPlans?.[week];
+  const time = m => pad(Math.floor(m / 60)) + ":" + pad(m % 60);
+  const days = Array.from({ length: 7 }, (_, i) => addDays(week, i));
+  const sh = $("#sheet");
+  sh.innerHTML = `<form data-form="week-plan"><h3>${previous ? "Rebuild your week" : "Plan your week"}</h3>
+    <p class="note">Confirm the times below. Fixed appointments and completed work stay. Only future auto-planned sessions are rebuilt.</p>
+    <label class="field"><span>Week starting Monday</span><input class="input" type="date" name="week" value="${week}" required></label>
+    <div class="grid2"><label class="field"><span>Available from</span><input class="input" type="time" name="from" value="${time(previous?.start ?? S.profile.dayStart)}" required></label><label class="field"><span>Finish by</span><input class="input" type="time" name="until" value="${time(previous?.end ?? S.profile.dayEnd)}" required></label></div>
+    <fieldset class="week-days"><legend>Allowed days</legend>${days.map((d, i) => `<label><input type="checkbox" name="days" value="${i}" ${!previous || previous.tasks.some(t => t.days.includes(d)) ? "checked" : ""}>${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][i]}</label>`).join("")}</fieldset>
+    <div class="grid2"><label class="field"><span>Work session, minutes</span><input class="input" name="focus" type="number" min="10" max="120" value="${previous?.focusMinutes || 50}" required></label><label class="field"><span>Rest after each, minutes</span><input class="input" name="rest" type="number" min="1" max="60" value="${previous?.breakMinutes || 10}" required></label></div>
+    <label class="field"><span>Tasks and total minutes, one per line</span><textarea class="input" name="tasks" rows="5" placeholder="History revision, 90&#10;Practice bass, 30" required>${esc((previous?.tasks || []).map(t => `${t.title}, ${t.minutes}`).join("\n"))}</textarea></label>
+    <p class="note">Minutes are the total for the week, not every day. Sessions are spread across your chosen days. Already-started sessions stay in place.</p>
+    <p class="note">Planning principles: fixed commitments first, realistic time, manageable sessions and breaks. <a href="https://learningcenter.unc.edu/tips-and-tools/using-planners" target="_blank" rel="noopener">UNC planning guide</a> · <a href="https://lsc.cornell.edu/how-to-study/studying-for-and-taking-exams/guidelines-for-creating-a-study-schedule/" target="_blank" rel="noopener">Cornell study guide</a>.</p>
+    <p class="note week-warning" data-week-error role="alert"></p>
+    <div class="row"><button class="btn primary" type="submit">Build timetable</button><button class="btn" type="button" data-act="close-sheet">Cancel</button></div>
+  </form>`;
+  sh.showModal();
 }
 const nowLine = n => `<div class="now-line" aria-hidden="true"><span>${fmtTime(n)}</span><i></i></div>`;
 function coachLink(b) {
@@ -1098,7 +1288,7 @@ function coachLink(b) {
 function videoHTML(v, title, search) {
   if (!v || !v.id) {
     const q = encodeURIComponent(search || title + " proper form");
-    return `<a class="video video-search" href="https://www.youtube.com/results?search_query=${q}" target="_blank" rel="noopener"><span class="play" style="position:static"><svg><use href="#i-play"/></svg></span><span>Watch ${esc(title)} videos on YouTube</span></a><div class="video-cap"><span>Added by PG</span><a href="https://www.youtube.com/results?search_query=${q}" target="_blank" rel="noopener">YouTube <svg><use href="#i-ext"/></svg></a></div>`;
+    return `<a class="video video-search" href="https://www.youtube.com/results?search_query=${q}" target="_blank" rel="noopener"><span class="play" style="position:static"><svg><use href="#i-play"/></svg></span><span>Search YouTube for ${esc(title)}</span></a><div class="video-cap"><span>Video not verified. This opens a search.</span><a href="https://www.youtube.com/results?search_query=${q}" target="_blank" rel="noopener">YouTube search <svg><use href="#i-ext"/></svg></a></div>`;
   }
   const playing = ui.playing.has(v.id);
   return `<div class="video">${playing
@@ -1273,7 +1463,7 @@ function viewSchool() {
   } else h += `<p class="note">Tell PG what's due, like: I have a math test next Tuesday and a biology report due the 20th.</p>`;
   const done = SC.tasks().filter(t => t.done).slice(-3).reverse();
   if (done.length) h += `<h2 class="sec"><span>Finished</span></h2><div class="card list">${done.map(t => `<div class="task done"><div class="lbl">${esc(t.title)}</div></div>`).join("")}</div>`;
-  h += `<p class="note">${esc(r.learned ? `You take about ${r.r}× your guesses, so PG plans with that.` : "PG adds 50% to your guesses until it learns your real pace.")}${learned.length > (r.learned ? 1 : 0) ? " " + esc(ucf(learned.filter(x => !/times what you guess/.test(x)).join(", ")) + ".") : ""}</p>`;
+  h += `<p class="note">Assignments stay here until you mark them done. Tell PG the name and due date. Study time is only a plan, not a change to your deadline.</p>`;
   h += `<details class="fold"><summary>How PG plans</summary><div class="card list tips">${SC.RULES.map(x => `<div class="rule"><b>${esc(x.t)}</b><p>${esc(x.d)}</p><a class="faint tip-src" href="${esc(x.url)}" target="_blank" rel="noopener">Source</a></div>`).join("")}</div></details>`;
   return h;
 }
@@ -1292,8 +1482,8 @@ function cloudSteps(open) {
 }
 function cloudSettings() {
   if (SY.on()) return `<h2 class="sec"><span>PG Cloud</span></h2><div class="card">
-    <div class="ai-status ok" role="status"><i></i><span>Syncing this device · last synced ${esc(ago(SY.last()))}</span></div>
-    <p class="note">Your schedule, notes, plans and AI settings match on every device that has the passcode.</p>
+    <div class="ai-status ${S.dev.cloud?.error ? "err" : "ok"}" role="status"><i></i><span data-sync-status>${esc(SY.status())} · last synced ${esc(ago(SY.last()))}</span></div>
+    <p class="note">Assignments, memories, workouts, schedules and daily reminders are saved locally and merged with PG Cloud. Connect both devices to the same PG Cloud. ${S.dev.cloud?.safe ? "" : "Update PG Cloud for protected simultaneous saves."}</p>
     <div class="row"><button class="btn" data-act="cloud-sync">Sync now</button><button class="btn" data-act="cloud-others">Sign out other devices</button><button class="btn ghost" data-act="cloud-off">Stop syncing here</button></div>${cloudSteps(false)}</div>`;
   const st = ui.cloudStatus;
   return `<h2 class="sec"><span>PG Cloud</span></h2><div class="card">
@@ -1306,8 +1496,8 @@ function cloudSettings() {
     </form>${cloudSteps(!SY.url())}</div>`;
 }
 function naturalVoice() {
-  if (!SY.on() || !CV.v || CV.v >= 4) return "";
-  return `<div class="update-box"><b>Update PG Cloud to give PG the full internet</b><p class="note" style="margin:4px 0 8px">Press Copy, open your pg-cloud Worker in Cloudflare, press Edit code, replace everything with the copy, then press Deploy. This gives him better web search and a backup route for the weather.</p><div class="row"><button class="btn primary sm" data-act="cloud-copy">Copy PG Cloud code</button><a class="btn sm" href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener">Open Cloudflare</a></div></div>`;
+  if (!SY.on() || !CV.v || CV.v >= 5) return "";
+  return `<div class="update-box"><b>Update PG Cloud to protect your saved data</b><p class="note" style="margin:4px 0 8px">Copy the code, open pg-cloud in Cloudflare, press Edit code, replace the code and Deploy. Keep the same Worker and database. This prevents simultaneous device saves overwriting each other and keeps cloud recovery copies.</p><div class="row"><button class="btn primary sm" data-act="cloud-copy">Copy PG Cloud code</button><a class="btn sm" href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener">Open Cloudflare</a></div></div>`;
 }   // PG uses the free built-in phone voice
 function copyCloud() { navigator.clipboard?.writeText(AI.CLOUD_CODE).then(() => toast("PG Cloud code copied. Paste it in Cloudflare."), () => toast("Couldn't copy. Open worker/pg-worker.js in the PG GitHub repo.")); }
 async function connectCloud(address, code, done) {
@@ -1319,7 +1509,7 @@ async function connectCloud(address, code, done) {
     if (S.ai.provider === "cloudflare") connectAI();
   } catch (e) { done?.(e); }
 }
-function afterSync() { if (CV.v < 4) probeCloud(); C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); ui.date = today(); paintLock(); render(); }
+function afterSync() { if (CV.v < 5) probeCloud(); C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); if (!ui.pinDate) ui.date = today(); paintLock(); paintChat(); render(); }
 function paintLock() {
   let el = $("#lock");
   if (!SY.locked()) { el?.remove(); document.body.classList.remove("locked"); return; }
@@ -1369,7 +1559,7 @@ function viewSettings() {
   const tm = m => pad(Math.floor(m / 60)) + ":" + pad(m % 60);
   const sw = (act, on, label, dis) => `<label class="switch"><input type="checkbox" data-act="${act}" ${on ? "checked" : ""} ${dis ? "disabled" : ""} aria-label="${label}"><i></i></label>`;
   return `<h1 class="title">More <span class="faint" style="font-size:var(--text-xs);font-family:inherit;font-weight:400">v${PG_VERSION}</span></h1>
-  <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} things PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button><button class="tile" data-act="goals-open" style="${catVar("gym")}"><span class="eyebrow">Goals</span><b>${D.goals().length ? D.goals().length + " goal" + (D.goals().length > 1 ? "s" : "") : "Add your goals"}</b></button><button class="tile" data-act="canto-open" style="${catVar("social")}"><span class="eyebrow">Cantonese</span><b>${D.learned().length} learned</b></button></div>
+  <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} thing${M.facts().length === 1 ? "" : "s"} PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button><button class="tile" data-act="goals-open" style="${catVar("gym")}"><span class="eyebrow">Goals</span><b>${D.goals().length ? D.goals().length + " goal" + (D.goals().length > 1 ? "s" : "") : "Add your goals"}</b></button><button class="tile" data-act="canto-open" style="${catVar("social")}"><span class="eyebrow">Cantonese</span><b>${D.learned().length} learned</b></button></div>
   ${cloudSettings()}
   ${aiSettings()}
   <h2 class="sec"><span>Voice</span></h2><div class="card">
@@ -1382,6 +1572,7 @@ function viewSettings() {
     <div class="grid2" style="margin-top:var(--space-3)" ${voice.cloud.ok() ? "hidden" : ""}>
       <label class="field"><span>Voice</span><select class="input" data-act="voice">${vs.length ? vs.map(v => `<option value="${esc(v.voiceURI)}" ${voice.voice && voice.voice.voiceURI === v.voiceURI ? "selected" : ""}>${esc(v.name)}${isNatural(v) ? " (natural)" : ""}</option>`).join("") : `<option>System default</option>`}</select></label>
       <label class="field"><span>Speed</span><select class="input" data-act="rate">${[0.9, 1, 1.1, 1.2].map(r => `<option value="${r}" ${S.voice.rate === r ? "selected" : ""}>${r}×</option>`).join("")}</select></label></div>
+    <p class="faint">Free device speech prefers a male voice when your phone or laptop provides one.</p>
     <button class="btn sm" data-act="test-voice"><svg><use href="#i-speaker"/></svg>Test</button>
   </div>
   <h2 class="sec"><span>You</span></h2><div class="card"><div class="grid3">
@@ -1427,6 +1618,10 @@ document.addEventListener("click", e => {
   const d = ui.date;
   switch (a) {
     case "day": ui.date = el.dataset.n === "0" ? today() : addDays(ui.date, +el.dataset.n); ui.pinDate = ui.date !== today(); render(); break;
+    case "week": ui.date = addDays(ui.date, +el.dataset.n * 7); ui.pinDate = ui.date !== today(); render(); break;
+    case "week-day": go("today", el.dataset.date); break;
+    case "week-edit": ui.date = el.dataset.date; ui.pinDate = ui.date !== today(); render(); openEditor(id); break;
+    case "week-plan": openWeekPlanner(); break;
     case "add": openEditor(null); break;
     case "edit": if (e.target.closest(".check,.tag.link")) return; openEditor(id); break;
     case "toggle": { e.stopPropagation(); const b = day(d).blocks.find(x => x.id === id); if (b) { b.done = !b.done; if (b.done && b.src === "school") SC.noteDone(b); save(); render(); if (b.done) chime("ok"); } break; }
@@ -1439,7 +1634,11 @@ document.addEventListener("click", e => {
     case "goal-del": D.removeGoal(el.dataset.id); openGoals(); render(); break;
     case "canto-open": openCanto(); break;
     case "canto-play": sayCanto(el.dataset.zh); break;
-    case "canto-more": D.teachTwo(); openCanto(); render(); break;
+    case "canto-more": D.teachDaily(); openCanto(); render(); break;
+    case "routine-check": {
+      const key = `${id}:${ui.date || today()}`;
+      S.routineDone ||= {}; S.routineDone[key] = !S.routineDone[key]; save(); render(); break;
+    }
     case "cv-test": voice.cloudVoice = S.voice.cloudVoice || "apollo"; voice.player.unlock(); voice.say(hello()); break;
     case "del-block": { const snap = snapshot(d); day(d).blocks = day(d).blocks.filter(x => x.id !== id); save(); $("#sheet").close(); render(); undoable(snap, "Deleted."); break; }
     case "fit": {
@@ -1474,7 +1673,7 @@ document.addEventListener("click", e => {
     case "folder": ui.folder = el.dataset.k; render(); break;
     case "ai-test": connectAI(); break;
     case "cloud-copy": copyCloud(); break;
-    case "cloud-sync": SY.pull().then(() => SY.push()).then(() => { render(); toast("Synced."); }); break;
+    case "cloud-sync": SY.push().then(ok => { render(); toast(ok ? "Saved to PG Cloud." : SY.status()); }); break;
     case "cloud-others": if (confirm("Sign out every other device? They'll need the passcode again, and their copy of PG is cleared.")) SY.signOutOthers().then(() => toast("Other devices are signed out."), e => toast(e.message)); break;
     case "cloud-off": SY.disconnect(); if (S.ai.provider === "cloudflare") S.ai.ok = false; save(true); render(); toast("This device stopped syncing."); break;
     case "ai-clear": S.ai = { provider: "none", key: "", model: "", ok: false }; ui.aiStatus = null; save(); render(); toast("Key removed from this device."); break;
@@ -1533,6 +1732,24 @@ document.addEventListener("input", e => {
 });
 document.addEventListener("submit", e => {
   const f = e.target;
+  if (f.dataset.form === "week-plan") {
+    e.preventDefault();
+    try {
+      const values = new FormData(f), week = values.get("week");
+      const days = values.getAll("days").map(i => addDays(week, +i));
+      const tasks = String(values.get("tasks")).split("\n").filter(s => s.trim()).map(line => {
+        const match = line.trim().match(/^(.+),\s*(\d+)\s*$/);
+        if (!match) throw new Error("Use one task per line with minutes, for example: History revision, 90");
+        const title = match[1].trim(), old = S.weekPlans?.[week]?.tasks.find(t => t.title === title);
+        const cat = old?.cat || (/\bbass\b/i.test(title) ? "bass" : /\b(?:gym|workout)\b/i.test(title) ? "gym" : /\b(?:bible|prayer)\b/i.test(title) ? "bible" : /\b(?:rest|break)\b/i.test(title) ? "rest" : "study");
+        return { title, minutes: +match[2], days, cat };
+      });
+      const result = planWeek({ weekStart: week, start: values.get("from"), end: values.get("until"),
+        focusMinutes: +values.get("focus"), breakMinutes: +values.get("rest"), tasks });
+      $("#sheet").close(); go("today", days.find(d => d >= today()) || week);
+      reply(planSummary(result)); return;
+    } catch (error) { f.querySelector("[data-week-error]").textContent = error.message; return; }
+  }
   if (f.id === "composer") { e.preventDefault(); const t = $("#ask").value; $("#ask").value = ""; voice.kill(); run(t, "typed"); return; }
   if (f.dataset.form === "unlock" || f.dataset.form === "cloud") {
     e.preventDefault();
@@ -1628,8 +1845,15 @@ function toast(msg, action, fn) {
 
 // ================= Reminders & wake lock =================
 const alerted = new Set();
+let lastCalendarDay = today();
 function tick() {
   const n = nowMin(), d = today();
+  if (lastCalendarDay !== d) {
+    if (ui.date === lastCalendarDay && !ui.pinDate) ui.date = d;
+    lastCalendarDay = d;
+  }
+  const syncStatus = $("[data-sync-status]");
+  if (syncStatus) syncStatus.textContent = SY.status() + " · last synced " + ago(SY.last());
   if (ui.view === "today" && ui.date === d && !$("#sheet").open && !document.activeElement?.matches("input,select,textarea")) {
     const y = window.scrollY, m = $("#main").scrollTop;
     render(); window.scrollTo(0, y); $("#main").scrollTop = m;

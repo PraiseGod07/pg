@@ -142,7 +142,13 @@ export function parse(raw, base = today()) {
   }
   return out;
 }
-export const looksLikeSchool = raw => /^(?:so |and |also |oh |okay |ok )*(?:i (?:have|'ve got|got|still have|need to do|need to finish)|i've got|there's) (?:a|an|my|another|one more|this|two|three|some)\b.*\b(?:essay|report|project|presentation|assignment|homework|problem set|lab report|coursework|paper|worksheet)s?\b/.test(raw.toLowerCase()) && !/\b(?:at|from) \d/.test(raw.toLowerCase()) || !!(/\b(?:due|deadline|submit|hand(?:ed)? in|turn(?:ed)? in)\b/.test(raw) && kindOf(raw.toLowerCase()) || /\b(?:exam|test|midterm|final|quiz)\b.*\b(?:on|next|this|tomorrow|in \d)/.test(raw.toLowerCase()) && !/\b(?:at|from) \d{1,2}(?::\d\d)?\s?(?:am|pm)? (?:to|until|till|-)/.test(raw.toLowerCase()));
+export const looksLikeSchool = raw => {
+  const s = raw.toLowerCase();
+  if (/^(?:(?:can|could) you |please |pg[, ]+)*(?:add|create|save|register|record)\b.*\b(?:assignment|homework|essay|report|exam|test|quiz)\b/.test(s)) return true;
+  return /^(?:so |and |also |oh |okay |ok )*(?:i (?:have|'ve got|got|still have|need to do|need to finish)|i've got|there's) (?:a|an|my|another|one more|this|two|three|some)\b.*\b(?:essay|report|project|presentation|assignment|homework|problem set|lab report|coursework|paper|worksheet)s?\b/.test(s) && !/\b(?:at|from) \d/.test(s)
+    || !!(/\b(?:due|deadline|submit|hand(?:ed)? in|turn(?:ed)? in)\b/.test(s) && kindOf(s)
+    || /\b(?:exam|test|midterm|final|quiz)\b.*\b(?:on|next|this|tomorrow|in \d)/.test(s) && !/\b(?:at|from) \d{1,2}(?::\d\d)?\s?(?:am|pm)? (?:to|until|till|-)/.test(s));
+};
 
 // ---------- Learning ----------
 // Your real pace vs your guesses. Starts at 1.5x (planning fallacy); after 2 finished tasks it uses yours.

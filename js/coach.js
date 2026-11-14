@@ -20,29 +20,39 @@ const slug = t => String(t).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().spl
 export function findEx(q) {
   if (!q) return null; if (EXERCISES[q]) return q;
   const t = String(q).toLowerCase().replace(/^(the|a|an|my)\s+/, "").trim();
-  const hit = Object.entries(EXERCISES).find(([k, e]) => e.name.toLowerCase() === t) || Object.entries(EXERCISES).find(([k, e]) => e.name.toLowerCase().includes(t) || t.includes(e.name.toLowerCase())) || Object.entries(EXERCISES).find(([k, e]) => t.split(" ").filter(w => w.length > 3).every(w => e.name.toLowerCase().includes(w.slice(0, 5))));
+  const words = t.split(" ").filter(w => w.length > 3);
+  const hit = Object.entries(EXERCISES).find(([k, e]) => e.name.toLowerCase() === t)
+    || Object.entries(EXERCISES).find(([k, e]) => e.name.toLowerCase().includes(t) || t.includes(e.name.toLowerCase()))
+    || (words.length >= 2 && Object.entries(EXERCISES).find(([k, e]) => words.every(w => e.name.toLowerCase().includes(w))));
   return hit ? hit[0] : null;
 }
 export function dayKeyFor(word) {
   const sp = split(), w = String(word || "").toLowerCase();
-  const d = sp.days.find(x => x.key === w || x.name.toLowerCase().startsWith(w) || x.focus.includes(w)) || null;
+  if (!w) return null;
+  const query = w.replace(/\s+(?:day|workout|routine)$/, "").replace(/^leg$/, "legs");
+  const d = sp.days.find(x => x.key.toLowerCase() === query || x.name.toLowerCase().startsWith(query)) || null;
   return d ? d.key : null;
 }
 // Add an exercise to a workout day. info: { name, muscles, cues[], search, sets, reps, rest }
 export function addExercise(info, dayKey) {
-  const dk = dayKeyFor(dayKey) || workoutFor().key;
-  let key = findEx(info.key || info.name);
+  const dk = dayKeyFor(dayKey) || (!dayKey ? workoutFor().key : null);
+  if (!dk) throw new Error("Which gym day should I use?");
+  // Adding a named exercise must not fuzzy-match an unrelated existing exercise.
+  let key = info.key && EXERCISES[info.key] ? info.key
+    : Object.entries(EXERCISES).find(([, e]) => e.name.toLowerCase() === String(info.name).trim().toLowerCase())?.[0];
   if (!key) {
     key = slug(info.name);
-    custom().ex[key] = { name: (s => s.charAt(0).toUpperCase() + s.slice(1))(String(info.name).trim().slice(0, 60)), muscles: String(info.muscles || "").slice(0, 80), cues: (info.cues || []).map(String).slice(0, 4), search: String(info.search || info.name + " proper form").slice(0, 100) };
+    custom().ex[key] = { name: (s => s.charAt(0).toUpperCase() + s.slice(1))(String(info.name).trim().slice(0, 60)), muscles: String(info.muscles || "").slice(0, 80), cues: (info.cues || []).map(String).slice(0, 6), search: String(info.search || info.name + " proper form").slice(0, 100),
+      ...(/^[\w-]{11}$/.test(info.videoId || "") ? { video: { id: info.videoId, by: String(info.videoBy || "YouTube demonstration").slice(0, 80) } } : {}) };
     syncCustom();
   }
   const c = custom().days[dk] = custom().days[dk] || { add: [], drop: [] };
   c.drop = (c.drop || []).filter(x => x !== key);
   const already = split().days.find(x => x.key === dk)?.plan.some(p => p.ex === key);
-  if (!already && !(c.add || []).some(p => p.ex === key)) (c.add = c.add || []).push({ ex: key, sets: Math.max(1, Math.min(8, +info.sets || 3)), reps: String(info.reps || "10–12"), rest: +info.rest || 60 });
+  const existing = already || (c.add || []).some(p => p.ex === key);
+  if (!existing) (c.add = c.add || []).push({ ex: key, sets: Math.max(1, Math.min(8, +info.sets || 3)), reps: String(info.reps || "10–12"), rest: +info.rest || 60 });
   save();
-  return { key, day: split().days.find(x => x.key === dk) };
+  return { key, day: split().days.find(x => x.key === dk), existing };
 }
 export function removeExercise(q, dayKey) {
   const key = findEx(q); if (!key) return null;

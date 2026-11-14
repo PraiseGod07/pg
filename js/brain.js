@@ -79,6 +79,41 @@ export function counts() { const c = {}; notes().forEach(n => { c[n.folder] = (c
 
 // ---- Learned things about PraiseGod: PG writes these itself ----
 export const facts = () => notes().filter(n => n.folder === "about");
+
+// Clear autobiographical statements are saved before asking the language model.
+// A call ending, model failure, or short conversation window cannot erase them.
+export function capturePersonal(raw) {
+  const text = String(raw || "").trim().replace(/[.!]+$/, "");
+  if (/\?|\b(?:if|suppose|imagine|pretend|for example|what if)\b/i.test(text)) return null;
+  let t = text.replace(/^(?:(?:pg|sir|okay|ok|also|and|by the way)[, ]+)+/i, "");
+  t = t.replace(/^(?:remember (?:that )?|please remember (?:that )?|actually[, ]+)/i, "");
+  let fact = "";
+  if (/^i (?:love|am in love with) (?:someone|her|him|them)$/i.test(t)) {
+    S.personalPending = { relation: "love", at: Date.now() }; save(); return null;
+  }
+  const name = t.match(/^(?:(?:his|her|their) name is|(?:she|he) is called|the person is) ([a-z][a-z '-]{1,70})$/i);
+  if (name && S.personalPending?.relation === "love" && Date.now() - S.personalPending.at < 3600000) {
+    fact = "You love " + name[1]; delete S.personalPending;
+  } else if (/^i (?:love|am in love with|have a crush on|like|enjoy|hate|dislike|prefer|live in|live at|study at|work at|am allergic to|don't eat|do not eat|usually|always)\b/i.test(t)
+      && !/\b(?:right now|today|tonight|this morning)\b/i.test(t)
+      && !/^i (?:love|like|prefer) to (?:know|ask|see|hear|find out)\b/i.test(t)) {
+    fact = t.replace(/^i don't /i, "You don't ").replace(/^i do not /i, "You do not ")
+      .replace(/^i am /i, "You are ").replace(/^i /i, "You ");
+  } else if (/^my (?:name|birthday|school|church|mother|father|mum|mom|dad|brother|sister|friend|girlfriend|boyfriend|partner|wife|husband|favou?rite)\b/i.test(t)) {
+    fact = t.replace(/^my /i, "Your ");
+  }
+  if (!fact || /^You (?:love|like) (?:someone|her|him|them|you)$/i.test(fact)) return null;
+  fact = fact.slice(0, 600).replace(/\b(?:someone|a (?:girl|boy|person)) (?:named|called|whose name is) /i, "");
+  const old = facts().find(n => n.text.replace(/[.!]+$/, "").toLowerCase() === fact.toLowerCase());
+  return old || add(fact + ".", { folder: "about" });
+}
+export function personalAnswer(question) {
+  if (/\bwho (?:do|am) i (?:love|in love with)\b/i.test(question)) {
+    const fact = facts().find(n => /^You (?:love|are in love with) /i.test(n.text) && !/\b(?:someone|her|him|them)\.?$/i.test(n.text));
+    if (fact) return fact.text;
+  }
+  return null;
+}
 function hidden() { S.factsHidden = S.factsHidden || []; return S.factsHidden; }
 // Write or update one thing PG learned. Same key = same fact, so it updates instead of repeating.
 export function learnFact(key, text) {

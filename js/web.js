@@ -11,6 +11,33 @@ export const WEATHER_RE = /\b(?:weather|forecast|temperature outside|how (?:hot|
 export const LIVE_RE = /\b(?:news|latest|currently|right now|today'?s|this week|yesterday|tonight|score|scores|who won|won the|result of|results of|standings|price of|stock|share price|bitcoin|crypto|exchange rate|how much is|how much does|release date|come out|coming out|open (?:now|today)|opening hours|election|president of|ceo of|founder of|revenue|net worth|valuation|market cap|stock market|market share|ipo|earnings|funding round|raised \$?\d|how much (?:did|does) .{1,30} (?:make|earn)|biggest companies|top companies|trending|interest rates?|inflation|search (?:the )?(?:web|internet|online)|look (?:it )?up|google)\b/i;
 
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_, j) => setTimeout(() => j(new Error("timeout")), ms))]);
+// A real video needs a confirmed YouTube ID, not a model-generated URL.
+export async function exerciseVideo(name, supplied) {
+  if (!SY.on()) return null;
+  let candidates = supplied ? [supplied] : [];
+  if (!candidates.length) {
+    const found = await withTimeout(search(String(name) + " exercise proper form YouTube"), 7000).catch(() => null);
+    candidates = (found?.sources || []).flatMap(x => {
+      try {
+        const u = new URL(x.url);
+        if (/^(?:www\.|m\.)?youtube\.com$/.test(u.hostname)) {
+          const id = u.searchParams.get("v") || u.pathname.match(/^\/(?:shorts|embed)\/([\w-]{11})/)?.[1];
+          return /^[\w-]{11}$/.test(id || "") ? [id] : [];
+        }
+        return u.hostname === "youtu.be" && /^[\w-]{11}$/.test(u.pathname.slice(1)) ? [u.pathname.slice(1)] : [];
+      } catch { return []; }
+    }).slice(0, 2);
+  }
+  for (const id of candidates) {
+    const r = await withTimeout(fetch(SY.url() + "/v1/video?id=" + encodeURIComponent(id), {
+      headers: { authorization: "Bearer " + (S.dev.cloud?.token || "") }
+    }), 5000).catch(() => null);
+    if (!r?.ok) continue;
+    const video = await r.json();
+    if (video.id === id && video.title) return { id, by: video.by || "YouTube", title: video.title };
+  }
+  return null; // UI honestly labels its fallback as a YouTube search.
+}
 const n = x => Math.round(x);
 
 async function place(text) {

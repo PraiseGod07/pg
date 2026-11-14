@@ -70,6 +70,10 @@ export function voiceScore(v) {
   if (/en[-_]GB/i.test(v.lang)) s += 6; else if (/en[-_]US/i.test(v.lang)) s += 5; else if (/^en/i.test(v.lang)) s += 2;
   if (/compact|espeak|zarvox|trinoids|bad news|bells|bubbles|cellos|whisper|wobble|jester|organ|albert|boing|deranged|hysterical|pipe|superstar|grandpa|grandma|rocko|shelley|flo|reed|sandy|eddy/i.test(n)) s -= 80;
   if (v.localService === false) s += 3;
+  if (isMale(v)) s += 300;
+  else if (/female|samantha|victoria|zira|susan|hazel|karen|moira|tessa|salli|jenny|aria|sonia|libby|sinji/i.test(n)) s -= 200;
   return s;
 }
-export const isNatural = v => voiceScore(v) >= 50;
+export const isMale = v => /\bmale\b|andrew|brian|guy|ryan|christopher|eric|davis|daniel|arthur|evan|aaron|oliver|nathan|thomas|\btom\b|\balex\b|david|george|james|mark|fred|rishi|ravi|danny|wanlung|wan lung|yunlong/i.test(v?.name || "")
+  && !/\bfemale\b/i.test(v?.name || "");
+export const isNatural = v => /natural|neural|online|premium|enhanced|siri/i.test(v?.name || "");
