@@ -54,19 +54,16 @@ export function chunks(s, max = 150) {
   if (cur) out.push(cur);
   return out;
 }
-// Rank system voices: neural/natural voices first, then good male English voices.
+// Rank by quality and language, without excluding any gender.
 export function voiceScore(v) {
   const n = v.name || "";
   let s = 0;
   if (/natural|neural|online/i.test(n)) s += 60;           // Edge / Windows neural voices
   if (/premium|enhanced|siri/i.test(n)) s += 50;            // Apple high-quality voices
   if (/^google/i.test(n)) s += 35;                          // Chrome cloud voices
-  if (/andrew|brian|guy|ryan|christopher|eric|davis|daniel|arthur|evan|aaron|oliver|nathan|tom|google uk english male/i.test(n)) s += 20;
   if (/en[-_]GB/i.test(v.lang)) s += 6; else if (/en[-_]US/i.test(v.lang)) s += 5; else if (/^en/i.test(v.lang)) s += 2;
   if (/compact|espeak|zarvox|trinoids|bad news|bells|bubbles|cellos|whisper|wobble|jester|organ|albert|boing|deranged|hysterical|pipe|superstar|grandpa|grandma|rocko|shelley|flo|reed|sandy|eddy/i.test(n)) s -= 80;
   if (v.localService === false) s += 3;
-  if (isMale(v)) s += 300;
-  else if (/female|samantha|victoria|zira|susan|hazel|karen|moira|tessa|salli|jenny|aria|sonia|libby|sinji/i.test(n)) s -= 200;
   return s;
 }
 export const isMale = v => {

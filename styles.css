@@ -477,9 +477,9 @@ a.btn { color: var(--text); text-decoration: none; } a.btn.primary { color: var(
 .rule:first-child { border-top: 0; }
 .rule b { display: block; font-size: var(--text-sm); }
 .rule p { margin: 4px 0; font-size: var(--text-sm); color: var(--muted); }
-.end-call, .finish-turn { margin-top: var(--space-2); }
+.end-call, .finish-turn, .read-reply { margin-top: var(--space-2); }
 body.on-call .orb-status { color: var(--accent); }
-.end-call[hidden], .finish-turn[hidden] { display: none; }
+.end-call[hidden], .finish-turn[hidden], .read-reply[hidden] { display: none; }
 
 /* PG's AI brain */
 .ai-status{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:var(--surface-2,rgba(255,255,255,.04));margin-bottom:12px;font-weight:600}

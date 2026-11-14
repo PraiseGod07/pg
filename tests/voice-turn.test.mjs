@@ -89,6 +89,45 @@ test("only explicit tap submits a draft without the cue", () => {
   v.stop();
 });
 
+test("Done speaking flushes final browser words rather than aborting them", async () => {
+  const { v, commands } = fixture();
+  v.listen("command");
+  result(v, "An unfinished transcription", false);
+  const r = v.rec;
+  r.stop = () => queueMicrotask(() => {
+    result(v, "All the words including the final ones");
+    r.onend?.();
+  });
+  v.tap(); v.tap();
+  assert.deepEqual(commands, []);
+  assert.equal(v.tapFinishing, true);
+  await settle();
+  assert.deepEqual(commands, ["All the words including the final ones"]);
+  v.stop();
+});
+
+test("manual finish is bounded when a browser omits its final end event", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { v, commands } = fixture();
+  v.listen("command"); v.rec.stop = () => {};
+  result(v, "Keep this draft", false);
+  v.tap(); t.mock.timers.tick(1600);
+  assert.deepEqual(commands, ["Keep this draft"]);
+  assert.equal(v.tapFinishing, false);
+  t.mock.timers.tick(300);
+  v.stop();
+});
+
+test("hang-up cancels a pending Done speaking flush", t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { v, commands } = fixture();
+  v.listen("command"); v.rec.stop = () => {};
+  result(v, "Discard this", false);
+  v.tap(); v.hangUp(); t.mock.timers.tick(2000);
+  assert.deepEqual(commands, []);
+  assert.equal(v.mode, "off");
+});
+
 test("hang-up cancels the pending browser restart and draft", t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const { v, commands } = fixture();
@@ -227,4 +266,91 @@ test("WAV flush sends exactly one recording and clears its buffer", () => {
   assert.equal(blobs.length, 1);
   assert.equal(blobs[0].type, "audio/wav");
   assert.equal(mic.rec, null);
+});
+
+function speech(t, initial = []) {
+  const previous = [globalThis.speechSynthesis, globalThis.SpeechSynthesisUtterance];
+  const played = [];
+  let voices = initial;
+  globalThis.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; this.rate = 1; } };
+  globalThis.speechSynthesis = {
+    getVoices: () => voices, cancel() {}, resume() {},
+    speak(u) { played.push(u); queueMicrotask(() => u.onend?.()); }
+  };
+  t.after(() => {
+    if (previous[0] === undefined) delete globalThis.speechSynthesis; else globalThis.speechSynthesis = previous[0];
+    if (previous[1] === undefined) delete globalThis.SpeechSynthesisUtterance; else globalThis.SpeechSynthesisUtterance = previous[1];
+  });
+  return { played, voices: next => { voices = next; } };
+}
+
+test("female-only devices can speak the greeting and every subsequent reply", async t => {
+  const samantha = { name: "Samantha", voiceURI: "samantha", lang: "en-US" };
+  const s = speech(t, [samantha]), { v, errors } = fixture();
+  v.voiceURI = "a-missing-male-voice";
+  await new Promise(resolve => v.say("Hi sir. How may I help you?", resolve));
+  await new Promise(resolve => v.say("Here is your actual answer, sir.", resolve));
+  assert.deepEqual(s.played.map(u => u.text), ["Hi sir. How may I help you?", "Here is your actual answer, sir."]);
+  assert.ok(s.played.every(u => u.voice === samantha));
+  assert.deepEqual(errors, []);
+});
+
+test("an empty voice list speaks immediately with the browser default", async t => {
+  const s = speech(t), { v } = fixture();
+  const done = new Promise(resolve => v.say("Default voice is allowed.", resolve));
+  assert.equal(s.played.length, 1, "first speak call stays inside the initiating gesture");
+  await done;
+  assert.equal(s.played[0].voice, undefined);
+  s.voices([{ name: "Available later", voiceURI: "later", lang: "en-US" }]);
+  await new Promise(resolve => v.say("Now use the loaded voice.", resolve));
+  assert.equal(s.played[1].voice.voiceURI, "later");
+});
+
+test("all languages are selectable and an explicit voice choice is honored", async t => {
+  const french = { name: "Amelie", voiceURI: "french", lang: "fr-FR" };
+  const s = speech(t, [french, { name: "English", voiceURI: "english", lang: "en-US" }]);
+  const { v } = fixture();
+  assert.equal(v.voices().length, 2);
+  v.voiceURI = "french";
+  await new Promise(resolve => v.say("A selected voice.", resolve));
+  assert.equal(s.played[0].voice, french);
+});
+
+test("reply playback never opens recognition or automatically barges in", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const s = speech(t, [{ name: "Samantha", voiceURI: "female", lang: "en-US" }]);
+  speechSynthesis.speak = u => s.played.push(u);
+  const { v } = fixture();
+  v.say("Keep reading until the complete reply is over.");
+  t.mock.timers.tick(1000); v.barge();
+  assert.equal(v.mode, "speaking");
+  assert.equal(v.rec, null);
+  assert.equal(v.mic.armed, false);
+  v.hush(); v.stop();
+  await settle();
+});
+
+test("speech waits for microphone release after recognition abort", async t => {
+  const s = speech(t), { v } = fixture();
+  v.listen("command");
+  const r = v.rec;
+  const done = new Promise(resolve => v.say("Speak after the microphone stops.", resolve));
+  assert.equal(s.played.length, 0);
+  r.onend();
+  await done;
+  assert.equal(s.played.length, 1);
+});
+
+test("an unavailable selected voice retries once with the default voice", async t => {
+  const s = speech(t, [{ name: "Samantha", voiceURI: "female", lang: "en-US" }]);
+  speechSynthesis.speak = u => {
+    s.played.push(u);
+    queueMicrotask(() => u.voice ? u.onerror?.({ error: "voice-unavailable" }) : u.onend?.());
+  };
+  const { v, errors } = fixture();
+  await new Promise(resolve => v.say("Read these final words too.", resolve));
+  assert.equal(s.played.length, 2);
+  assert.equal(s.played[1].voice, undefined);
+  assert.equal(s.played[1].text, "Read these final words too.");
+  assert.deepEqual(errors, []);
 });

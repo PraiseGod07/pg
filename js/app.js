@@ -1,6 +1,6 @@
 // PG — app controller: views, command handling, reminders.
 import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1, flush } from "./store.js";
-import { speakable, isNatural, isMale } from "./speech.js";
+import { speakable, isNatural } from "./speech.js";
 import { CATS, EXERCISES, SPLITS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
 import { intent, parseSchedule, matchBlock, parseClock, normalize, isEndCall } from "./nlu.js";
 import { placeItems, conflicts, firstGap } from "./scheduler.js";
@@ -48,12 +48,12 @@ const voice = new Voice({
   onCommand: text => { ui.checkedIn = false; $("#heard").textContent = ""; run(text, true); },
   onError: code => {
     if (code === "blocked" && S.voice.handsFree) { needTap(); return; }
-    const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found.", malevoice: "No recognised male voice is available yet. Open More, Voice setup. PG won't silently use a female voice.", speech: "Your device stopped speech. The complete reply is still in the conversation. Say: read your last reply, Your turn PG.", hearing: "One audio segment could not be transcribed. Your earlier words are still here. Please repeat the missing part before saying Your turn PG." }[code];
+    const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found.", speech: "Audio stopped. Tap Hear reply.", hearing: "One audio segment could not be transcribed. Your earlier words are still here. Repeat the missing part, then tap Done speaking." }[code];
     if (msg) toast(msg);
     if (code === "nomic") { S.voice.handsFree = false; save(); if (ui.view === "settings") render(); }
   }
 });
-voice.voiceURI = S.voice.voiceURI; voice.verifiedVoiceURI = S.dev.maleVoiceURI; voice.rate = S.voice.rate; voice.pickVoice();
+voice.voiceURI = S.voice.voiceURI; voice.rate = S.voice.rate; voice.pickVoice();
 // PG's natural voice and hearing run on PG Cloud once its code is version 2 or newer.
 const CV = { v: 0 };
 voice.cloudVoice = S.voice.cloudVoice || "apollo";
@@ -68,11 +68,14 @@ probeCloud();
 function paintVoice(m) {
   $("#orb").dataset.state = m; $("#dockOrb").dataset.state = m;
   const onCall = voice.call && m !== "off" && m !== "wake";
-  setStatus(onCall ? { command: "Listening until you say “Your turn PG”", thinking: "Thinking…", speaking: "Speaking · tap to cut in" }[m] : { off: voice.supported ? "Tap to talk" : "Type to PG", wake: "Say “Hi PG”", command: "Listening until you say “Your turn PG”", thinking: "Thinking…", speaking: "Speaking…" }[m]);
+  setStatus(onCall ? { command: "Take your time. Tap Done speaking when ready.", thinking: "Thinking…", speaking: "Speaking · tap to interrupt" }[m] : { off: voice.supported ? "Tap to talk" : "Type to PG", wake: "Say “Hi PG”", command: "Take your time. Tap Done speaking when ready.", thinking: "Thinking…", speaking: "Speaking…" }[m]);
   $("#listenPill").textContent = onCall ? "On a call with PG" : m === "wake" ? "Listening for “Hi PG”" : m === "command" ? "Listening…" : "";
   $("#endCall").hidden = !onCall;
   $("#finishTurn").hidden = m !== "command";
-  $("#orb").setAttribute("aria-label", m === "command" ? "Finish my turn" : "Talk to PG");
+  $("#finishTurn").disabled = !!voice.tapFinishing;
+  if (m === "command" && voice.tapFinishing) setStatus("Finishing your words…");
+  $("#readReply").hidden = m === "speaking" || m === "thinking" || !S.chat.some(x => x.who === "pg");
+  $("#orb").setAttribute("aria-label", m === "command" ? "Done speaking" : "Talk to PG");
   document.body.classList.toggle("on-call", onCall);
   if (m === "command" || m === "speaking" || m === "thinking") openAssistant(false);
   if ((m === "wake" || m === "off") && ui.autoClose && !voice.call) { ui.autoClose = false; setTimeout(() => { if (voice.mode === "wake" || voice.mode === "off") closeAssistant(); }, 1800); }
@@ -98,6 +101,7 @@ function paintChat() {
   const el = $("#chat");
   el.innerHTML = S.chat.length ? S.chat.slice(-30).map(m => `<div class="msg ${m.who}">${m.html || esc(m.text)}</div>`).join("") : "";
   el.scrollTop = el.scrollHeight;
+  $("#readReply").hidden = voice.mode === "speaking" || voice.mode === "thinking" || !S.chat.some(x => x.who === "pg");
 }
 const SUGGEST = {
   today: ["What's next?", "What should I eat today?", "Is my plan realistic?"],
@@ -1625,13 +1629,13 @@ function viewSettings() {
     <div class="set-row"><div class="lbl">Keep screen awake</div>${sw("awake", S.voice.keepAwake, "Keep screen awake")}</div>
     ${naturalVoice()}
     <div class="grid2" style="margin-top:var(--space-3)" ${voice.cloud.ok() ? "hidden" : ""}>
-      <label class="field"><span>Voice on this device</span><select class="input" data-act="voice"><option value="">Choose a voice</option>${vs.map(v => `<option value="${esc(v.voiceURI)}" ${(voice.voiceURI || voice.voice?.voiceURI) === v.voiceURI ? "selected" : ""}>${esc(v.name)}${isMale(v) ? " (male)" : ""}${isNatural(v) ? " (natural)" : ""}</option>`).join("")}</select></label>
+      <label class="field"><span>Voice on this device</span><select class="input" data-act="voice"><option value="">Automatic (any available voice)</option>${vs.map(v => `<option value="${esc(v.voiceURI)}" ${(voice.voiceURI || voice.voice?.voiceURI) === v.voiceURI ? "selected" : ""}>${esc(v.name)}${isNatural(v) ? " (natural)" : ""}</option>`).join("")}</select></label>
       <label class="field"><span>Speed</span><select class="input" data-act="rate">${[0.9, 1, 1.1, 1.2].map(r => `<option value="${r}" ${S.voice.rate === r ? "selected" : ""}>${r}×</option>`).join("")}</select></label></div>
-    <p class="faint" role="status">${voice.voice ? `Free male voice: ${esc(voice.voice.name)}.` : "No recognised male English voice is available yet. PG will not silently switch to a female voice."} This choice stays on this device, not your other devices.</p>
-    <details><summary>Phone voice help</summary><p class="faint">Android: in phone Settings, search for Text-to-speech output. Open your speech engine settings, install English voice data and preview/select a male voice. Some Android browsers use the phone's default voice even when PG selects another one. iPhone: Settings, Accessibility, Read &amp; Speak (or Spoken Content), Voices, English. Download a male voice such as Daniel. Reopen PG, refresh voices and test it here. If the browser still doesn't expose that voice, use a supported browser or the phone's speech settings.</p><p class="faint">Generic voice names do not tell PG the gender. Choose a voice, press Test selected voice, and only confirm if you hear a male voice. No paid voice service is required. <a href="https://support.google.com/accessibility/android/answer/6006983?hl=en" target="_blank" rel="noopener">Android speech settings</a>; <a href="https://support.apple.com/en-gb/guide/iphone/iph96b214f0/ios" target="_blank" rel="noopener">Apple speech settings</a>.</p></details>
+    <p class="faint" role="status">${voice.voice ? `Free device voice: ${esc(voice.voice.name)}.` : "Using your browser's default voice while the voice list loads."} Any available voice is allowed. This choice stays on this device.</p>
+    <p class="faint">Speak freely, then tap Done speaking. No special phrase is needed. PG pauses listening while reading its reply; tap the microphone to interrupt, or Hear reply to replay it.</p>
+    <details><summary>Phone voice help</summary><p class="faint">If audio is quiet, check your phone volume, silent mode and Bluetooth output. Use Test selected voice here. You can also choose or install voices in your phone's speech settings. No paid voice service is required. <a href="https://support.google.com/accessibility/android/answer/6006983?hl=en" target="_blank" rel="noopener">Android speech settings</a>; <a href="https://support.apple.com/en-gb/guide/iphone/iph96b214f0/ios" target="_blank" rel="noopener">Apple speech settings</a>.</p></details>
     <button class="btn sm" data-act="refresh-voices">Refresh voices</button>
     <button class="btn sm" data-act="test-voice"><svg><use href="#i-speaker"/></svg>Test selected voice</button>
-    <button class="btn sm" data-act="verify-male">This sounds male</button>
   </div>
   <h2 class="sec"><span>You</span></h2><div class="card"><div class="grid3">
     <label class="field"><span>PG calls you</span><input class="input" data-act="address" value="${esc(addr())}"></label>
@@ -1740,14 +1744,7 @@ document.addEventListener("click", e => {
     case "learn-del": confirmSheet("Remove this learning plan?", "", "Remove", () => { LN.remove(id); render(); }); break;
     case "song-del": S.band.songs = S.band.songs.filter(s => s.id !== id); save(); render(); break;
     case "refresh-voices": voice.pickVoice(); render(); break;
-    case "test-voice": voice.player.unlock(); voice.say(hello(), undefined, true); break;
-    case "verify-male": {
-      const uri = document.querySelector('[data-act="voice"]')?.value;
-      if (!uri) { toast("Choose a voice and test it first."); break; }
-      S.voice.voiceURI = uri; S.dev.maleVoiceURI = uri;
-      voice.voiceURI = uri; voice.verifiedVoiceURI = uri; voice.pickVoice(); save(); render();
-      toast("Male voice confirmed for this device."); break;
-    }
+    case "test-voice": if (voice.cloud?.ok()) voice.player.unlock(); voice.say(hello(), undefined, true); break;
     case "backup": {
       const a2 = document.createElement("a");
       a2.href = URL.createObjectURL(new Blob([JSON.stringify({ ...S, ai: { provider: "none", key: "", model: "" } }, null, 1)], { type: "application/json" }));
@@ -1874,12 +1871,17 @@ $("#dockOrb").addEventListener("click", () => { openAssistant(); orbTap(); });
 $("#asClose").addEventListener("click", closeAssistant);
 $("#endCall").addEventListener("click", () => { voice.hush(); voice.hangUp(); toast("Call ended."); });
 $("#finishTurn").addEventListener("click", () => { if (voice.mode === "command") voice.tap(); });
+$("#readReply").addEventListener("click", () => {
+  const last = S.chat.findLast(x => x.who === "pg");
+  if (last) { if (voice.cloud?.ok()) voice.player.unlock(); voice.say(speakable(last.text)); }
+});
 $("#scrim").addEventListener("click", closeAssistant);
 function orbTap() {
-  voice.player.unlock();
+  if (voice.cloud?.ok()) voice.player.unlock();
   if (!voice.supported) { openAssistant(); $("#ask").focus(); toast("Voice isn't available in this browser. Type to PG instead."); return; }
   // Press to talk: PG greets you, then listens. Nothing listens in the background.
   if (voice.mode === "off" || voice.mode === "wake") {
+    if (S.voice.speak === false) { S.voice.speak = true; save(); }
     voice.call = true; openAssistant(false);
     const g = hello(); pushMsg("pg", g);
     if (S.voice.speak !== false) voice.say(g, () => voice.listen("command")); else voice.listen("command");

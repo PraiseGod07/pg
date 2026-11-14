@@ -1,6 +1,6 @@
 // Voice engine: "Hi PG" wake word, command capture, and spoken replies.
 import { findWake, isEndCall, splitVoiceTurn } from "./nlu.js";
-import { chunks, voiceScore, isNatural, isMale } from "./speech.js";
+import { chunks, voiceScore, isNatural } from "./speech.js";
 import { Mic, Player } from "./cloudvoice.js";
 
 const SR = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -43,26 +43,15 @@ export class Voice {
   useCloud() { return !!(this.cloud?.ok() && this.mic.ok); }
   set(mode) { this.mode = mode; this.h.onState?.(mode); }
 
-  voices() { return this.ttsSupported ? speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang)).sort((a, b) => voiceScore(b) - voiceScore(a)) : []; }
+  voices() {
+    try { return this.ttsSupported ? speechSynthesis.getVoices().slice().sort((a, b) =>
+      Number(/^en/i.test(b.lang)) - Number(/^en/i.test(a.lang)) || voiceScore(b) - voiceScore(a)) : []; }
+    catch { return []; }
+  }
   pickVoice() {
     const vs = this.voices();
-    const males = vs.filter(isMale);
-    // A generic Android voice can only be gender-verified by its owner on that device.
-    this.voice = vs.find(v => v.voiceURI === this.verifiedVoiceURI && v.voiceURI === this.voiceURI)
-      || males.find(v => v.voiceURI === this.voiceURI) || males[0] || null;
-  }
-  async readyVoice(id, preview = false) {
-    if (preview) {
-      this.voice = this.voices().find(v => v.voiceURI === this.voiceURI) || this.voice;
-      return !!this.voice;
-    }
-    // iOS/Android may populate voices after Start, without firing voiceschanged.
-    for (let i = 0; i < 12 && this.sayId === id; i++) {
-      this.pickVoice();
-      if (this.voice) return true;
-      await new Promise(r => setTimeout(r, 100));
-    }
-    return false;
+    this.voice = vs.find(v => v.voiceURI === this.voiceURI)
+      || vs.find(v => /^en/i.test(v.lang)) || vs.find(v => v.default) || vs[0] || null;
   }
 
   // ---- listening ----
@@ -154,17 +143,36 @@ export class Voice {
   }
   // Tap the orb: if already listening for a command, finish now; otherwise start a command.
   tap() {
-    this.player.unlock();
+    if (this.cloud?.ok()) this.player.unlock();
     if (this.mode === "speaking") { this.hush(); if (this.call) this.listen("command"); else this.afterReply(); return; }
     if (this.mode === "command") {
+      if (this.tapFinishing) return;
       if (this.useCloud() && (this.mic.rec || this.sttPending)) {
-        if (this.tapFinishing) return;
         this.tapFinishing = true;
+        this.set("command");
         const epoch = this.listenId, pending = this.mic.flush();
         this.mic.armed = false;
         Promise.resolve(pending || this.sttQueue).then(() => {
           if (this.listenId === epoch && this.mode === "command") this.finish(true);
         }).finally(() => { this.tapFinishing = false; });
+        return;
+      }
+      if (this.rec && typeof this.rec.stop === "function") {
+        // stop(), unlike abort(), asks the browser to deliver the last words.
+        // The draft remains editable by final results until recognition ends.
+        const r = this.rec, epoch = this.listenId;
+        this.tapFinishing = true; this.set("command");
+        let timer, done = false;
+        const submit = (ended = true) => {
+          if (done) return; done = true; clearTimeout(timer);
+          if (this.listenId !== epoch || this.mode !== "command") return;
+          this.tapFinishing = false;
+          if (ended) { if (this.rec === r) this.rec = null; r.onend = r.onresult = r.onerror = null; }
+          this.finish(true);
+        };
+        r.onend = () => submit();
+        this.finishTimer = timer = setTimeout(() => submit(false), 1500);
+        try { r.stop(); } catch { submit(false); }
         return;
       }
       if (this.cmd()) this.finish(true); else this.hangUp(); return;
@@ -176,11 +184,23 @@ export class Voice {
   }
   kill() {
     this.listenId++;
+    this.tapFinishing = false;
+    clearTimeout(this.finishTimer);
     this.sttPending = 0; this.sttQueue = Promise.resolve();
     clearTimeout(this.timer);
     this.mic.armed = false; this.mic.reset();
     const r = this.rec; this.rec = null;
-    if (r) { r.onend = null; r.onresult = null; r.onerror = null; try { r.abort(); } catch {} }
+    if (r) {
+      // Wait for the recognizer to release its audio session before playback.
+      // A bounded fallback covers browsers that omit the abort end event.
+      let resolve, timer;
+      const released = new Promise(done => { resolve = done; });
+      const release = () => { clearTimeout(timer); r.onend = null; if (this.micReleased === released) this.micReleased = null; resolve(); };
+      this.micReleased = released;
+      r.onend = release; r.onresult = null; r.onerror = null;
+      timer = setTimeout(release, 250);
+      try { r.abort(); } catch { release(); }
+    }
   }
   stop() { this.kill(); this.turnBuffer = ""; this.full = ""; this.offset = 0; this.mic.close(); clearTimeout(this.idleTimer); this.set("off"); }
   afterReply() {
@@ -190,14 +210,12 @@ export class Voice {
   // End the call and go back to waiting for "Hi PG"
   hangUp() { this.call = false; this.kill(); this.turnBuffer = ""; this.full = ""; this.offset = 0; this.mic.close(); clearTimeout(this.idleTimer); chime("down"); this.h.onHangUp?.(); this.set("off"); if (this.handsFree) setTimeout(() => { if (this.mode === "off" && this.handsFree) this.listen("wake"); }, 5000); }   // pause before "Hi PG" listening, so PG's own goodbye can't restart a call
 
-  // ---- talking over PG (barge-in) ----
-  // While PG speaks, the mic stays open. Saying "stop", "wait", "hold on" cuts PG off and it listens.
-  // Anything else you start saying (that isn't PG's own voice echoing back) also cuts in.
+  // ---- playback interruption ----
+  // A deliberate tap interrupts PG; automatic microphone barge-in is disabled.
   barge() {
-    if (this.calm) return; // Opening a phone mic during playback can interrupt its audio session.
-    if (this.useCloud()) { if (this.call && this.mode === "speaking") { this.mic.strict = true; this.mic.armed = !!this.mic.stream; } return; }
-    if (!this.supported || this.calm || !(this.call || this.handsFree) || this.mode !== "speaking") return;
-    this.listen("command", true);
+    // Half-duplex on every device: a tap can interrupt, but PG must not hear
+    // itself or reclaim the device's audio session while a reply is playing.
+    return;
   }
   checkBarge() {
     const heard = this.full.toLowerCase().replace(/[^a-z' ]/g, " ").split(/\s+/).filter(Boolean);
@@ -242,7 +260,9 @@ export class Voice {
       this.utterance = u; // Retain a strong reference until the browser has finished.
       if (p.yue) { const v = this.yueVoice(); u.lang = v ? v.lang.replace(/_/g, "-") : "zh-HK"; if (v) u.voice = v; u.rate = 0.85; }
       else {
-        if (this.voice) { u.voice = this.voice; u.lang = this.voice.lang.replace(/_/g, "-"); }
+        this.pickVoice();
+        u.lang = "en-US";
+        if (this.voice && !retry) { u.voice = this.voice; u.lang = this.voice.lang.replace(/_/g, "-"); }
         const nat = this.voice && isNatural(this.voice);
         u.rate = this.rate * (nat ? 1 : 0.96); u.pitch = nat ? 1 : (/\?\s*$/.test(p.t) ? 1.04 : 0.98);
       }
@@ -254,7 +274,7 @@ export class Voice {
         if (this.utterance === u) { this.utterance = null; this.cancelSpeech = null; }
         if (this.sayId !== id || !err) return res();
         try { speechSynthesis.cancel(); } catch {}
-        if (!retry && !/not-allowed|voice-unavailable/.test(err)) {
+        if (!retry && !/not-allowed/.test(err)) {
           this.synth({ ...p, t: p.t.slice(at) }, id, 1).then(res, reject);
         } else reject(new Error(err));
       };
@@ -263,11 +283,12 @@ export class Voice {
       u.onend = () => finish();
       u.onerror = e => finish(e.error || "speech-failed");
       timer = setTimeout(() => finish("speech-timeout"), 8000 + p.t.length * 130 / (u.rate || 1));
-      try { speechSynthesis.speak(u); } catch { finish("speech-failed"); }
+      try { if (speechSynthesis.paused) speechSynthesis.resume(); speechSynthesis.speak(u); } catch { finish("speech-failed"); }
     });
   }
   say(text, then, preview = false) {
     this.kill();
+    this.mic.close();
     const canCloud = this.cloud?.ok() && !this.cloudTtsBad;
     if ((!this.ttsSupported && !canCloud) || !text) { then ? then() : this.afterReply(); return; }
     this.set("speaking");
@@ -276,7 +297,6 @@ export class Voice {
     this.spokenWords = new Set(String(text).toLowerCase().replace(/[^a-z' ]/g, " ").split(/\s+/).filter(Boolean));
     const parts = this.parts(text);
     let done = false;
-    setTimeout(() => { if (this.sayId === id && this.mode === "speaking") this.barge(); }, 350);
     const end = () => { if (done || this.sayId !== id) return; done = true; this.kill(); clearInterval(this.keep); then ? then() : this.afterReply(); };
     clearInterval(this.keep);
     this.keep = setInterval(() => { try { if (speechSynthesis.paused) speechSynthesis.resume(); } catch {} }, 5000);
@@ -284,10 +304,8 @@ export class Voice {
     const got = [];
     const fetchOne = i => got[i] ||= (parts[i] && !parts[i].yue && canCloud && !this.cloudTtsBad ? this.cloud.tts(parts[i].t, this.cloudVoice).catch(e => { if (e.status === 404 || e.status === 405) this.cloudTtsBad = true; return null; }) : Promise.resolve(null));
     (async () => {
-      if (!canCloud && !(await this.readyVoice(id, preview))) {
-        if (this.sayId === id) { this.h.onError?.("malevoice"); end(); }
-        return;
-      }
+      if (this.micReleased) await this.micReleased;
+      if (this.sayId !== id) return;
       for (let i = 0; i < parts.length; i++) {
         if (this.sayId !== id) return;
         const p = parts[i];
