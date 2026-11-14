@@ -41,20 +41,14 @@ const pickOne = a => a[Math.floor(Math.random() * a.length)];
 // ================= Voice wiring =================
 const voice = new Voice({
   onState: m => paintVoice(m),
-  onHeard: t => { $("#heard").textContent = t ? "“" + t + "”" : ""; },
+  onHeard: t => { const el = $("#heard"); el.textContent = t ? "“" + t + "”" : ""; el.scrollTop = el.scrollHeight; },
   onWake: () => { openAssistant(true); $("#heard").textContent = ""; },
   onGreet: () => { const g = hello(); pushMsg("pg", g); voice.say(g, () => voice.listen("command")); },
-  onIdle: () => {
-    // On a call, silence just means he's thinking. Wait patiently, check in once, then step back.
-    if (voice.call && !ui.checkedIn) { ui.checkedIn = true; voice.listen("command"); return; }
-    if (voice.call) { ui.checkedIn = false; const t = `I'll be here. Just say Hi PG when you need me, ${addr()}.`; pushMsg("pg", t); voice.say(t, () => voice.hangUp()); return; }
-    voice.stop(); voice.afterReply(); setStatus("Say “Hi PG”");
-  },
-  onHangUp: () => { ui.pending = null; paintVoice(voice.mode); },
+  onHangUp: () => { ui.pending = null; $("#heard").textContent = ""; paintVoice(voice.mode); },
   onCommand: text => { ui.checkedIn = false; $("#heard").textContent = ""; run(text, true); },
   onError: code => {
     if (code === "blocked" && S.voice.handsFree) { needTap(); return; }
-    const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found.", malevoice: "No recognised male voice is available yet. Open More, Voice setup. PG won't silently use a female voice.", speech: "Your device stopped speech. The complete reply is still in the conversation. Say or type: read your last reply." }[code];
+    const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found.", malevoice: "No recognised male voice is available yet. Open More, Voice setup. PG won't silently use a female voice.", speech: "Your device stopped speech. The complete reply is still in the conversation. Say: read your last reply, Your turn PG.", hearing: "One audio segment could not be transcribed. Your earlier words are still here. Please repeat the missing part before saying Your turn PG." }[code];
     if (msg) toast(msg);
     if (code === "nomic") { S.voice.handsFree = false; save(); if (ui.view === "settings") render(); }
   }
@@ -74,9 +68,11 @@ probeCloud();
 function paintVoice(m) {
   $("#orb").dataset.state = m; $("#dockOrb").dataset.state = m;
   const onCall = voice.call && m !== "off" && m !== "wake";
-  setStatus(onCall ? { command: "Go ahead, I'm listening", thinking: "Thinking…", speaking: "Speaking · tap to cut in" }[m] : { off: voice.supported ? "Tap to talk" : "Type to PG", wake: "Say “Hi PG”", command: "Listening…", thinking: "Thinking…", speaking: "Speaking…" }[m]);
+  setStatus(onCall ? { command: "Listening until you say “Your turn PG”", thinking: "Thinking…", speaking: "Speaking · tap to cut in" }[m] : { off: voice.supported ? "Tap to talk" : "Type to PG", wake: "Say “Hi PG”", command: "Listening until you say “Your turn PG”", thinking: "Thinking…", speaking: "Speaking…" }[m]);
   $("#listenPill").textContent = onCall ? "On a call with PG" : m === "wake" ? "Listening for “Hi PG”" : m === "command" ? "Listening…" : "";
   $("#endCall").hidden = !onCall;
+  $("#finishTurn").hidden = m !== "command";
+  $("#orb").setAttribute("aria-label", m === "command" ? "Finish my turn" : "Talk to PG");
   document.body.classList.toggle("on-call", onCall);
   if (m === "command" || m === "speaking" || m === "thinking") openAssistant(false);
   if ((m === "wake" || m === "off") && ui.autoClose && !voice.call) { ui.autoClose = false; setTimeout(() => { if (voice.mode === "wake" || voice.mode === "off") closeAssistant(); }, 1800); }
@@ -85,7 +81,12 @@ function paintVoice(m) {
 function setStatus(t) { $("#orbStatus").textContent = t; }
 
 // ================= Assistant panel =================
-const isMobile = () => matchMedia("(max-width: 960px)").matches;
+const assistantScreen = matchMedia("(max-width: 960px)");
+const isMobile = () => assistantScreen.matches;
+assistantScreen.addEventListener?.("change", () => {
+  if (!isMobile()) closeAssistant();
+  else if (["command", "thinking", "speaking"].includes(voice.mode)) openAssistant();
+});
 function openAssistant() { if (!isMobile()) return; $("#assistant").classList.add("open"); $("#scrim").hidden = false; }
 function closeAssistant() { $("#assistant").classList.remove("open"); $("#scrim").hidden = true; }
 function pushMsg(who, text, html) {
@@ -1872,6 +1873,7 @@ $("#orb").addEventListener("click", () => orbTap());
 $("#dockOrb").addEventListener("click", () => { openAssistant(); orbTap(); });
 $("#asClose").addEventListener("click", closeAssistant);
 $("#endCall").addEventListener("click", () => { voice.hush(); voice.hangUp(); toast("Call ended."); });
+$("#finishTurn").addEventListener("click", () => { if (voice.mode === "command") voice.tap(); });
 $("#scrim").addEventListener("click", closeAssistant);
 function orbTap() {
   voice.player.unlock();

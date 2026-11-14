@@ -14,6 +14,14 @@ export function findWake(text) {
 }
 export const stripWake = t => t.replace(WAKE_RE, " ").replace(/\s+/g, " ").trim();
 
+// Pauses and recognition-session endings are NOT a turn boundary.
+// Only this trailing spoken hand-off (or the explicit finish button) submits.
+export function splitVoiceTurn(raw) {
+  const text = String(raw || "").trim();
+  const cue = text.match(/\byour[\s,.:;!?-]+turn[\s,.:;!?-]+(?:p[.\s]*g|pee[\s-]*gee|p[.\s]*j)\.?[.!?,\s"'”“]*$/i);
+  return { complete: !!cue, text: cue ? text.slice(0, cue.index).replace(/[\s,]+$/, "").trim() : text };
+}
+
 // ---------- Normalisation ----------
 const NUM = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
 const MINW = { "o five": 5, oh: 0, ten: 10, fifteen: 15, twenty: 20, "twenty five": 25, thirty: 30, "thirty five": 35, forty: 40, "forty five": 45, fifty: 50, "fifty five": 55 };

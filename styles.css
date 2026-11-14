@@ -287,7 +287,7 @@ h2.sec { font-size: var(--text-sm); font-weight: 600; letter-spacing: .02em; col
 @keyframes spin { to { transform: rotate(360deg) } }
 @keyframes talk { 0%,100% { transform: scale(1) } 50% { transform: scale(1.06) } }
 .orb-status { font-size: var(--text-sm); color: var(--muted); text-align: center; }
-.orb-heard { min-height: 1.5em; max-width: 30ch; text-align: center; font-size: var(--text-sm); color: var(--text); font-style: italic; font-family: var(--font-display); font-size: 1.125rem; line-height: 1.35; }
+.orb-heard { min-height: 1.5em; max-width: 30ch; max-height: 7em; overflow: auto; overflow-wrap: anywhere; overscroll-behavior: contain; text-align: center; font-size: var(--text-sm); color: var(--text); font-style: italic; font-family: var(--font-display); font-size: 1.125rem; line-height: 1.35; }
 .chat { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-2) var(--space-6) var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
 .msg { max-width: 92%; font-size: var(--text-sm); line-height: 1.5; padding: var(--space-3) var(--space-4); border-radius: 16px; }
 .msg.me { align-self: flex-end; background: var(--surface-3); border-bottom-right-radius: 6px; }
@@ -331,6 +331,7 @@ h2.sec { font-size: var(--text-sm); font-weight: 600; letter-spacing: .02em; col
   .view { padding: var(--space-6) var(--space-5) calc(120px + var(--safe-b)); }
   .assistant { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; max-height: 86dvh; height: 86dvh; border-left: 0; border-top: 1px solid var(--line-2); border-radius: 24px 24px 0 0; transform: translateY(105%); transition: transform .35s var(--ease); box-shadow: 0 -20px 60px rgba(0,0,0,.5); padding-bottom: var(--safe-b); }
   .assistant.open { transform: none; }
+  .orb-wrap { padding-top: var(--space-6); gap: var(--space-2); }
   .as-close { display: grid; }
   .orb { width: 112px; height: 112px; }
   .orb-core { width: 66px; height: 66px; }
@@ -476,9 +477,9 @@ a.btn { color: var(--text); text-decoration: none; } a.btn.primary { color: var(
 .rule:first-child { border-top: 0; }
 .rule b { display: block; font-size: var(--text-sm); }
 .rule p { margin: 4px 0; font-size: var(--text-sm); color: var(--muted); }
-.end-call { margin-top: var(--space-2); }
+.end-call, .finish-turn { margin-top: var(--space-2); }
 body.on-call .orb-status { color: var(--accent); }
-.end-call[hidden] { display: none; }
+.end-call[hidden], .finish-turn[hidden] { display: none; }
 
 /* PG's AI brain */
 .ai-status{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:var(--surface-2,rgba(255,255,255,.04));margin-bottom:12px;font-weight:600}

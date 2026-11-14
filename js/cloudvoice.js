@@ -30,6 +30,11 @@ export class Mic {
     this.stream = null; this.proc = null; this.src = null;
   }
   reset() { this.pre = []; this.rec = null; this.loud = 0; this.quiet = 0; this.dur = 0; this.voiced = 0; }
+  flush() {
+    if (!this.rec?.length) return null;
+    const parts = this.rec; this.reset();
+    return this.o.onUtter?.(wav(parts, this.rate));
+  }
   frame(x) {
     if (!this.armed) { if (this.rec || this.pre.length) this.reset(); return; }
     const f = new Float32Array(x);
