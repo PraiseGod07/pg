@@ -41,7 +41,7 @@ const pickOne = a => a[Math.floor(Math.random() * a.length)];
 // ================= Voice wiring =================
 const voice = new Voice({
   onState: m => paintVoice(m),
-  onHeard: t => { const el = $("#heard"); el.textContent = t ? "“" + t + "”" : ""; el.scrollTop = el.scrollHeight; },
+  onHeard: t => { const el = $("#heard"); el.textContent = t ? "“" + t + "”" : ""; el.scrollTop = el.scrollHeight; paintReplay(t); },
   onWake: () => { openAssistant(true); $("#heard").textContent = ""; },
   onGreet: () => { const g = hello(); pushMsg("pg", g); voice.say(g, () => voice.listen("command")); },
   onHangUp: () => { ui.pending = null; $("#heard").textContent = ""; paintVoice(voice.mode); },
@@ -74,7 +74,7 @@ function paintVoice(m) {
   $("#finishTurn").hidden = m !== "command";
   $("#finishTurn").disabled = !!voice.tapFinishing;
   if (m === "command" && voice.tapFinishing) setStatus("Finishing your words…");
-  $("#readReply").hidden = m === "speaking" || m === "thinking" || !S.chat.some(x => x.who === "pg");
+  paintReplay();
   $("#orb").setAttribute("aria-label", m === "command" ? "Done speaking" : "Talk to PG");
   document.body.classList.toggle("on-call", onCall);
   if (m === "command" || m === "speaking" || m === "thinking") openAssistant(false);
@@ -82,6 +82,10 @@ function paintVoice(m) {
   keepAwake();
 }
 function setStatus(t) { $("#orbStatus").textContent = t; }
+function paintReplay(draft = voice.cmd()) {
+  $("#readReply").hidden = ["speaking", "thinking"].includes(voice.mode)
+    || (voice.mode === "command" && !!draft) || !S.chat.some(x => x.who === "pg");
+}
 
 // ================= Assistant panel =================
 const assistantScreen = matchMedia("(max-width: 960px)");
@@ -101,7 +105,7 @@ function paintChat() {
   const el = $("#chat");
   el.innerHTML = S.chat.length ? S.chat.slice(-30).map(m => `<div class="msg ${m.who}">${m.html || esc(m.text)}</div>`).join("") : "";
   el.scrollTop = el.scrollHeight;
-  $("#readReply").hidden = voice.mode === "speaking" || voice.mode === "thinking" || !S.chat.some(x => x.who === "pg");
+  paintReplay();
 }
 const SUGGEST = {
   today: ["What's next?", "What should I eat today?", "Is my plan realistic?"],
