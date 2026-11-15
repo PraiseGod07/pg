@@ -372,6 +372,16 @@ function askLine(it) {
 function needsAsk(items) { return items.find(i => i.kind === "event" && !i.ok && (missingOf(i).time || missingOf(i).len)); }
 
 async function followUp(p, bare, text, spoken) {
+  if (p.type === "clarify" && /^(?:please )?(?:add|delete|remove|move|schedule|what|show|tell|i have|i've got)\b/i.test(text)) return false;
+  if (p.type === "academic-context") {
+    if (/^(?:school|schoolwork|school related|for school|yes)(?:[.! ]|$)/i.test(text)) {
+      return followUp({ type: "assignment-slot", tasks: p.tasks }, bare, text.replace(/^(?:school|schoolwork|school related|for school|yes)[,. ]*/i, ""), spoken);
+    }
+    if (/^(?:personal|not school|not schoolwork|no)(?:[.! ]|$)/i.test(text))
+      return await scheduleFrom(p.original.replace(/\b(?:due|deadline|by)\b.*$/i, ""), spoken, true), true;
+    ui.pending = p;
+    return reply("Is that schoolwork or a personal activity, sir? Nothing saved."), true;
+  }
   if (p.type === "assignment-slot") {
     if (/^(?:cancel|never mind)$/i.test(text.trim())) return reply("Cancelled. Nothing saved."), true;
     const tasks = p.tasks;
@@ -804,6 +814,10 @@ async function handle(text, spoken) {
       if (SC.nonAcademic(text)) return scheduleFrom(text, spoken, true);
       const list = SC.parse(text);
       if (!list.length) return scheduleFrom(text, spoken);
+      if (!SC.academic(text)) {
+        ui.pending = { type: "academic-context", tasks: list, original: text };
+        return reply(`Is ${list.map(t => t.title).join("; ")} schoolwork or a personal activity, sir? Nothing saved.`, { spoken });
+      }
       const slotItems = parseSchedule(text.replace(/\b(?:due|deadline|submit|hand in)\b.*$/i, ""), { date: today(), today: today(), now: nowMin() });
       const slotEvents = slotItems.filter(i => i.kind === "event");
       if (list.length === 1 && slotEvents.length === 1 && slotEvents[0].s != null && slotEvents[0].e != null && !needsAsk(slotItems)) {

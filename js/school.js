@@ -107,7 +107,8 @@ function titleOf(seg, kind, subj) {
     .split(/\s+(?:due|deadline|by)\b/)[0]
     .replace(/\s+(?:(?:on|this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*$|\s+(?:from|at)\s+\d.*$/i, "")
     .replace(/[.!?]+$/, "").trim();
-  if (/\bassignment\b/.test(exact) && exact.split(/\s+/).length >= 4) return exact.charAt(0).toUpperCase() + exact.slice(1);
+  if (/\b(?:assignment|homework|essay|report|project|test|exam|quiz|worksheet|presentation|coursework|paper|lab)s?\b/.test(exact))
+    return exact.charAt(0).toUpperCase() + exact.slice(1);
   const noun = (seg.match(KINDS.find(k => k[1] === kind)[0]) || [kind])[0].replace(/s$/, "");
   let topic = (seg.match(/\b(?:on|about)\s+([a-z0-9' ]{3,40}?)(?=\s+(?:due|for|by|on|which|that|and|it)\b|$)/) || [])[1] || "";
   if (WD.some(w => topic.startsWith(w)) || /^(?:the \d|\d|tomorrow|today|next|this|a |an |one |two |three |four |five |half)|\b(?:hours?|minutes?|mins?|hrs?)\b/.test(topic)) topic = "";
