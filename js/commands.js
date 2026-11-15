@@ -4,6 +4,19 @@ const copy = x => x === undefined ? undefined : JSON.parse(JSON.stringify(x));
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const object = x => x && typeof x === "object" && !Array.isArray(x);
 const excluded = new Set(["dev", "ai", "chat", "t", "daily", "interests", "commandLog"]);
+const entityKey = text => String(text || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ")
+  .replace(/\b(?:the|my|a|an|that|this)\b/g, " ").replace(/\s+/g, " ").trim();
+export function namedBlocks(query, blocks) {
+  const key = entityKey(query);
+  if (!key) return [];
+  const exact = blocks.filter(b => entityKey(b.title) === key);
+  if (exact.length) return exact;
+  const words = key.split(" ").filter(w => !/^(?:is|for|of|on|to|and)$/.test(w));
+  return blocks.filter(b => {
+    const tokens = entityKey(b.title).split(" ");
+    return words.length && words.every(w => tokens.includes(w));
+  });
+}
 
 export function changes(before, after, path = []) {
   if (path[0] === "days" && path.at(-1) === "blocks") { before ??= []; after ??= []; }

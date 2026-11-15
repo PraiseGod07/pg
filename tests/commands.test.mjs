@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { changes, applyProposal, approval, validateChanges, reconcileWindows } from "../js/commands.js";
+import { changes, applyProposal, approval, validateChanges, reconcileWindows, namedBlocks } from "../js/commands.js";
 import { calendarDate } from "../js/dates.js";
 import { parseSchedule } from "../js/nlu.js";
 
@@ -75,4 +75,11 @@ test("School additions require a matching timetable slot and exclude personal ac
   assert.doesNotThrow(() => validateChanges(before, after, changes(before, after)));
   after.school.tasks[0].title = "Gym";
   assert.throws(() => validateChanges(before, after, changes(before, after)), /only for schoolwork/);
+});
+test("long assignment corrections never fall back to another assignment", () => {
+  const blocks = [block("History assignment", 960, 1020),
+    block("AI is a tool for language learning assignment", 840, 900)];
+  assert.deepEqual(namedBlocks("AI is a tool for language learning assignment", blocks).map(b => b.id), [blocks[1].id]);
+  assert.deepEqual(namedBlocks("unrelated assignment", blocks), []);
+  assert.equal(namedBlocks("assignment", blocks).length, 2);
 });

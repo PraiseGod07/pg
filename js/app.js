@@ -1,6 +1,6 @@
 // PG — app controller: views, command handling, reminders.
 import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1, flush, beginDraft, endDraft, inDraft } from "./store.js";
-import { changes, describe, approval, applyProposal, validateChanges, reconcileWindows } from "./commands.js";
+import { changes, describe, approval, applyProposal, validateChanges, reconcileWindows, namedBlocks } from "./commands.js";
 import { calendarDate } from "./dates.js";
 import { speakable, isNatural } from "./speech.js";
 import { CATS, EXERCISES, SPLITS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
@@ -1253,13 +1253,13 @@ function targets(raw, base) {
   for (const dd of days) {
     let cand = blocksOf(dd);
     if (at != null) cand = cand.filter(b => Math.abs(b.start - at) <= 20 || (b.start <= at && at < b.end));
-    const hits = name.length > 1 ? cand.filter(b => matchBlock(name, [b])) : at != null ? cand : [];
+    const hits = name.length > 1 ? namedBlocks(name, cand) : at != null ? cand : [];
     if (hits.length) {
-      const best = name.length > 1 ? (matchBlock(name, hits) || hits[0]) : hits[0];
-      out.push(...(every ? hits : [best]).map(b => ({ b, d: dd })));
-      if (!every) break;   // nearest day only
+      out.push(...hits.map(b => ({ b, d: dd })));
     }
   }
+  if (!every && out.length > 1) throw new Error("Which exact timetable item do you mean: "
+    + out.map(({ b, d }) => `${b.title} on ${d}, ${sayTime(b.start)} to ${sayTime(b.end)}`).join("; ") + "? Nothing saved.");
   return { d: out[0]?.d || d, list: out.map(o => o.b), pairs: out };
 }
 function splitClauses(text) {
@@ -1301,6 +1301,8 @@ async function localEdit(text, spoken) {
     const tg = targets(move[1]), dest = move[2];
     const date = calendarDate(dest, today());
     const clockText = dest.match(/\b\d{1,2}(?::\d\d)?\s*(?:am|pm)\b|\bat \d{1,2}(?::\d\d)?\b/)?.[0]?.replace(/^at /, "");
+    if ((date || clockText) && tg.list.length !== 1)
+      return reply(`I couldn't find that exact timetable item. Which title and day should I change? Nothing saved.`, { spoken }), true;
     if (tg.list.length === 1 && (date || clockText)) {
       const b = tg.list[0], start = clockText ? parseClock(clockText) : b.start;
       const lines = AG.apply([{ op: "update_block", id: b.id, date: date || tg.d, start, end: start + b.end - b.start }]);
