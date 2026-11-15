@@ -31,6 +31,7 @@ test("agent adds an assignment to both stores and links the session", () => {
   AG.apply([{ op: "add_block", title: "Physics assignment", date: "2026-11-16", start: "16:00", end: "17:00", cat: "study" }]);
   assert.equal(SC.tasks().length, 1);
   assert.equal(day("2026-11-16").blocks[0].tid, SC.tasks()[0].id);
+  assert.equal(SC.upcomingStudy()?.tid, SC.tasks()[0].id);
   SC.remove(SC.tasks()[0].id);
   assert.equal(day("2026-11-16").blocks.length, 0);
 });

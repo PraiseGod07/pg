@@ -606,7 +606,7 @@ async function handle(text, spoken) {
     const candidates = exact.length ? exact : pool.filter(b => b.title.toLowerCase().includes(target.toLowerCase()));
     if (candidates.length === 1) {
       const block = candidates[0]; block.done = true;
-      if (block.src === "school") SC.noteDone(block);
+      if (block.tid) SC.noteDone(block);
       save(); return reply(`Marked ${block.title} as done, ${addr()}.`, { view: "today", date: today(), spoken });
     }
     if (candidates.length > 1) {
@@ -682,7 +682,7 @@ async function handle(text, spoken) {
       if (it.type === "move") { const t = parseClock(it.time); const len = b.end - b.start; b.start = t; b.end = Math.min(1440, t + len); b.flex = false; msg = `Moved ${b.title} to ${sayTime(b.start)}.`; }
       if (it.type === "shift") { b.start += it.min; b.end = Math.min(1440, b.end + it.min); msg = `${b.title} now starts at ${sayTime(b.start)}.`; }
       if (it.type === "resize") { b.end = Math.min(1440, b.start + it.min); msg = `${b.title} is now ${sayTime(b.start)} to ${sayTime(b.end)}.`; }
-      if (it.type === "done") { b.done = true; if (b.src === "school") SC.noteDone(b); msg = `Nice work. ${b.title} is done.`; const nx = upcoming(d).find(x => x.id !== b.id); if (nx) msg += ` Next is ${nx.title} at ${sayTime(nx.start)}.`; }
+      if (it.type === "done") { b.done = true; if (b.tid) SC.noteDone(b); msg = `Nice work. ${b.title} is done.`; const nx = upcoming(d).find(x => x.id !== b.id); if (nx) msg += ` Next is ${nx.title} at ${sayTime(nx.start)}.`; }
       save(); render(); undoable(snap, msg.split(".")[0] + ".");
       return reply(msg, { view: "today", date: d, spoken });
     }
@@ -1740,9 +1740,11 @@ function viewSchool() {
     h += `<h2 class="sec"><span>Due</span><button class="btn sm ghost" data-act="replan">Re-plan</button></h2><div class="card list">`;
     h += p.map(t => {
       const ss = SC.sessionsOf(t), dn = ss.filter(b => b.done).length;
-      const pct = Math.min(100, Math.round((t.doneMin || 0) / Math.max(1, t.plan) * 100));
+      const scheduled = ss.reduce((n, b) => n + b.end - b.start, 0);
+      const completed = ss.filter(b => b.done).reduce((n, b) => n + b.end - b.start, 0);
+      const pct = Math.min(100, Math.round(completed / Math.max(1, scheduled) * 100));
       return `<div class="task"><div class="task-main"><div class="lbl">${esc(t.title)}</div>
-        <div class="sub">${esc(dueLbl(t))} · ${fmtDur(t.plan)} planned${ss.length ? ` · ${dn}/${ss.length} sessions` : ""}</div>${bar(pct)}</div>
+        <div class="sub">${esc(dueLbl(t))} · ${scheduled ? fmtDur(scheduled) + " scheduled" : "No study time scheduled"}${ss.length ? ` · ${dn}/${ss.length} sessions` : ""}</div>${bar(pct)}</div>
         <div class="row"><button class="btn sm" data-act="task-done" data-id="${t.id}">Done</button><button class="icon-btn" data-act="task-del" data-id="${t.id}" aria-label="Remove ${esc(t.title)}"><svg><use href="#i-x"/></svg></button></div></div>`;
     }).join("") + `</div>`;
   } else h += `<p class="note">Tell PG what's due, like: I have a math test next Tuesday and a biology report due the 20th.</p>`;
@@ -1912,10 +1914,10 @@ document.addEventListener("click", e => {
     case "week-plan": openWeekPlanner(); break;
     case "add": openEditor(null); break;
     case "edit": if (e.target.closest(".check,.tag.link")) return; openEditor(id); break;
-    case "toggle": { e.stopPropagation(); const b = day(d).blocks.find(x => x.id === id); if (b) { b.done = !b.done; if (b.done && b.src === "school") SC.noteDone(b); save(); render(); if (b.done) chime("ok"); } break; }
+    case "toggle": { e.stopPropagation(); const b = day(d).blocks.find(x => x.id === id); if (b) { b.done = !b.done; if (b.done && b.tid) SC.noteDone(b); save(); render(); if (b.done) chime("ok"); } break; }
     case "task-done": { const t = SC.tasks().find(x => x.id === id); if (t) { SC.finish(t); ui.pending = { type: "actual", tid: t.id }; ui.lastTask = t.id; render(); openAssistant(); reply(`Nice work. How long did ${t.title} take you in total?`); } break; }
     case "task-del": confirmSheet("Remove this assignment?", "Its study sessions come off your timetable.", "Remove", () => { SC.remove(id); render(); }); break;
-    case "replan": { const r = SC.plan(); render(); toast(`${r.placed.length} study sessions planned.`); break; }
+    case "replan": openWeekPlanner(); break;
     case "go": e.stopPropagation(); go(el.dataset.v); break;
     case "close-sheet": $("#sheet").close(); break;
     case "goals-open": openGoals(); break;

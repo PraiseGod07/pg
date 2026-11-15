@@ -345,7 +345,7 @@ export function brief() {
 }
 export function upcomingStudy() {
   const t0 = today(), n = nowMin();
-  for (let i = 0; i < 30; i++) { const d = addDays(t0, i); const b = sortedBlocks(d).find(x => x.src === "school" && !x.done && (i > 0 || x.end > n)); if (b) return b; }
+  for (let i = 0; i < 30; i++) { const d = addDays(t0, i); const b = sortedBlocks(d).find(x => (x.tid || x.src === "school") && !x.done && (i > 0 || x.end > n)); if (b) return b; }
   return null;
 }
 export function sessionsOf(t) {
