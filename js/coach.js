@@ -3,12 +3,17 @@ import { S, save } from "./store.js";
 import { SPLITS, EXERCISES, INSTRUMENTS, GYM_WARMUP, stageOf } from "./library.js";
 import { today, addDays, uid } from "./util.js";
 export { EXERCISES };
+const builtInExercises = JSON.parse(JSON.stringify(EXERCISES));
 
 // ---------- Gym ----------
 export function split() { return SPLITS[S.gym.split] || SPLITS.ppl; }
 // ---- Exercises PG adds or removes for you (kept on top of the built-in plan) ----
 export function custom() { S.gym.custom = S.gym.custom || { ex: {}, days: {} }; S.gym.custom.ex ||= {}; S.gym.custom.days ||= {}; return S.gym.custom; }
-export function syncCustom() { Object.entries(custom().ex).forEach(([k, v]) => { EXERCISES[k] = { muscles: "", cues: [], video: null, ...v, custom: true }; }); }
+export function syncCustom() {
+  for (const k of Object.keys(EXERCISES)) delete EXERCISES[k];
+  Object.assign(EXERCISES, JSON.parse(JSON.stringify(builtInExercises)));
+  Object.entries(custom().ex).forEach(([k, v]) => { EXERCISES[k] = { muscles: "", cues: [], video: null, ...v, custom: true }; });
+}
 function withCustom(d) {
   if (!d) return d;
   const c = custom().days[d.key]; if (!c) return d;
@@ -44,6 +49,11 @@ export function addExercise(info, dayKey) {
     key = slug(info.name);
     custom().ex[key] = { name: (s => s.charAt(0).toUpperCase() + s.slice(1))(String(info.name).trim().slice(0, 60)), muscles: String(info.muscles || "").slice(0, 80), cues: (info.cues || []).map(String).slice(0, 6), search: String(info.search || info.name + " proper form").slice(0, 100),
       ...(/^[\w-]{11}$/.test(info.videoId || "") ? { video: { id: info.videoId, by: String(info.videoBy || "YouTube demonstration").slice(0, 80) } } : {}) };
+    syncCustom();
+  }
+  if (/^[\w-]{11}$/.test(info.videoId || "")) {
+    custom().ex[key] = { ...EXERCISES[key], ...custom().ex[key],
+      video: { id: info.videoId, by: String(info.videoBy || "YouTube demonstration").slice(0, 80) } };
     syncCustom();
   }
   const c = custom().days[dk] = custom().days[dk] || { add: [], drop: [] };

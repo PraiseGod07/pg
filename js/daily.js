@@ -100,9 +100,11 @@ export function goalsLine() {
 // ---- end-of-call extras ----
 export function verse() {
   const date = today();
-  const ordinal = Math.floor(Date.parse(date + "T00:00:00Z") / 86400000);
-  const i = ((ordinal % VERSES.length) + VERSES.length) % VERSES.length;
   const days = dl().verseDays || (dl().verseDays = {});
+  // Date-seeded shuffle is stable on phone/laptop and does not require a paid API.
+  let hash = 2166136261;
+  for (const c of date) { hash ^= c.charCodeAt(0); hash = Math.imul(hash, 16777619) >>> 0; }
+  const i = days[date] ?? (hash % VERSES.length);
   if (days[date] == null) { days[date] = i; save(); }
   return { ref: VERSES[i][0], text: VERSES[i][1] };
 }

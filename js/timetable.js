@@ -3,6 +3,7 @@ import { S, day, save } from "./store.js";
 import { today, addDays, nowMin } from "./util.js";
 import { firstGap } from "./scheduler.js";
 import { CATS } from "./library.js";
+import { academic, add as addSchool } from "./school.js";
 
 export const weekOf = date => {
   const weekday = new Date(date + "T12:00:00Z").getUTCDay();
@@ -38,9 +39,15 @@ export function planWeek(input) {
     return { title, minutes: amount, days, cat: CATS[t.cat] ? t.cat : "study" };
   });
   // Build off to the side. Validation/fitting never partially clears a week.
-  const work = Object.fromEntries(dates.map(d => [d, day(d).blocks.filter(b =>
-    b.src !== "weekly-plan" || b.done || d < today() || d === today() && b.start < nowMin()).map(b => ({ ...b }))]));
+  const work = Object.fromEntries(dates.map(d => {
+    const savedWindows = S.studyWindows?.[d] || [];
+    const blocks = day(d).blocks.filter(b => !savedWindows.some(w => b.containerId === w.id)).filter(b =>
+      b.src !== "weekly-plan" || b.done || d < today() || d === today() && b.start < nowMin()).map(b => ({ ...b }));
+    for (const w of savedWindows) if (!blocks.some(b => b.id === w.id)) blocks.push({ ...w });
+    return [d, blocks];
+  }));
   const missing = [], placed = [];
+  const windows = Object.fromEntries(dates.map(d => [d, work[d].filter(b => !b.done && (b.studyWindow || /^(?:assignments?|study|homework)$/i.test(b.title)))]));
   for (const task of tasks) {
     const taskKey = key(task.title);
     // Keep completed/already-started sessions, including their completion history.
@@ -54,7 +61,16 @@ export function planWeek(input) {
         if (!remaining) break;
         const cursor = date === today() ? Math.max(start, Math.ceil(nowMin() / 5) * 5) : start;
         const duration = Math.min(remaining, focus);
-        const at = firstGap(work[date], cursor, duration + rest, end);
+        const containers = windows[date];
+        const occupied = work[date].filter(b => !containers.some(w => w.id === b.id));
+        let at = null;
+        const studyTask = ["study", "work"].includes(task.cat);
+        if (containers.length && studyTask) {
+          for (const window of containers) {
+            at = firstGap(occupied, Math.max(cursor, window.start), duration + rest, Math.min(end, window.end));
+            if (at != null) break;
+          }
+        } else at = firstGap(work[date], cursor, duration + rest, end);
         if (at == null) continue;
         let id;
         do { id = `week:${week}:${encodeURIComponent(taskKey)}:${part++}`; }
@@ -68,8 +84,35 @@ export function planWeek(input) {
     }
     if (remaining) missing.push({ title: task.title, minutes: remaining });
   }
-  for (const date of dates) day(date).blocks = work[date];
+  if (missing.length) throw new Error("No, sir, this is not feasible. There is not enough time in the approved study windows for "
+    + missing.map(t => `${t.title} (${t.minutes} minutes still needed)`).join(", ") + ". Nothing changed. Which duration or available time should change?");
+  for (const date of dates) {
+    // Keep the container as allocation metadata, not an overlapping appointment.
+    // Display only its free remainders once subjects have been allocated.
+    for (const window of windows[date]) {
+      const inside = work[date].filter(b => b.src === "weekly-plan" && b.start >= window.start && b.end <= window.end);
+      if (!inside.length) continue;
+      window.studyWindow = true;
+      let cursor = window.start;
+      const remaining = [];
+      for (const b of inside.sort((a, b) => a.start - b.start)) {
+        if (b.start > cursor) remaining.push({ ...window, id: `${window.id}:free:${cursor}`, start: cursor, end: b.start, containerId: window.id });
+        cursor = Math.max(cursor, b.end);
+      }
+      if (cursor < window.end) remaining.push({ ...window, id: `${window.id}:free:${cursor}`, start: cursor, containerId: window.id });
+      S.studyWindows ||= {};
+      S.studyWindows[date] ||= [];
+      if (!S.studyWindows[date].some(w => w.id === window.id)) S.studyWindows[date].push({ ...window });
+      work[date] = work[date].filter(b => b.id !== window.id).concat(remaining);
+    }
+    day(date).blocks = work[date];
+  }
   S.weekPlans ||= {};
+  for (const task of tasks) if (academic(task.title)) {
+    const [record] = addSchool([{ title: task.title, kind: "assignment", due: null, dueMin: null, est: null }]);
+    for (const blocks of Object.values(work)) for (const b of blocks)
+      if (b.planTask === key(task.title)) b.tid = record.id;
+  }
   S.weekPlans[week] = { weekStart: week, start, end, focusMinutes: focus, breakMinutes: rest, tasks, missing, updated: Date.now() };
   save();
   return { week, placed, missing };

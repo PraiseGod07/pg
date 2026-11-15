@@ -18,6 +18,10 @@ export function speakable(t, full) {
     .replace(/\*\*|__|`|#+\s/g, "")                                // markdown
     .replace(/^\s*[-•·]\s+/gm, "")                                 // bullets
     .replace(/\s+[·•|]\s+/g, ", ")                                 // "Bass · Lesson 1"
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, date => {
+      const d = new Date(date + "T12:00:00Z");
+      return Number.isFinite(+d) ? d.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long", year: "numeric" }) : date;
+    })
     .replace(/\s*[—–]\s*(?=\D)/g, ", ")                            // dashes as pauses
     .replace(/\b([01]?\d|2[0-4]):([0-5]\d)\s*[–-]\s*([01]?\d|2[0-4]):([0-5]\d)\b/g, (_, a, b, c, d) => `${h12(a, b)} to ${h12(c, d)}`)
     .replace(/\b([01]?\d|2[0-3]):([0-5]\d)\b(?!\s*(?:AM|PM|am|pm))/g, (_, a, b) => h12(a, b))

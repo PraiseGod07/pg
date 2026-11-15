@@ -2,20 +2,31 @@
 import { findWake, isEndCall, splitVoiceTurn } from "./nlu.js";
 import { chunks, voiceScore, isNatural } from "./speech.js";
 import { Mic, Player } from "./cloudvoice.js";
+import { approval } from "./commands.js";
 
 const SR = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
 let actx = null;
-export function chime(kind = "up") {
-  return; // PG stays quiet: no beeps. (Kept so older calls still work.)
+export async function chime(kind = "up") {
+  if (kind !== "success" && kind !== "unlock") return;
   try {
     actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    await actx.resume();
+    if (kind === "unlock") return;
     const t = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
     o.type = "sine";
-    const [a, b] = kind === "up" ? [660, 990] : kind === "down" ? [880, 520] : [740, 740];
-    o.frequency.setValueAtTime(a, t); o.frequency.exponentialRampToValueAtTime(b, t + 0.14);
-    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.12, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
-    o.connect(g).connect(actx.destination); o.start(t); o.stop(t + 0.24);
+    o.frequency.setValueAtTime(880, t);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.32, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.30);
+    o.connect(g).connect(actx.destination); o.start(t); o.stop(t + 0.32);
+    return await new Promise(resolve => { o.onended = resolve; setTimeout(resolve, 500); });
   } catch {}
+}
+export function joinTranscript(previous, incoming) {
+  const a = String(previous || "").trim().split(/\s+/).filter(Boolean);
+  const b = String(incoming || "").trim().split(/\s+/).filter(Boolean);
+  const norm = s => s.toLowerCase().replace(/[.,!?;:]/g, "");
+  for (let n = Math.min(a.length, b.length); n >= 4; n--)
+    if (a.slice(-n).every((w, i) => norm(w) === norm(b[i]))) return [...a, ...b.slice(n)].join(" ");
+  return [...a, ...b].join(" ");
 }
 
 export class Voice {
@@ -31,6 +42,7 @@ export class Voice {
     this.mode = "off";       // off | wake | command | speaking | thinking
     this.rec = null; this.full = ""; this.offset = 0; this.timer = null; this.idleTimer = null;
     this.turnBuffer = ""; this.listenId = 0; this.sttQueue = Promise.resolve(); this.sttPending = 0;
+    this.audioSegments = new WeakSet(); this.rawSegments = []; this.duplicateWarning = false;
     this.voice = null; this.voiceURI = ""; this.rate = 1;
     this.restartDelay = 250; this.lastStart = 0;
     // Do not open a phone microphone during playback. During the user's turn,
@@ -108,8 +120,18 @@ export class Voice {
   cmd() { return this.full.slice(this.offset).replace(/^[\s,.!?]+/, "").trim(); }
   onResult(e) {
     let t = "", lastFinal = true;
-    for (let i = 0; i < e.results.length; i++) { t += e.results[i][0].transcript + " "; lastFinal = e.results[i].isFinal; }
-    this.full = [this.turnBuffer, t].filter(Boolean).join(" ").replace(/\s+/g, " ");
+    let prior = "";
+    for (let i = 0; i < e.results.length; i++) {
+      const part = e.results[i][0].transcript.trim();
+      if (part.split(/\s+/).length >= 4 && part.toLowerCase() === prior.toLowerCase()) {
+        this.duplicateWarning = true; this.h.onError?.("repeated");
+      } else t += part + " ";
+      prior = part; lastFinal = e.results[i].isFinal;
+    }
+    this.full = joinTranscript(this.turnBuffer, t).replace(/\s+/g, " ");
+    if (this.turnBuffer && this.full.trim() !== [this.turnBuffer.trim(), t.trim()].filter(Boolean).join(" ")) {
+      this.duplicateWarning = true; this.h.onError?.("repeated");
+    }
     if (this.mode === "speaking") { if (lastFinal) this.checkBarge(); return; }
     if (this.mode === "wake") {
       const w = findWake(this.full);
@@ -129,13 +151,18 @@ export class Voice {
     if (!c) {
       // Woke with nothing else said: greet like Siri, then listen for the request
       if (this.offset > 0) this.timer = setTimeout(() => { if (this.mode === "command" && !this.cmd()) this.h.onGreet?.(); }, 1300);   // only after "Hey PG"; the button already greets
-    } else if (lastFinal && splitVoiceTurn(c).complete) this.finish();
+    } else if (lastFinal && this.h.awaitingConfirmation?.() && approval(c)) this.finish(true);
+    else if (lastFinal && splitVoiceTurn(c).complete) this.finish();
   }
   finish(manual = false) {
     const turn = splitVoiceTurn(this.cmd());
     if (!manual && !turn.complete) return;
     clearTimeout(this.timer); clearTimeout(this.idleTimer);
     const c = turn.text;
+    if (this.duplicateWarning && c) {
+      this.duplicateWarning = false; this.h.onError?.("repeated");
+      this.tapFinishing = false; this.set("command"); return;
+    }
     this.kill();
     this.turnBuffer = ""; this.full = ""; this.offset = 0;
     this.set("thinking");
@@ -343,6 +370,10 @@ export class Voice {
   micUtter(blob) {
     const mode = this.mode, id = this.sayId, epoch = this.listenId;
     if (mode !== "command" && mode !== "speaking") return;
+    if (blob && typeof blob === "object") {
+      if (this.audioSegments.has(blob)) return this.sttQueue;
+      this.audioSegments.add(blob);
+    }
     this.sttPending++;
     // Keep recording while earlier audio is transcribed; serialize results so
     // speech separated by pauses cannot be lost or arrive in the wrong order.
@@ -359,10 +390,16 @@ export class Voice {
         return;
       }
       if (!text || !/[a-z0-9]/i.test(text)) { this.h.onHeard?.(this.cmd()); return; }
-      this.full = [this.cmd(), text].filter(Boolean).join(" "); this.offset = 0;
+      this.rawSegments = [...this.rawSegments.slice(-19), { epoch, text }];
+      const joined = joinTranscript(this.cmd(), text);
+      if (joined === this.cmd() && text.split(/\s+/).length >= 4) {
+        this.duplicateWarning = true; this.h.onError?.("repeated"); return;
+      }
+      this.full = joined; this.offset = 0;
       this.turnBuffer = this.full;
       this.h.onHeard?.(this.cmd());
-      if (splitVoiceTurn(this.cmd()).complete) this.finish();
+      if (this.h.awaitingConfirmation?.() && approval(this.cmd())) this.finish(true);
+      else if (splitVoiceTurn(this.cmd()).complete) this.finish();
     }).catch(e => {
       console.warn(e); if (this.listenId === epoch) this.h.onError?.("hearing");
     }).finally(() => { if (this.listenId === epoch) this.sttPending = Math.max(0, this.sttPending - 1); });

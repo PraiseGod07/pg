@@ -3,6 +3,7 @@ import { clean as cleanHeard } from "./hearing.js";
 // PG language understanding: wake word, intents, and spoken-schedule parsing.
 // Works fully on-device. Built for messy speech-to-text (no punctuation, mis-heard words, wrong AM/PM).
 import { DEFAULT_MIN } from "./library.js";
+import { calendarDate } from "./dates.js";
 
 // ---------- Wake word ----------
 // Speech engines hear "Hi PG" many ways. Accept common variants, but only after a greeting word.
@@ -129,16 +130,17 @@ const ACTIVITY = [
   { cat: "class",   re: /\b(class(?:es)?|lecture|lab|seminar|tutorial|course|school|lesson)\b/, title: null },
   { cat: "study",   re: /\b(study|studying|revise|revision|homework|assignments?|reading|read|review|exam prep|prep for)\b/, title: null },
   { cat: "work",    re: /\b(solidworks|cad|project|coding|code|programming|design|essay|report|work on|working on|shift|job|work)\b/, title: null },
-  { cat: "meal",    re: /\b(breakfast|lunch|dinner|brunch|eat|meal|supper)\b/, title: null },
+  { cat: "meal",    re: /\b(breakfast|lunch|dinner|brunch|eat|eating|cook|cooking|meal|supper)\b/, title: null },
   { cat: "meeting", re: /\b(meeting|call with|zoom|interview|office hours|appointment)\b/, title: null },
   { cat: "social",  re: /\b(friends?|hang ?out|party|date|movie|game night|family)\b/, title: null },
   { cat: "rest",    re: /\b(nap|rest|sleep|break|chill|relax|shower)\b/, title: null }
 ];
 const ARRIVAL = /\b(?:i'?ll be|i will be|i'?d be|i should be|be back|be in|be at|get back|arrive|reach|i'?m in|i'?ll get there)\b/;
-const PROPER = { solidworks: "SolidWorks", cad: "CAD", matlab: "MATLAB", python: "Python", math: "Math", maths: "Maths", physics: "Physics", chemistry: "Chemistry", biology: "Biology", english: "English", calculus: "Calculus" };
+const PROPER = { ai: "AI", solidworks: "SolidWorks", cad: "CAD", matlab: "MATLAB", python: "Python", math: "Math", maths: "Maths", physics: "Physics", chemistry: "Chemistry", biology: "Biology", english: "English", calculus: "Calculus" };
 
 function cleanTitle(rest) {
   let t = rest.trim().replace(/[—–-]+/g, " ");
+  t = t.replace(/^(?:(?:and|then|also|after that)\s+)+/, "");
   t = t.replace(SUBJECT, "");
   t = t.replace(/\b(?:today|tonight|tomorrow|this morning|this afternoon|this evening|(?:on |this |next )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/g, " ");
   t = t.replace(/^\s*(?:do|doing|go to|go|attend|have|be|start|get|some|a|an|the|my)\b\s*/g, " ");
@@ -151,6 +153,11 @@ function cleanTitle(rest) {
 }
 
 function classify(rest) {
+  if (/\b(?:assignments?|homework|coursework|essays?|worksheets?)\b/.test(rest)
+    && !/\b(?:gym|workout|shopping|cooking|church|bible|bass)\b/.test(rest)) {
+    const title = cleanTitle(rest);
+    if (title) return { cat: "study", title: title.charAt(0).toUpperCase() + title.slice(1) };
+  }
   for (const a of ACTIVITY) {
     const m = rest.match(a.re);
     if (m) {
@@ -158,7 +165,7 @@ function classify(rest) {
       if (a.title) title = a.title(m);
       else {
         title = cleanTitle(rest);
-        if (!title || title.split(" ").length > 6) title = m[1];
+        if (!title) title = m[1];
       }
       return { cat: a.cat, title: title.charAt(0).toUpperCase() + title.slice(1) };
     }
@@ -187,15 +194,7 @@ function segments(t) {
 
 const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 function dateFrom(seg, base) {
-  if (/\btomorrow\b/.test(seg)) return addDaysStr(base, 1);
-  if (/\b(?:today|tonight|this morning|this afternoon|this evening)\b/.test(seg)) return base;
-  const m = seg.match(/\b(?:on |this |next )?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
-  if (m) {
-    const d = new Date(base + "T00:00");
-    const diff = (WEEKDAYS.indexOf(m[1]) - d.getDay() + 7) % 7 || 7;
-    return addDaysStr(base, /next/.test(m[0]) && diff < 7 ? diff + 7 : diff);
-  }
-  return null;
+  return calendarDate(seg, base);
 }
 function addDaysStr(s, n) { const d = new Date(s + "T00:00"); d.setDate(d.getDate() + n); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
 
@@ -269,14 +268,30 @@ function resolve(items, ctx) {
 // Returns ordered items: {kind:'event'|'anchor', title, cat, s, e, b, dur, date}
 export function parseSchedule(raw, ctx) {
   const t = normalize(stripWake(raw));
-  const segs = segments(t);
+  // Successive ranges are boundaries even when speech contains no “then”.
+  const rangeRE = new RegExp(`\\b(?:from\\s+|between\\s+)?${T_RE_SRC}\\s*(?:to|until|till|through|[–-])\\s*${T_RE_SRC}\\b`, "g");
+  const ranges = [...t.matchAll(rangeRE)];
+  let segs = segments(t);
+  if (ranges.length > 1) {
+    const timeFirst = ranges[0].index === 0;
+    segs = ranges.map((m, i) => {
+      const prefix = t.slice(i ? ranges[i - 1].index + ranges[i - 1][0].length : 0, m.index).replace(/^[\s,;:.]+|[\s,;:.]+$/g, "");
+      const suffix = t.slice(m.index + m[0].length, ranges[i + 1]?.index ?? t.length).replace(/^[\s,;:.]+|[\s,;:.]+$/g, "");
+      const after = /^(?:(?:the )?next (?:morning|day)\s+)?(?:is|will be|for)\b/.test(suffix);
+      // “9–10 church; 10–11 rest” as well as “church 9–10; rest 10–11”.
+      const title = after || timeFirst || !prefix && suffix ? suffix.replace(/^(?:(?:the )?(?:next|following) (?:morning|day)\s+)?(?:is|will be|for)?\s*/, "").replace(/\b(?:and )?then\s*$/, "") : prefix;
+      return `${title} ${m[0]}` + (/\b(?:next morning|next day)\b/.test(suffix) ? " next morning" : "");
+    });
+  }
   let date = ctx.date;
   const items = [];
   let pending = null; // time-only fragment waiting for its activity
   for (const seg of segs) {
-    const d = dateFrom(seg, ctx.today);
+    const overnight = /\b(?:next morning|next day|following morning)\b/.test(seg);
+    const d = dateFrom(seg.replace(/\b(?:the )?(?:next|following) (?:morning|day)\b.*$/, ""), ctx.today);
     if (d) date = d;
     const tm = extractTimes(seg);
+    if (overnight && tm.start && !tm.start.mer && tm.end?.mer === "am") tm.start.mer = "pm";
     const hasTime = tm.start || tm.end || tm.by;
     const isArrival = ARRIVAL.test(tm.rest) && !/\b(study|class|gym|band|work|practice)\b/.test(tm.rest);
     const act = isArrival ? null : classify(tm.rest);
@@ -294,13 +309,16 @@ export function parseSchedule(raw, ctx) {
       if (hasTime && tm.dur && pending == null) { pending = { start: tm.start, end: tm.end, by: tm.by, dur: tm.dur }; continue; }
       continue;
     }
-    const it = { kind: "event", title: act.title, cat: act.cat, start: tm.start, end: tm.end, by: null, dur: tm.dur, date };
+    const it = { kind: "event", title: act.title.replace(/\s+(?:the )?next (?:morning|day).*$/i, ""), cat: act.cat, start: tm.start, end: tm.end, by: null, dur: tm.dur, date, overnight };
     if (pending) { it.start = it.start || pending.start; it.end = it.end || pending.end; if (!it.end && pending.by) it.end = pending.by; it.dur = it.dur || pending.dur; pending = null; }
     if (tm.by && !it.end) it.end = tm.by;
     items.push(it);
   }
   const ctxToday = { isToday: date === ctx.today, now: ctx.now };
   resolve(items, ctxToday);
+  for (const it of items) if (it.s != null && it.e != null && it.e < it.s && (it.overnight || it.start?.mer === "pm" && it.end?.mer === "am")) {
+    it.endDate = addDaysStr(it.date, 1); it.e += 1440; it.invalidRange = false;
+  }
   // Fill lengths
   items.forEach(it => {
     if (it.kind !== "event") return;

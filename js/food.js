@@ -274,6 +274,24 @@ export function findItem(q) {
   }
   return null;
 }
+// Pantry-first matching, not invented substitutions.
+export function pantryMatches(input) {
+  const tokens = String(input || "").toLowerCase().split(/[,;\n]+|\band\b/).map(s => s.trim()).filter(Boolean);
+  const found = [], unknown = [];
+  const aliases = { egg: "eggs", "chicken breast": "chicken", "soy sauce": "soy", "spring onions": "scallion", "greek yoghurt": "yogurt", yoghurt: "yogurt", "sweet potato": "sweetpotato", "tomato sauce": "tsauce", prawns: "shrimp" };
+  for (const token of tokens) {
+    const plain = token.replace(/^\d+(?:\.\d+)?\s*(?:g|kg|ml|cans?|pieces?)?\s*/, "").trim();
+    const k = aliases[plain] || Object.keys(ITEMS).find(k => plain === k || plain === k.replace(/s$/, "") || ITEMS[k].n.toLowerCase().split(/[,()]/)[0].trim() === plain);
+    if (k) found.push(k); else unknown.push(token);
+  }
+  const have = [...new Set(found)], blocked = food().prefs?.avoid || [];
+  const matches = RECIPES.filter(r => !r.ing.some(([k]) => blocked.includes(k))).map(r => {
+    const required = r.ing.map(([k]) => k);
+    const available = required.filter(k => have.includes(k)), missing = required.filter(k => !have.includes(k));
+    return { r, available, missing, score: available.length / required.length };
+  }).filter(x => x.available.length).sort((a, b) => b.score - a.score || a.missing.length - b.missing.length || a.r.min - b.r.min).slice(0, 3);
+  return { have, unknown, matches };
+}
 
 // Weekly shopping list from the recipes you picked. Each meal slot has a number of meals a week,
 // shared across the recipes you picked for it. Batch recipes round up to whole batches.

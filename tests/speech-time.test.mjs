@@ -16,6 +16,11 @@ test("every chunk is bounded even without punctuation", () => {
   assert.equal(chunks(text).join(" "), text);
   assert(chunks("x".repeat(1000)).every(c => c.length <= 150));
 });
+test("spoken confirmation dates are dates, not hyphenated numeric ranges", () => {
+  const text = speakable("Meeting on 2026-11-21, 2 PM to 3 PM.");
+  assert.match(text, /Saturday.*21 November 2026/);
+  assert(!text.includes("2026 to 11"));
+});
 test("church and assignment keep their own exact ranges", () => {
   const result = parseSchedule("from 9:30 to 3:30 I have church and then from 4:00 pm to 5:00 pm I have assignment", context);
   assert.deepEqual(result.map(i => [i.cat, i.s, i.e]), [["church",570,930],["study",960,1020]]);

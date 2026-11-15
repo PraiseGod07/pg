@@ -1,5 +1,5 @@
 // Offline-first, three-way cloud sync. Never replace local work with a snapshot.
-import { S, save, adopt, onSave, checkpoint, flush, DEFAULTS } from "./store.js";
+import { S, save, adopt, onSave, checkpoint, flush, DEFAULTS, inDraft } from "./store.js";
 import { mergeState } from "./merge.js";
 import { PG_CLOUD } from "./config.js";
 const cloud = () => (S.dev.cloud = S.dev.cloud || { url: "", token: "", last: 0 });
@@ -36,6 +36,7 @@ async function synchronize() {
     for (let attempt = 0; attempt < 6; attempt++) {
       again = false;
       const st = await api("/state");
+      if (inDraft()) return false;
       const remote = st.data ? content(st.data) : {};
       const local = shareable(), base = cloud().baseline || null;
       if (st.sync !== 2) {
@@ -82,7 +83,7 @@ async function synchronize() {
   }
 }
 export async function push() {
-  if (!on()) return false;
+  if (!on() || inDraft()) return false;
   if (running) { again = true; return running; }
   running = synchronize();
   try { return await running; } finally { running = null; }

@@ -1,5 +1,5 @@
 // Turns parsed items into timetable blocks, fitting flexible tasks into free time.
-import { uid } from "./util.js";
+import { uid, addDays, sayTime } from "./util.js";
 import { DEFAULT_MIN } from "./library.js";
 
 const overlaps = (a, b) => a.start < b.end && b.start < a.end;
@@ -18,6 +18,12 @@ export function firstGap(blocks, from, dur, until = 1440) {
 
 // items: from nlu.parseSchedule. getDay(date) returns {blocks:[]}. Returns {added, updated, unplaced}
 export function placeItems(items, getDay, opts) {
+  items = items.flatMap(it => {
+    if (it.e == null || it.e <= 1440) return [it];
+    const group = uid();
+    return [{ ...it, e: 1440, dur: 1440 - it.s, group, endDate: it.endDate || addDays(it.date, 1) },
+      { ...it, date: it.endDate || addDays(it.date, 1), s: 0, e: it.e - 1440, dur: it.e - 1440, group, continuation: true, endDate: undefined }];
+  });
   const added = [], updated = [], unplaced = [];
   let cursor = null, curDate = null;
   for (const it of items) {
@@ -36,6 +42,8 @@ export function placeItems(items, getDay, opts) {
       if (start == null) { unplaced.push({ title: it.title, cat: it.cat, dur, date: it.date }); continue; }
     }
     if (end == null) end = start + dur;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > 1440)
+      throw new Error(`Nothing saved. ${it.title} needs a valid start and end time.`);
     if (end > 1440) end = 1440;
     // Same activity already at about the same time: update instead of duplicating
     const dupe = day.blocks.find(b => !b.done && (norm(b.title) === norm(it.title) || ((it.cat === "gym" || it.cat === "band") && b.cat === it.cat)) && (overlaps(b, { start, end }) || flex || it.cat === "gym" || it.cat === "band"));
@@ -45,7 +53,11 @@ export function placeItems(items, getDay, opts) {
       cursor = dupe.end;
       continue;
     }
-    const block = { id: uid(), title: it.title, cat: it.cat, start, end, flex, done: false, date: it.date, src: "voice" };
+    const clash = day.blocks.find(b => !b.skipped && !b.studyWindow && overlaps(b, { start, end }));
+    if (clash) throw new Error(`No, sir, this is not feasible. ${it.title} overlaps ${clash.title} on ${it.date}, ${sayTime(Math.max(start, clash.start))} to ${sayTime(Math.min(end, clash.end))}. Which activity or time should change? Nothing saved.`);
+    const block = { id: uid(), title: it.title, cat: it.cat, start, end, flex, done: false, date: it.date, src: "voice",
+      ...(/^(?:assignments?|study|homework)$/i.test(it.title) ? { studyWindow: true } : {}),
+      ...(it.group ? { group: it.group, continuation: !!it.continuation } : {}) };
     day.blocks.push(block);
     added.push(block);
     cursor = end;

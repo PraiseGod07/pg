@@ -1,5 +1,7 @@
 // PG — app controller: views, command handling, reminders.
-import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1, flush } from "./store.js";
+import { S, load, save, day, sortedBlocks, reset, replace, hydrate, importV1, flush, beginDraft, endDraft, inDraft } from "./store.js";
+import { changes, describe, approval, applyProposal, validateChanges, reconcileWindows } from "./commands.js";
+import { calendarDate } from "./dates.js";
 import { speakable, isNatural } from "./speech.js";
 import { CATS, EXERCISES, SPLITS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
 import { intent, parseSchedule, matchBlock, parseClock, normalize, isEndCall } from "./nlu.js";
@@ -33,20 +35,30 @@ load();
 C.syncCustom();
 BS.bass(); B.bible(); M.notes(); LN.tracks();
 const addr = () => S.profile.address || "sir";
-const hello = () => `Hi ${addr()}. How may I help you?`;
+const hello = () => `Hi, ${addr()}. How can I help you today?`;
+function startListening() {
+  voice.call = true;
+  // First morning start only, stored per device without exposing private settings.
+  if (nowMin() < 720 && S.dev.greetedDate !== today()) {
+    S.dev.greetedDate = today(); save(true);
+    const g = hello(); pushMsg("pg", g); voice.say(g, () => voice.listen("command"));
+  } else voice.listen("command");
+}
 const lc = s => s ? s.charAt(0).toLowerCase() + s.slice(1) : s;
 const ucf = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 const pickOne = a => a[Math.floor(Math.random() * a.length)];
 
 // ================= Voice wiring =================
 const voice = new Voice({
+  awaitingConfirmation: () => !!ui.proposal && !ui.correcting,
   onState: m => paintVoice(m),
   onHeard: t => { const el = $("#heard"); el.textContent = t ? "“" + t + "”" : ""; el.scrollTop = el.scrollHeight; paintReplay(t); },
   onWake: () => { openAssistant(true); $("#heard").textContent = ""; },
-  onGreet: () => { const g = hello(); pushMsg("pg", g); voice.say(g, () => voice.listen("command")); },
-  onHangUp: () => { ui.pending = null; $("#heard").textContent = ""; paintVoice(voice.mode); },
+  onGreet: () => startListening(),
+  onHangUp: () => { $("#heard").textContent = ""; paintVoice(voice.mode); },
   onCommand: text => { ui.checkedIn = false; $("#heard").textContent = ""; run(text, true); },
   onError: code => {
+    if (code === "repeated") { toast("Repeated audio detected. Tap Edit transcript to check or restore intentional repetition, then Done speaking."); return; }
     if (code === "blocked" && S.voice.handsFree) { needTap(); return; }
     const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found.", speech: "Audio stopped. Tap Hear reply.", hearing: "One audio segment could not be transcribed. Your earlier words are still here. Repeat the missing part, then tap Done speaking." }[code];
     if (msg) toast(msg);
@@ -72,6 +84,7 @@ function paintVoice(m) {
   $("#listenPill").textContent = onCall ? "On a call with PG" : m === "wake" ? "Listening for “Hi PG”" : m === "command" ? "Listening…" : "";
   $("#endCall").hidden = !onCall;
   $("#finishTurn").hidden = m !== "command";
+  $("#editTranscript").hidden = m !== "command";
   $("#finishTurn").disabled = !!voice.tapFinishing;
   if (m === "command" && voice.tapFinishing) setStatus("Finishing your words…");
   paintReplay();
@@ -123,6 +136,8 @@ function paintSuggest() {
 }
 // speakable() lives in speech.js
 function reply(text, opts = {}) {
+  if (ui.draftReplies) { ui.draftReplies.push({ text, opts }); return; }
+  if (!text) { voice.afterReply(); return; }
   if (ui.quiet) { ui.quiet.push(text); if (opts.view) go(opts.view, opts.date); return; }
   // He told PG new plans: remind him of plans he already had and may have forgotten.
   if (ui.turn && !ui.turn.used && !opts.then) {
@@ -144,6 +159,10 @@ function reply(text, opts = {}) {
 async function run(text, spoken = false) {
   text = String(text || "").trim();
   if (!text) { voice.afterReply(); return; }
+  if (ui.running) { toast("Please finish the current command first."); return; }
+  ui.running = true;
+  $("#composer").setAttribute("aria-busy", "true");
+  $("#composer .send").disabled = true;
   // Fix misheard or mistyped words from the words around them ("end the corner" -> "end the call").
   const fixed = HR.clean(text);
   pushMsg("me", fixed);
@@ -151,9 +170,80 @@ async function run(text, spoken = false) {
   text = fixed;
   const dates = [...Array(8)].map((_, i) => addDays(today(), i));
   ui.turn = { before: new Set(dates.flatMap(d => (S.days[d]?.blocks || []).map(b => b.id))), dates };
-  try { await handle(text, spoken); }
-  catch (e) { console.error(e); reply("Sorry, something went wrong. Please try that again."); }
-  finally { ui.turn = null; await flush(); if (SY.on()) SY.push(); }
+  try {
+    if (ui.proposal && !ui.correcting) {
+      const answer = approval(text);
+      if (answer === "yes") {
+        const p = ui.proposal;
+        applyProposal(S, p); save(); await flush();
+        const addedTasks = p.changes.filter(c => c.path.join(".") === "school.tasks")
+          .flatMap(c => (c.after || []).filter(t => !(c.before || []).some(b => b.id === t.id)));
+        if (addedTasks.length === 1) ui.lastAddedTask = addedTasks[0].id;
+        // The gate applies the stored records, never reruns the parser or model.
+        ui.proposal = null; ui.pending = p.nextPending; ui.correcting = false;
+        C.syncCustom(); render();
+        pushMsg("pg", "Saved. " + p.summary.join("; ") + ".");
+        if (p.nextPending && p.followup) return reply(p.followup);
+        await chime("success"); voice.afterReply(); return;
+      }
+      if (answer === "no") {
+        ui.correcting = true;
+        return reply("Nothing saved. What should I change? Say cancel to discard it.");
+      }
+      if (isEndCall(normalize(text))) return endCall();
+      return reply("Please confirm again. Say yes if the details are correct, or no if they are wrong.");
+    }
+    if (/^(?:cancel|never mind|nevermind)$/i.test(text.trim()) && ui.proposal) {
+      ui.proposal = null; ui.correcting = false; ui.pending = null;
+      pushMsg("pg", "Cancelled. Nothing saved."); voice.afterReply(); return;
+    }
+    if (!ui.proposal && !ui.pending && approval(text)) {
+      return reply("There is no change awaiting confirmation. What would you like to do?");
+    }
+    // A corrected command is evaluated against the last approved data, not a saved preview.
+    const correcting = ui.correcting ? ui.proposal : null;
+    if (correcting) {
+      ui.pending = null;
+      // Keep the original instruction in context for a model-assisted partial correction.
+      ui.correctionContext = `Original request: ${correcting.original}. Rejected preview: ${correcting.summary.join("; ")}. Correction: `;
+    }
+    const before = JSON.parse(JSON.stringify(S));
+    const oldPending = ui.pending;
+    ui.draftReplies = []; beginDraft();
+    let after, replies;
+    try {
+      if (correcting) applyProposal(S, correcting);
+      await handle(text, spoken);
+      after = endDraft(); replies = ui.draftReplies;
+    } catch (e) {
+      if (inDraft()) endDraft();
+      ui.pending = oldPending;
+      throw e;
+    } finally { ui.draftReplies = null; ui.correctionContext = null; C.syncCustom(); }
+    reconcileWindows(before, after);
+    const delta = changes(before, after);
+    try { validateChanges(before, after, delta); }
+    catch (error) { ui.pending = oldPending; throw error; }
+    render();
+    if (delta.length) {
+      const proposal = { id: uid(), original: text, changes: delta, nextPending: ui.pending,
+        followup: replies.flatMap(r => r.text.match(/\b(?:What|When|Which|How)\b[^?]*\?/g) || []).at(-1) };
+      proposal.summary = describe(proposal);
+      if (proposal.summary.length > 70) throw new Error("That change is too large to confirm safely. Please split it into smaller commands.");
+      ui.proposal = proposal; ui.correcting = false; ui.pending = null;
+      return reply("Please confirm the following. " + proposal.summary.join("; ") + ". Say yes if correct, or no if wrong.", { full: true });
+    }
+    // No mutation: questions and clarification keep their normal spoken reply.
+    if (correcting) { ui.proposal = correcting; ui.correcting = true; }
+    for (const r of replies) reply(r.text, r.opts);
+    if (!replies.length) voice.afterReply();
+  }
+  catch (e) { console.error(e); reply(e.message || "Nothing saved. Please give the details again."); }
+  finally {
+    ui.running = false; ui.turn = null;
+    $("#composer").setAttribute("aria-busy", "false"); $("#composer .send").disabled = false;
+    await flush(); if (SY.on()) SY.push();
+  }
 }
 
 const blocksOf = d => sortedBlocks(d);
@@ -282,6 +372,32 @@ function askLine(it) {
 function needsAsk(items) { return items.find(i => i.kind === "event" && !i.ok && (missingOf(i).time || missingOf(i).len)); }
 
 async function followUp(p, bare, text, spoken) {
+  if (p.type === "assignment-slot") {
+    if (/^(?:cancel|never mind)$/i.test(text.trim())) return reply("Cancelled. Nothing saved."), true;
+    const tasks = p.tasks;
+    if (/^(?:what|show|tell|add|delete|remove|move|gym|church|cook)\b/i.test(text)) return false;
+    const timeCue = /\b(?:from|at|to|until)\s+\d|\d{1,2}(?::\d\d)?\s*(?:am|pm)\b/i.test(normalize(text));
+    if (!timeCue) {
+      if (/^(?:what|show|tell|add|delete|remove|move|gym|church)\b/i.test(text)) return false;
+      ui.pending = p;
+      return reply(`What day, start time and end time should I put ${tasks.map(t => t.title).join("; ")} on the timetable? Nothing saved yet.`), true;
+    }
+    const input = tasks.length === 1 ? `assignment ${text}` : text;
+    const items = parseSchedule(input, { date: today(), today: today(), now: nowMin() });
+    if (tasks.length === 1) for (const item of items) if (item.kind === "event") { item.title = tasks[0].title; item.cat = "study"; }
+    const gap = needsAsk(items);
+    if (gap) { ui.pending = p; return reply(askLine(gap)), true; }
+    const events = items.filter(i => i.kind === "event");
+    if (!events.length || tasks.some(t => !events.some(i => i.title.toLowerCase() === t.title.toLowerCase()))) {
+      ui.pending = p;
+      return reply("Please name each assignment with its day, start time and end time. Nothing saved yet."), true;
+    }
+    const added = SC.add(tasks);
+    await reviewSchedule(items, spoken);
+    for (const task of added) for (const value of Object.values(S.days))
+      for (const b of value.blocks) if (b.title.toLowerCase() === task.title.toLowerCase()) b.tid = task.id;
+    return true;
+  }
   if (p.type === "schedule-review") {
     if (YES.test(bare)) return await commitSchedule(p.items, spoken, p.replace || []), true;
     if (NO.test(bare) || /^(?:cancel|never ?mind|stop)$/.test(bare)) return reply("Nothing changed, sir. Please give me the corrected activity, day, start and end time."), true;
@@ -399,6 +515,24 @@ function schoolReply(res, head, spoken) { render(); return reply((head ? head + 
 
 async function handle(text, spoken) {
   const bare0 = normalize(text).replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
+  const pantry = text.match(/^(?:please )?(?:make|generate|build|give me|find)(?: me)? (?:a |some )?recipes? (?:with|using|from) (.+)$/i)
+    || text.match(/^(?:what can i (?:cook|make) with|i have these ingredients[: ]+)\s*(.+)$/i);
+  if (pantry) {
+    ui.pantryInput = pantry[1]; ui.pantryResult = F.pantryMatches(pantry[1]); ui.gymTab = "food"; go("gym");
+    const r = ui.pantryResult;
+    return reply(r.matches.length ? `Recipe matches: ${r.matches.map(x => `${x.r.t}. Still needed: ${x.missing.map(k => F.ITEMS[k].n).join(", ") || "nothing"}`).join(". ")}. Full steps are in Food.`
+      : "I don't have a supported recipe for those ingredients yet. Please use the ingredient names shown in Food.");
+  }
+  if (/\b(?:today'?s? (?:bible )?verse|verse (?:for today|of the day)|give me (?:a |the )?(?:bible )?verse)\b/.test(bare0)) {
+    const v = D.verse(); return reply(`${v.ref}: ${v.text}`, { full: true });
+  }
+  const dayQuery = bare0.match(/^(?:pg )?(?:what do i have|what is on my (?:timetable|schedule)|read my (?:timetable|schedule))(?: (?:on|for))? (today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/);
+  if (dayQuery) {
+    const dd = parseSchedule(`Meeting on ${dayQuery[1]} at 12 pm for 1 minute`, { date: today(), today: today(), now: nowMin() })[0]?.date || today();
+    const entries = blocksOf(dd).filter(b => !b.skipped);
+    return reply(entries.length ? `${addr()}, on ${fmtDay(dd, true)} you have ` + entries.map(b => `${b.title} from ${sayTime(b.start)} to ${sayTime(b.end)}${b.continuation ? ", continuing from yesterday" : ""}${b.done ? ", completed" : ""}`).join("; ") + "."
+      : `${addr()}, nothing is scheduled on ${fmtDay(dd, true)}.`, { view: "today", date: dd, full: true });
+  }
   if (/^(?:pg )?(?:what(?:'s| is) (?:the )?(?:time|date|day)(?: (?:is it|today|now|right now))?|what day is (?:it|today)|what(?:'s| is) today'?s date)$/.test(bare0)) {
     const clock = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Hong_Kong", hour: "numeric", minute: "2-digit", hour12: true }).format(new Date());
     return reply(`${addr()}, it's ${fmtDay(today(), true)}, ${clock}, Hong Kong time.`);
@@ -497,9 +631,7 @@ async function handle(text, spoken) {
   }
   switch (it.type) {
     case "greet": {
-      const g = hello(); pushMsg("pg", g);
-      if (S.voice.speak !== false) voice.say(g, () => voice.supported && spoken !== "typed" ? voice.listen("command") : voice.afterReply());
-      return;
+      return reply(hello());
     }
     case "hush": return reply(voice.call ? pickOne(["Sure, go ahead.", "Okay, I'm listening.", `Go ahead, ${addr()}.`]) : "Okay.", { then: () => voice.call ? voice.listen("command") : voice.afterReply() });
     case "dismiss": return reply(it.bye || voice.call ? pickOne([`Okay, ${addr()}. I'm here if you need me.`, `Talk soon, ${addr()}.`, `Okay. Just say Hi PG when you need me.`]) : "Okay.", { then: () => voice.call ? voice.hangUp() : voice.afterReply() });
@@ -525,9 +657,9 @@ async function handle(text, spoken) {
     case "clear": {
       const dd = it.tomorrow ? addDays(today(), 1) : d;
       const snap = snapshot(dd);
-      day(dd).blocks = []; save(); render();
+      day(dd).blocks = day(dd).blocks.filter(b => b.routine); save(); render();
       undoable(snap, `${fmtDay(dd)} cleared.`);
-      return reply(`Done. ${fmtDay(dd)} is clear.`, { view: "today", date: dd, spoken });
+      return reply(`Cleared the one-off timetable entries for ${fmtDay(dd)}. Your daily routines remain.`, { view: "today", date: dd, spoken });
     }
     case "delete": case "move": case "shift": case "resize": case "done": {
       const pool = blocksOf(d);
@@ -669,17 +801,22 @@ async function handle(text, spoken) {
     case "review": return doReport(spoken);
     // ---- School ----
     case "school_add": {
+      if (SC.nonAcademic(text)) return scheduleFrom(text, spoken, true);
       const list = SC.parse(text);
       if (!list.length) return scheduleFrom(text, spoken);
-      const added = SC.add(list);
-      const nodate = added.find(t => !t.due);
-      if (nodate) ui.pending = { type: "due", tid: nodate.id };
-      // Due day but no time: ask instead of guessing
-      const notime = !nodate && added.length === 1 && added[0].due && added[0].dueMin == null && added[0].kind !== "exam" && added[0].kind !== "quiz" ? added[0] : null;
-      if (notime) { ui.pending = { type: "duetime", tid: notime.id }; render(); return reply(`Saved ${notime.title}, due ${SC.fmt.dueText(notime)}. No study times added. What time is it due? If there's no set time, just say no.`, { view: "school", spoken }); }
-      return reply(`Saved ${added.map(t => t.title + (t.due ? `, due ${SC.fmt.dueText(t)}` : "")).join("; ")} in School. No study times added.${nodate ? ` When is ${nodate.title} due?` : " Tell me the days and times you want to study."}`, { view: "school", spoken });
+      const slotItems = parseSchedule(text.replace(/\b(?:due|deadline|submit|hand in)\b.*$/i, ""), { date: today(), today: today(), now: nowMin() });
+      const slotEvents = slotItems.filter(i => i.kind === "event");
+      if (list.length === 1 && slotEvents.length === 1 && slotEvents[0].s != null && slotEvents[0].e != null && !needsAsk(slotItems)) {
+        slotEvents[0].title = list[0].title; slotEvents[0].cat = "study";
+        SC.add(list); return reviewSchedule(slotItems, spoken);
+      }
+      ui.pending = { type: "assignment-slot", tasks: list };
+      return reply(`What day, start time and end time should I put ${list.map(t => t.title).join("; ")} on the timetable? I'll add it to both School and the timetable after you confirm. Nothing saved yet.`, { spoken });
     }
-    case "school_plan": return schoolReply(SC.plan(), "", spoken);
+    case "school_plan": {
+      openWeekPlanner();
+      return reply("Which days and study windows should I use, how many minutes does each subject need, and how long should the work sessions and breaks be? The planner is open. Fixed appointments stay in place.");
+    }
     case "school_info": return reply(SC.brief(), { view: "school", spoken });
     case "school_done": {
       const t = SC.find(it.target);
@@ -693,9 +830,9 @@ async function handle(text, spoken) {
       const t = SC.tasks().find(x => x.id === ui.lastTask) || SC.tasks().filter(x => x.done).sort((a, b) => (b.doneOn || "").localeCompare(a.doneOn || "")).at(0);
       return tookReply(t, it.min, spoken);
     }
-    case "school_cap": SC.setCap(it.min); return schoolReply(SC.plan(), `Okay, at most ${sayDur(SC.sch().cap)} of study a day.`, spoken);
-    case "school_window": { const m = parseClock(it.time); SC.setWindow(m, it.we ? "we" : "wk"); return schoolReply(SC.plan(), `Got it. I'll plan study after ${sayTime(m)}${it.we ? " on weekends" : " on school days"}.`, spoken); }
-    case "school_pref": SC.setPref(it.p); return schoolReply(SC.plan(), `Noted, you focus best in the ${it.p}.`, spoken);
+    case "school_cap": SC.setCap(it.min); return reply(`Study limit: ${sayDur(SC.sch().cap)} per day. No timetable changes.`);
+    case "school_window": { const m = parseClock(it.time); SC.setWindow(m, it.we ? "we" : "wk"); return reply(`Study availability starts at ${sayTime(m)}${it.we ? " on weekends" : " on school days"}. No timetable changes.`); }
+    case "school_pref": SC.setPref(it.p); return reply(`Study preference: ${it.p}. No timetable changes.`);
     case "realistic": {
       const dd = it.tomorrow ? addDays(today(), 1) : d;
       const issues = SC.check(dd);
@@ -798,7 +935,7 @@ async function reviewSchedule(items, spoken, replacing = []) {
     && name(b.title) === name(i.title) && (b.start !== i.s || b.end !== (i.e ?? i.s + i.dur))).map(b => ({ id: b.id, date: i.date })));
   const inferredReplacement = alternatives.some(b => !replacing.some(old => old.id === b.id));
   replacing = [...new Map([...replacing, ...alternatives].map(b => [b.id, b])).values()];
-  if (inferredReplacement || events.some(i => i.ambiguous) || spoken && spoken !== "typed") {
+  if (!inDraft() && (inferredReplacement || events.some(i => i.ambiguous) || spoken && spoken !== "typed")) {
     ui.pending = { type: "schedule-review", items, replace: replacing };
     const previous = replacing.map(x => { const b = blocksOf(x.date).find(b => b.id === x.id); return b && { ...b, date: x.date }; }).filter(Boolean);
     const replaceLine = previous.length ? ` This would replace ${previous.map(b => `${b.title} at ${sayTime(b.start)} on ${fmtDay(b.date, true)}`).join("; ")}.` : "";
@@ -812,6 +949,10 @@ async function commitSchedule(items, spoken, replacing = []) {
   const snaps = dates.map(snapshot);
   for (const old of replacing) day(old.date).blocks = day(old.date).blocks.filter(b => b.id !== old.id);
   const res = placeItems(items, day, { today: today(), now: nowMin(), dayStart: S.profile.dayStart, dayEnd: S.profile.dayEnd });
+  for (const b of [...res.added, ...res.updated]) if (SC.academic(b.title)) {
+    const [task] = SC.add([{ title: b.title, kind: "assignment", due: null, dueMin: null, est: null }]);
+    b.tid = task.id;
+  }
   dates.forEach(renameCoachBlocks);
   res.unplaced.forEach(u => S.inbox.push({ id: uid(), title: u.title, cat: u.cat, dur: u.dur, date: u.date }));
   // "Learn X" blocks get a learning plan
@@ -978,6 +1119,18 @@ Reply ONLY with JSON: {"say": "one short spoken sentence saying what you did, ca
   return r;
 }
 async function aiChat(text, notes = []) {
+  const before = inDraft() ? JSON.parse(JSON.stringify(S)) : null;
+  try { return await aiChatImpl(text, notes); }
+  catch (error) {
+    if (before && inDraft()) {
+      for (const k of Object.keys(S)) delete S[k];
+      Object.assign(S, before); C.syncCustom();
+    }
+    throw error;
+  }
+}
+async function aiChatImpl(text, notes = []) {
+  if (ui.correctionContext) text = ui.correctionContext + text;
   // Weather and obviously live questions go to the internet first, so the answer is fast and real.
   let web = null;
   if (WEB.WEATHER_RE.test(text)) { setStatus("Checking the weather…"); web = await WEB.weather(text).catch(e => (console.warn(e), null)); }
@@ -986,12 +1139,24 @@ async function aiChat(text, notes = []) {
   try { r = await aiTalk(text, notes, web, !web && WEB.LIVE_RE.test(text) && !ACTION.test(text)); }
   catch (e) { if (web?.spoken) { ui.sources = web.sources; return web.spoken; } throw e; }   // AI down: still give the live weather
   ui.sources = r.sources?.length && r.say ? r.sources : null;
-  for (const op of r.ops || []) if (op.op === "add_exercise") {
+  for (const op of r.ops || []) if (op.op === "add_exercise" || op.op === "attach_video") {
     // Discard invented IDs. Keep only a user-supplied URL or a validated lookup.
     const supplied = text.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/))([\w-]{11})/i)?.[1];
-    const video = await WEB.exerciseVideo(op.name, supplied).catch(() => null);
+    const video = await WEB.exerciseVideo(op.name || op.exercise, supplied).catch(() => null);
     delete op.videoId;
+    if (op.op === "attach_video" && !video) throw new Error("I couldn't check that YouTube video. Nothing saved. Please try a different video.");
     if (video) { op.videoId = video.id; op.videoBy = video.by; }
+  }
+  const explicit = parseSchedule(text, { date: today(), today: today(), now: nowMin() }).filter(x => x.kind === "event" && x.s != null && x.e != null);
+  const proposed = (r.ops || []).filter(o => o.op === "add_block");
+  // Explicit user ranges are constraints, not suggestions to the model.
+  if (proposed.length && explicit.length) {
+    for (const it of explicit) {
+      const candidate = proposed.find(o => String(o.title).toLowerCase() === it.title.toLowerCase());
+      const min = v => typeof v === "number" ? v : /^(\d{1,2}):(\d{2})$/.test(String(v)) ? +String(v).split(":")[0] * 60 + +String(v).split(":")[1] : null;
+      if (!candidate || candidate.date !== it.date || min(candidate.start) !== it.s || min(candidate.end) !== it.e)
+        throw new Error(`Nothing saved. The generated plan did not preserve ${it.title} on ${it.date}, ${sayTime(it.s)} to ${sayTime(it.e)}. Please give that timetable directly.`);
+    }
   }
   return finishTalk(r);
 }
@@ -999,7 +1164,7 @@ async function aiChat(text, notes = []) {
 async function finishTalk(r, confirmed = false) {
   const calendar = (r.ops || []).filter(o => /block|clear_day|move_day|plan_week/.test(o.op || "") || /^(?:days|school)(?:\.|$)/.test(o.path || ""));
   const commands = (r.do || []).filter(c => /\b(?:at|from|to|until|schedule|plan|timetable|study|assignment|church|move|remove|delete)\b|\d/.test(c));
-  if (!confirmed && (calendar.length || commands.length)) {
+  if (!inDraft() && !confirmed && (calendar.length || commands.length)) {
     const summary = calendar.map(o => {
       const old = Object.values(S.days).flatMap(d => d.blocks || []).find(b => b.id === o.id);
       const time = x => x == null ? "" : typeof x === "number" ? sayTime(x) : x;
@@ -1011,7 +1176,7 @@ async function finishTalk(r, confirmed = false) {
     ui.pending = { type: "ai-calendar", r };
     return `Not saved yet, ${addr()}. Please check: ${summary.join("; ")}. Is that correct?`;
   }
-  r.remember.forEach(f => { if (!M.facts().some(n => n.text.toLowerCase() === f.toLowerCase())) M.add(f, { folder: "about" }); });
+  (r.remember || []).forEach(f => { if (!M.facts().some(n => n.text.toLowerCase() === f.toLowerCase())) M.add(f, { folder: "about" }); });
   const done = [];
   if (r.ops?.length) {
     const lines = AG.apply(r.ops, { onDone: undo => toast("PG made changes.", "Undo", () => { undo(); C.syncCustom(); render(); toast("Undone."); }) });
@@ -1029,8 +1194,9 @@ async function finishTalk(r, confirmed = false) {
     done.push(...lines);
   }
   for (const c of r.do) {
-    ui.quiet = []; try { await handle(c, false); } catch (e) { console.warn(e); }
-    done.push(...ui.quiet); ui.quiet = null;
+    ui.quiet = [];
+    try { await handle(c, false); done.push(...ui.quiet); }
+    finally { ui.quiet = null; }
   }
   if (r.do.length) render();
   r.do = r.do || [];
@@ -1060,10 +1226,12 @@ const REPL_RES = [
 const TIME_ONLY = /^(?:at |to |for )?\d{1,2}(?::\d\d)?\s?(?:am|pm)?(?: (?:today|tomorrow|tonight))?$/;
 const EDIT_CUE = /\b(?:delete|remove|cancel|drop|scrap|erase|skip|ditch|take (?:out|off|away)|get rid of|forget about|no more|replace|swap|instead of|rather than|not (?:going|gonna|doing)|won't|can't|cannot|don't (?:want|wanna|need)|take .+ off|clear)\b/;
 function dayOf(t) {
+  const date = calendarDate(t, today());
+  if (date) return { d: date, x: true };
   if (/\btomorrow\b/.test(t)) return { d: addDays(today(), 1), x: true };
   if (/\b(?:today|tonight|this (?:morning|afternoon|evening))\b/.test(t)) return { d: today(), x: true };
   const w = WD.findIndex(n => new RegExp("\\b" + n + "\\b").test(t));
-  if (w >= 0) { const n = new Date(today() + "T12:00").getDay(); return { d: addDays(today(), ((w - n + 7) % 7) || 7), x: true }; }
+  if (w >= 0) { const n = new Date(today() + "T12:00").getDay(); return { d: addDays(today(), ((w - n + 7) % 7)), x: true }; }
   return { d: today(), x: false };
 }
 function clauseTime(t) { const m = t.match(/\b(\d{1,2})(?::(\d\d))?\s?(am|pm|o'?clock)\b|\bat (\d{1,2})(?::(\d\d))?\b/); if (!m) return null; return parseClock((m[1] || m[4]) + ":" + (m[2] || m[5] || "00") + (/[ap]m/.test(m[3] || "") ? " " + m[3] : "")); }
@@ -1114,6 +1282,31 @@ function exerciseCmd(c) {
 }
 async function localEdit(text, spoken) {
   const low = normalize(text).replace(/[^a-z0-9: ',.;-]/g, " ").replace(/\s+/g, " ").trim();
+  const schoolDelete = low.match(/^(?:please )?(?:delete|remove|erase|drop) (.+)$/);
+  if (schoolDelete && /\b(?:assignment|homework|essay|report|project|school)\b/.test(schoolDelete[1])) {
+    const query = schoolDelete[1], recent = /\b(?:just added|last added|just saved)\b/.test(query);
+    const needle = query.replace(/\b(?:the|my|school|assignment|homework|that|i|just|last|added|saved|from)\b/g, " ").replace(/\s+/g, " ").trim();
+    const tasks = SC.tasks();
+    const candidates = recent ? tasks.filter(t => t.id === ui.lastAddedTask)
+      : tasks.filter(t => needle && t.title.toLowerCase().includes(needle));
+    if (candidates.length !== 1) {
+      return reply(candidates.length > 1 ? `Which School assignment should I remove: ${candidates.map(t => t.title).join("; ")}?`
+        : "Which exact School assignment should I remove? Nothing changed.", { spoken }), true;
+    }
+    SC.remove(candidates[0].id); ui.pending = null;
+    return reply(`Remove ${candidates[0].title} from School and its future study sessions.`, { view: "school", spoken }), true;
+  }
+  const move = low.match(/^(?:please )?(?:move|reschedule|change) (?:the |my )?(.+?) to (.+)$/);
+  if (move && !/\b(?:timetable|schedule|everything)\b/.test(move[1])) {
+    const tg = targets(move[1]), dest = move[2];
+    const date = calendarDate(dest, today());
+    const clockText = dest.match(/\b\d{1,2}(?::\d\d)?\s*(?:am|pm)\b|\bat \d{1,2}(?::\d\d)?\b/)?.[0]?.replace(/^at /, "");
+    if (tg.list.length === 1 && (date || clockText)) {
+      const b = tg.list[0], start = clockText ? parseClock(clockText) : b.start;
+      const lines = AG.apply([{ op: "update_block", id: b.id, date: date || tg.d, start, end: start + b.end - b.start }]);
+      return reply(lines.join(" "), { view: "today", date: date || tg.d, spoken }), true;
+    }
+  }
   // Whole-day moves are atomic and never routed through the add-item parser.
   if (/\b(?:move|shift|transfer|reschedule)\b/.test(low) && /\b(?:schedule|timetable|everything|all (?:the |my )?(?:items|things|blocks))\b/.test(low)) {
     const m = low.match(/\bfrom (today|tomorrow|\d{4}-\d{2}-\d{2}) (?:and |over )?(?:to|into|onto) (today|tomorrow|\d{4}-\d{2}-\d{2})\b/)
@@ -1191,9 +1384,9 @@ async function localEdit(text, spoken) {
   if (AI.on() && !ui.quiet && said.some(x => /^I couldn't find/.test(x))) { Object.values(snaps).forEach(sn => { day(sn.d).blocks = sn.blocks; }); return false; }
   for (const a of adds) {
     ui.quiet = []; ui.editing = true;
-    try { await handle(a, false); } catch (e) { console.warn(e); }
-    finally { ui.editing = false; }
-    said.push(...ui.quiet); ui.quiet = null; acted = true;
+    try { await handle(a, false); said.push(...ui.quiet); }
+    finally { ui.editing = false; ui.quiet = null; }
+    acted = true;
   }
   save(); render();
   const list = Object.values(snaps);
@@ -1224,6 +1417,7 @@ function factList() {
 }
 function syncFacts() { try { M.syncFacts(factList()); } catch (e) { console.warn(e); } }
 function render() {
+  if (inDraft()) return;
   const oldWeek = $(".week-scroll");
   const scroll = oldWeek ? { week: oldWeek.dataset.week, x: oldWeek.scrollLeft, y: oldWeek.scrollTop } : null;
   syncFacts();
@@ -1248,6 +1442,7 @@ function viewToday() {
     ${isT ? "" : `<button class="chip" data-act="day" data-n="0">Today</button>`}
     <button class="icon-btn" data-act="day" data-n="1" aria-label="Next day"><svg><use href="#i-right"/></svg></button></div></div>
     <h1 class="title">${isT ? `${greeting()}, <em>${esc(addr())}</em>.` : esc(fmtDay(d))}</h1>`;
+  if (isT) { const v = D.verse(); h += `<details class="daily-verse"><summary>Today's verse · ${esc(v.ref)}</summary><p>${esc(v.text)}</p><button class="btn sm" data-say="Read today's verse">Hear verse</button></details>`; }
   h += weeklyTable(d);
   if (cur) {
     const pct = Math.round((n - cur.start) / (cur.end - cur.start) * 100);
@@ -1389,12 +1584,23 @@ function viewFood() {
     <div class="macros"><div><b class="tnum">${F.perMeal()} g</b><span>protein a meal</span></div><div><b class="tnum">${F.fiberTarget()} g</b><span>fiber a day</span></div></div>
     <form class="row kg-form" data-form="kg"><span class="faint">Your weight</span><input class="input tnum" name="kg" type="number" inputmode="decimal" min="30" max="250" step="0.5" placeholder="kg" value="${f.kg || ""}" aria-label="Weight in kg"><span class="faint">kg</span><button class="btn sm">Save</button></form>
     <h2 class="sec"><span>Today</span></h2>`;
+  h += pantryBuilder();
   h += ms.map(m => recipeCard(m.r, m.when)).join("");
   h += `<p class="note">These meals give about ${F.sum(ms, "p")} g of protein and ${F.sum(ms, "f")} g of fiber.</p>`;
   h += `<h2 class="sec"><span>Know this</span></h2><div class="card list tips">${F.TIPS.map(t => `<details class="tip" ${ui.openTip === t.k ? "open" : ""}><summary>${esc(t.t)}</summary><p>${esc(t.d())}</p><span class="faint tip-src">${esc(t.src)}</span></details>`).join("")}</div>`;
   const inToday = ms.some(m => m.r.k === ui.openRec);
   h += `<details class="fold" ${ui.openRec && !inToday ? "open" : ""}><summary>All recipes</summary>${F.RECIPES.map(r => recipeCard(r)).join("")}</details>`;
   return h;
+}
+function pantryBuilder() {
+  const result = ui.pantryResult;
+  return `<section class="card pantry-builder" aria-label="Recipe generator"><h2>What do you have?</h2>
+    <p class="note">Type your ingredients. PG matches recipes and tells you what is missing. Your saved food exclusions are respected.</p>
+    <form data-form="pantry"><label class="field"><span>Ingredients, separated by commas</span><textarea class="input" name="ingredients" rows="2" placeholder="eggs, tomato, tofu, rice" required>${esc(ui.pantryInput || "")}</textarea></label>
+    <button class="btn primary" type="submit">Generate recipes</button></form>
+    ${result ? `<div role="status"><p class="note">${result.have.length ? "Recognised: " + result.have.map(k => esc(F.ITEMS[k].n)).join(", ") : "No supported ingredients found."}${result.unknown.length ? " Not recognised: " + result.unknown.map(esc).join(", ") + "." : ""}</p>
+      ${result.matches.length ? result.matches.map(x => `<div class="pantry-match"><h3>${esc(x.r.t)}</h3><p class="note">You have: ${x.available.map(k => esc(F.ITEMS[k].n)).join(", ")}.<br>Still needed: ${x.missing.map(k => esc(F.ITEMS[k].n)).join(", ") || "nothing"}.</p>
+      ${recipeCard(F.recipe(x.r.k))}</div>`).join("") : "<p class='note'>No recipe match yet. Try ingredients such as chicken, rice, eggs, tomato, tofu or broccoli.</p>"}</div>` : ""}</section>`;
 }
 function viewList() {
   const ls = F.list(), left = ls.filter(x => !x.got).length;
@@ -1591,7 +1797,7 @@ function paintLock() {
   setTimeout(() => el.querySelector(".lock-code")?.focus(), 50);
 }
 SY.init({
-  busy: () => voice.mode !== "off" || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || ""),
+  busy: () => ui.running || inDraft() || voice.mode !== "off" || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || ""),
   changed: () => afterSync(),
   revoked: () => { voice.kill?.(); afterSync(); }
 });
@@ -1814,10 +2020,10 @@ document.addEventListener("submit", e => {
       const result = planWeek({ weekStart: week, start: values.get("from"), end: values.get("until"),
         focusMinutes: +values.get("focus"), breakMinutes: +values.get("rest"), tasks });
       $("#sheet").close(); go("today", days.find(d => d >= today()) || week);
-      reply(planSummary(result)); return;
+      pushMsg("pg", planSummary(result)); flush().then(() => chime("success")); return;
     } catch (error) { f.querySelector("[data-week-error]").textContent = error.message; return; }
   }
-  if (f.id === "composer") { e.preventDefault(); const t = $("#ask").value; $("#ask").value = ""; voice.kill(); run(t, "typed"); return; }
+  if (f.id === "composer") { e.preventDefault(); if (ui.running) return; chime("unlock"); const t = $("#ask").value; $("#ask").value = ""; voice.kill(); run(t, "typed"); return; }
   if (f.dataset.form === "unlock" || f.dataset.form === "cloud") {
     e.preventDefault();
     const code = f.code.value, url = f.url ? f.url.value : PG_CLOUD, btn = f.querySelector("button[type=submit]");
@@ -1847,9 +2053,17 @@ document.addEventListener("submit", e => {
     connectAI(); return;
   }
   if (f.dataset.form === "goal") { e.preventDefault(); const t = f.g.value.trim(); if (t) { D.addGoal(t); openGoals(); render(); } return; }
+  if (f.dataset.form === "pantry") {
+    e.preventDefault(); ui.pantryInput = f.ingredients.value.trim();
+    ui.pantryResult = F.pantryMatches(ui.pantryInput); render(); return;
+  }
+  if (f.dataset.form === "transcript") {
+    e.preventDefault(); const draft = f.transcript.value.trim(); $("#sheet").close();
+    voice.duplicateWarning = false; voice.listen("command", false, draft); return;
+  }
   if (f.dataset.form === "song") { e.preventDefault(); const n = f.song.value.trim(); if (n) { C.addSong(n); render(); } return; }
   if (f.dataset.form === "note") { e.preventDefault(); const t = f.t.value.trim(); if (t) { const n = M.add(t); ui.folder = "all"; ui.q = ""; render(); toast(`Saved to ${M.FOLDERS[n.folder].label}.`); } return; }
-  if (f.dataset.form === "task") { e.preventDefault(); const t = f.t.value.trim(); if (!t) return; const list = SC.parse(/\b(?:essay|report|test|exam|quiz|project|presentation|homework|assignment|paper|lab|reading|worksheet)\b/i.test(t) ? t : t + " assignment"); if (!list.length) { toast("Try: History essay due Friday 5pm."); return; } const added = SC.add(list); render(); toast(added.some(x => !x.due) ? "Saved in School. When is it due? Tell PG." : "Saved in School. No study times added."); return; }
+  if (f.dataset.form === "task") { e.preventDefault(); const t = f.t.value.trim(); if (!t || ui.running) return; const input = /\b(?:essay|report|test|exam|quiz|project|presentation|homework|assignment|paper|lab|reading|worksheet)\b/i.test(t) ? t : t + " assignment"; openAssistant(); run("Add " + input, "typed"); return; }
   if (f.dataset.form === "kg") { e.preventDefault(); const kg = +f.kg.value; if (kg > 0) { const t = F.setWeight(kg); render(); toast(`Target: ${t} g of protein a day.`); } return; }
   if (f.dataset.form === "shop") { e.preventDefault(); const t = f.t.value.trim(); if (t) { F.add(t); render(); $("[data-form=shop] input")?.focus(); } return; }
   if (f.dataset.form === "bible-plan") { e.preventDefault(); B.setPlan(+f.book.value, +f.max.value); renameCoachBlocks(today()); render(); toast(`Reading ${B.stats().book}.`); return; }
@@ -1863,10 +2077,17 @@ document.addEventListener("submit", e => {
     e.preventDefault();
     const d = ui.date, fd = new FormData(f);
     const toM = s => { const [h, m] = s.split(":").map(Number); return h * 60 + m; };
-    let s = toM(fd.get("start")), en = toM(fd.get("end")); if (en <= s) en = Math.min(1440, s + 30);
+    const s = toM(fd.get("start")), en = toM(fd.get("end"));
+    if (!Number.isInteger(s) || !Number.isInteger(en) || en <= s) { toast("Choose an end time after the start. For overnight entries, tell PG the next-day finish."); return; }
+    const clash = day(d).blocks.find(b => b.id !== f.dataset.id && !b.skipped && !b.studyWindow && s < b.end && b.start < en);
+    if (clash) { toast(`Nothing saved. This overlaps ${clash.title}. Choose another time.`); return; }
     const data = { title: String(fd.get("title")).trim() || "Untitled", cat: fd.get("cat"), start: s, end: en };
     if (f.dataset.id) Object.assign(day(d).blocks.find(x => x.id === f.dataset.id), data, { flex: false });
     else day(d).blocks.push({ id: uid(), ...data, flex: false, done: false, date: d, src: "manual" });
+    if (SC.academic(data.title)) {
+      const [task] = SC.add([{ title: data.title, kind: "assignment", due: null, dueMin: null, est: null }]);
+      const b = day(d).blocks.find(b => b.id === f.dataset.id) || day(d).blocks.at(-1); b.tid = task.id;
+    }
     save(); $("#sheet").close(); render(); toast(f.dataset.id ? "Saved." : "Added.");
   }
 });
@@ -1875,6 +2096,12 @@ $("#dockOrb").addEventListener("click", () => { openAssistant(); orbTap(); });
 $("#asClose").addEventListener("click", closeAssistant);
 $("#endCall").addEventListener("click", () => { voice.hush(); voice.hangUp(); toast("Call ended."); });
 $("#finishTurn").addEventListener("click", () => { if (voice.mode === "command") voice.tap(); });
+$("#editTranscript").addEventListener("click", () => {
+  const draft = voice.cmd(); voice.kill();
+  const sheet = $("#sheet");
+  sheet.innerHTML = `<h3>Edit transcript</h3><form data-form="transcript"><label class="field"><span>Your words, including any intentional repetition</span><textarea class="input" name="transcript" rows="7">${esc(draft)}</textarea></label><div class="sheet-actions"><button class="btn primary" type="submit">Use transcript</button></div></form>`;
+  sheet.showModal();
+});
 $("#readReply").addEventListener("click", () => {
   const last = S.chat.findLast(x => x.who === "pg");
   if (last) { if (voice.cloud?.ok()) voice.player.unlock(); voice.say(speakable(last.text)); }
@@ -1887,8 +2114,8 @@ function orbTap() {
   if (voice.mode === "off" || voice.mode === "wake") {
     if (S.voice.speak === false) { S.voice.speak = true; save(); }
     voice.call = true; openAssistant(false);
-    const g = hello(); pushMsg("pg", g);
-    if (S.voice.speak !== false) voice.say(g, () => voice.listen("command")); else voice.listen("command");
+    chime("unlock");
+    startListening();
     return;
   }
   voice.tap();
@@ -1909,6 +2136,7 @@ function restoreFrom(file) {
 
 let toastT;
 function toast(msg, action, fn) {
+  if (inDraft()) return;
   const t = $("#toast");
   t.innerHTML = `<span>${esc(msg)}</span>` + (action ? `<button class="btn sm">${esc(action)}</button>` : "");
   t.hidden = false;
@@ -1920,6 +2148,7 @@ function toast(msg, action, fn) {
 const alerted = new Set();
 let lastCalendarDay = today();
 function tick() {
+  if (inDraft() || ui.running) return;
   const n = nowMin(), d = today();
   if (lastCalendarDay !== d) {
     if (ui.date === lastCalendarDay && !ui.pinDate) ui.date = d;

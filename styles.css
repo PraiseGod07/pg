@@ -520,3 +520,12 @@ body.locked>*:not(#lock){visibility:hidden}
 
 .msg .srcs{margin-top:6px;font-size:var(--text-xs);color:var(--color-text-muted, #9a9a9a)}
 .msg .srcs a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+/* Compact additions, preserving PG's existing visual system. */
+.daily-verse { margin: 0 0 var(--space-5); color: var(--muted, #a9b1c1); font-size: var(--text-sm, .875rem); }
+.daily-verse summary { cursor: pointer; padding-block: var(--space-2); }
+.daily-verse p { line-height: 1.6; margin-block: var(--space-3); }
+.pantry-builder { margin-block: var(--space-5); }
+.pantry-builder h2, .pantry-match h3 { font-family: var(--font-body); font-size: var(--text-lg, 1.125rem); margin-bottom: var(--space-3); }
+.pantry-builder textarea { width: 100%; resize: vertical; min-height: 4.5rem; }
+.pantry-match { margin-top: var(--space-5); overflow-wrap: anywhere; }
+.pantry-match .recipe { margin-bottom: 0; }

@@ -4,6 +4,7 @@
 import { S, save, day, sortedBlocks } from "./store.js";
 import { today, addDays, uid, nowMin, sayTime, sayDur, dayName, cap, fmtTime } from "./util.js";
 import { firstGap } from "./scheduler.js";
+import { calendarDate } from "./dates.js";
 
 export const RULES = [
   { t: "Plan more time than you think", d: "People finish school work later than they predict. Students guessed 34 days for a thesis and took 55. PG adds 50% until it learns your real pace.", url: "https://doi.apa.org/doi/10.1037/0022-3514.67.3.366" },
@@ -40,11 +41,16 @@ export function sch() {
   return s;
 }
 export const tasks = () => sch().tasks;
+export const nonAcademic = text => /\b(?:gym|workout|fitness|shopping|grocer(?:y|ies)|cooking|recipes?|meals?|church|bible|prayer|bass|rehearsal|vitamins?)\b/i.test(text)
+  && !/\b(?:school|college|university|course|class|homework|coursework)\b/i.test(text);
+export const academic = text => !nonAcademic(text) && /\b(?:assignments?|homework|coursework|essays?|exams?|quizzes?|worksheets?|lab reports?|school (?:reports?|projects?|presentations?)|(?:math|physics|chemistry|history|english|solidworks|core subject|data analytics).*(?:projects?|reports?|presentations?))\b/i.test(text);
 export const pending = () => tasks().filter(t => !t.done).sort((a, b) => (a.due + pad4(a.dueMin)).localeCompare(b.due + pad4(b.dueMin)));
 const pad4 = n => String(n ?? 1439).padStart(4, "0");
 
 // ---------- Parsing ----------
 function dateIn(s, base) {
+  const explicit = calendarDate(s, base);
+  if (explicit) return explicit;
   let m;
   if (/\b(?:tomorrow|tmr|tmrw)\b/.test(s)) return addDays(base, 1);
   if (/\b(?:today|tonight|this evening)\b/.test(s)) return base;
@@ -95,8 +101,13 @@ export function estIn(s) {
   return Math.round(/^h/.test(m[2]) ? n * 60 : n);
 }
 function kindOf(s) { for (const [re, k, def] of KINDS) if (re.test(s)) return { k, def }; return null; }
-function subjectOf(s) { for (const x of SUBJECTS) if (new RegExp("\\b" + x + "\\b").test(s)) return UPPER[x] || x.replace(/\b\w/g, c => c.toUpperCase()); return null; }
+function subjectOf(s) { for (const x of SUBJECTS) if ((x !== "it" || /\bit\s+(?:assignment|coursework|exam|project|class|subject)\b|\b(?:subject|course)\s+(?:is\s+)?it\b/.test(s)) && new RegExp("\\b" + x + "\\b").test(s)) return UPPER[x] || x.replace(/\b\w/g, c => c.toUpperCase()); return null; }
 function titleOf(seg, kind, subj) {
+  const exact = seg.replace(/^(?:(?:please|pg)\s+)*(?:(?:add|save|record)\s+(?:an?\s+)?|i\s+(?:have|have got)\s+(?:an?\s+)?)/, "")
+    .split(/\s+(?:due|deadline|by)\b/)[0]
+    .replace(/\s+(?:(?:on|this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*$|\s+(?:from|at)\s+\d.*$/i, "")
+    .replace(/[.!?]+$/, "").trim();
+  if (/\bassignment\b/.test(exact) && exact.split(/\s+/).length >= 4) return exact.charAt(0).toUpperCase() + exact.slice(1);
   const noun = (seg.match(KINDS.find(k => k[1] === kind)[0]) || [kind])[0].replace(/s$/, "");
   let topic = (seg.match(/\b(?:on|about)\s+([a-z0-9' ]{3,40}?)(?=\s+(?:due|for|by|on|which|that|and|it)\b|$)/) || [])[1] || "";
   if (WD.some(w => topic.startsWith(w)) || /^(?:the \d|\d|tomorrow|today|next|this|a |an |one |two |three |four |five |half)|\b(?:hours?|minutes?|mins?|hrs?)\b/.test(topic)) topic = "";
@@ -123,7 +134,10 @@ export function parse(raw, base = today()) {
   const segs = t.split(/\s*(?:[;.!?]\s+|,\s*(?:and\s+|plus\s+|also\s+|then\s+)?|\s+and\s+(?=(?:a|an|my|the|another|also|then|i have|i've got|there's)\b)|\s+(?:also|plus|then)\s+)/).filter(Boolean);
   const out = [];
   for (const seg of segs) {
-    const k = kindOf(seg), date = dateIn(seg, base), tm = timeIn(seg), est = estIn(seg), subj = subjectOf(seg);
+    const deadline = seg.match(/\b(?:due|deadline|by|submit|hand in)\b\s*(.*)/)?.[1];
+    const studyRange = /\b(?:from\s+)?\d{1,2}(?::\d\d)?\s*(?:am|pm)?\s+(?:to|until|till)\s+\d/i.test(seg);
+    const dateText = deadline ?? (studyRange ? "" : seg);
+    const k = kindOf(seg), date = dateIn(dateText, base), tm = timeIn(dateText), est = estIn(seg), subj = subjectOf(seg);
     const isDur = est != null && !k && !date;
     if (isDur && out.length) { out.at(-1).est = est; continue; }
     if (k || (subj && date)) {
@@ -139,6 +153,11 @@ export function parse(raw, base = today()) {
       continue;
     }
     if ((date || tm != null) && out.length) { const o = out.at(-1); if (!o.due && date) o.due = date; if (o.dueMin == null && tm != null) o.dueMin = tm; if (est != null && o.est == null) o.est = est; }
+  }
+  const original = String(raw).replace(/[“”"]/g, "").replace(/\s+/g, " ");
+  for (const task of out) {
+    const at = original.toLowerCase().indexOf(task.title.toLowerCase());
+    if (at >= 0) task.title = original.slice(at, at + task.title.length);
   }
   return out;
 }
@@ -184,6 +203,7 @@ function planned(t) {
 }
 const round15 = n => Math.max(SESSION, Math.round(n / 15) * 15);
 export function add(list) {
+  if (list.some(a => nonAcademic(a.title))) throw new Error("School is only for schoolwork. Tell me a day and time to add that personal activity to the timetable instead.");
   const s = sch(), added = [];
   list.forEach(a => {
     const k = KINDS.find(x => x[1] === a.kind) || KINDS.at(-1);
@@ -213,7 +233,7 @@ export function logActual(t, actual) {
 export function remove(id) { const s = sch(); s.tasks = s.tasks.filter(t => t.id !== id); clearFuture(id); save(); }
 function clearFuture(tid) {
   const t0 = today(), n = nowMin();
-  Object.entries(S.days).forEach(([d, v]) => { if (d < t0) return; v.blocks = v.blocks.filter(b => !(b.src === "school" && !b.done && (!tid || b.tid === tid) && (d > t0 || b.start >= n))); });
+  Object.entries(S.days).forEach(([d, v]) => { if (d < t0) return; v.blocks = v.blocks.filter(b => !((tid ? b.tid === tid : b.src === "school") && !b.done && (d > t0 || b.start >= n))); });
 }
 
 // ---------- Planning ----------

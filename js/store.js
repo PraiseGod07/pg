@@ -51,6 +51,19 @@ export const DEFAULTS = () => ({
 });
 
 export let S = DEFAULTS();
+let draftOriginal = null;
+export const inDraft = () => draftOriginal !== null;
+export function beginDraft() {
+  if (inDraft()) throw new Error("A command is already being prepared.");
+  draftOriginal = S;
+  S = JSON.parse(JSON.stringify(S));
+}
+export function endDraft() {
+  if (!inDraft()) throw new Error("No draft is active.");
+  const result = S;
+  S = draftOriginal; draftOriginal = null;
+  return result;
+}
 
 function merge(base, o) {
   for (const k in o) {
@@ -103,7 +116,7 @@ export function checkpoint() {
   ls.set(KEY + ".recovery", raw);
 }
 // quiet = bookkeeping only (sync status), not a change worth sending to other devices
-export function save(quiet) { if (!quiet) S.t = Date.now(); ls.set(KEY, JSON.stringify(S)); if (!quiet) hooks.forEach(f => { try { f(); } catch {} }); }
+export function save(quiet) { if (inDraft()) return; if (!quiet) S.t = Date.now(); ls.set(KEY, JSON.stringify(S)); if (!quiet) hooks.forEach(f => { try { f(); } catch {} }); }
 // Take data from PG Cloud while keeping this device's own settings
 export function adopt(o, t) {
   checkpoint();

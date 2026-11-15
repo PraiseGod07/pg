@@ -1,12 +1,14 @@
 // PG's hands: lets the AI read the app's data and make changes, safely.
 // The AI never sees or touches the API key or other private settings.
-import { S, save, day, replace } from "./store.js";
+import { S, save, day, replace, beginDraft, endDraft, inDraft } from "./store.js";
 import { today, addDays, uid } from "./util.js";
 import { CATS, DEFAULT_MIN } from "./library.js";
 import * as C from "./coach.js";
 import * as M from "./brain.js";
 import * as SC from "./school.js";
 import { weekOf, planWeek, planSummary } from "./timetable.js";
+import { changes, validateChanges, reconcileWindows } from "./commands.js";
+import { calendarDate } from "./dates.js";
 
 // Anything under these is off limits, both for reading and for writing.
 const PRIVATE = /^(?:ai|v|alwaysOn|dev|t)(?:\.|$)|(?:^|\.)(?:__proto__|constructor|prototype|key|apiKey|api_key|token|secret|password|credential|base|account)(?:\.|$)/i;
@@ -14,10 +16,11 @@ export const isPrivate = path => PRIVATE.test(String(path || ""));
 
 const hhmm = m => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 function toMin(v) {
-  if (typeof v === "number") return Math.max(0, Math.min(1440, Math.round(v)));
+  if (typeof v === "number") return Number.isInteger(v) && v >= 0 && v <= 1440 ? v : null;
   const m = String(v || "").trim().toLowerCase().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
   if (!m) return null;
   let h = +m[1]; const mi = +(m[2] || 0);
+  if (h > 24 || mi > 59 || h === 24 && mi || m[3] && (h < 1 || h > 12)) return null;
   if (m[3] === "pm" && h < 12) h += 12; if (m[3] === "am" && h === 12) h = 0;
   return h * 60 + mi;
 }
@@ -25,7 +28,7 @@ function toDate(v) {
   const s = String(v || "").trim().toLowerCase();
   if (!s || s === "today") return today();
   if (s === "tomorrow") return addDays(today(), 1);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return calendarDate(s, today());
   return null;
 }
 
@@ -68,11 +71,12 @@ export const TOOLS = `"ops" is a list of direct changes to the app. Use the ids 
 - {"op":"clear_day","date":"YYYY-MM-DD"}
 - {"op":"move_day","from":"YYYY-MM-DD|tomorrow","to":"YYYY-MM-DD|today"} (move ALL timetable items, not copy; keep daily reminders)
 - {"op":"plan_week","weekStart":"YYYY-MM-DD Monday","start":"HH:MM","end":"HH:MM","focusMinutes":50,"breakMinutes":10,"tasks":[{"title":"History revision","minutes":90,"cat":"study","days":["YYYY-MM-DD"]}]} (minutes is TOTAL for each task across its eligible days, not per day. Ask him for missing days, durations, time window and break preferences; the numbers shown here are examples, not permission. Include all existing weekly-plan tasks when adding new tasks and regenerating. This replaces only future, uncompleted auto-planned sessions, keeps fixed/completed entries and schedules real rest breaks. Never replace a fixed appointment without asking.)
-- {"op":"add_assignment","title":"exact name","due":"YYYY-MM-DD","dueMin":null,"minutes":null} (save in School, even when the due time or study estimate is unknown)
+- {"op":"add_assignment","title":"exact name","due":"YYYY-MM-DD","dueMin":null,"minutes":null} (schoolwork ONLY; MUST also include add_block with this exact title and the user's stated study day/start/end in this batch. If no study slot was given, ask first with no ops. A due date/time is NOT a study slot. Personal activities such as gym, church, shopping and meals never go into School.)
 - {"op":"add_routine","title":"Take vitamins","start":null,"minutes":5,"cat":"other"} (daily reminder; null start means untimed daily checklist)
 - {"op":"remove_routine","id":"..."} (only if he explicitly stops the daily routine)
 - {"op":"add_exercise","day":"<gym day key>","name":"Cable crossover","muscles":"Chest, front delts","cues":["cue 1","cue 2","cue 3"],"search":"cable crossover proper form","videoId":"only a real YouTube id supplied by him or internet results, otherwise omit","sets":3,"reps":"12-15","rest":60}
 - {"op":"remove_exercise","day":"<gym day key, optional>","exercise":"<ex key or name>"}
+- {"op":"attach_video","exercise":"<existing exact exercise name or key>","videoId":"<real supplied or checked YouTube id>","videoBy":"YouTube demonstration"} (replace the video on an existing exercise without changing its sets, reps or gym day)
 - {"op":"set","path":"dot.path","value":...}, {"op":"push","path":"dot.path","value":...}, {"op":"remove","path":"dot.path","id":"..."}  (for anything else in APP DATA, e.g. "profile.address", "voice.rate", "bible.max", "band.songs", "food.kg"; goals are {"op":"push","path":"goals","value":{"text":"...","made":"YYYY-MM-DD"}} and {"op":"remove","path":"goals","id":"..."})
 - {"op":"note","text":"...","folder":"spiritual|about|bass|fitness|learning|life"}
 Never use paths for API keys or private settings; they are not available.`;
@@ -94,35 +98,58 @@ function walk(path, create) {
 
 // Apply the AI's changes. Returns short lines saying what happened.
 export function apply(ops, { onDone } = {}) {
+  if (!inDraft()) {
+    const before = JSON.parse(JSON.stringify(S));
+    beginDraft();
+    try {
+      const lines = apply(ops);
+      const result = endDraft();
+      reconcileWindows(before, result);
+      validateChanges(before, result, changes(before, result));
+      for (const k of Object.keys(S)) if (!(k in result)) delete S[k];
+      Object.assign(S, result); C.syncCustom(); save();
+      onDone?.(() => replace(before));
+      return lines;
+    } catch (e) { if (inDraft()) endDraft(); C.syncCustom(); throw e; }
+  }
+  if (!Array.isArray(ops) || ops.length > 25) throw new Error("Please split this into batches of no more than 25 changes.");
   const before = JSON.stringify(S);
   const said = [];
   for (const op of (ops || []).slice(0, 25)) {
     try {
-      if (!op || typeof op !== "object") continue;
-      if (op.path && isPrivate(op.path)) { said.push("I can't change private settings."); continue; }
+      if (!op || typeof op !== "object") throw new Error("The proposed command is invalid.");
+      if (op.path && isPrivate(op.path)) throw new Error("I can't change private settings.");
       switch (op.op) {
         case "plan_week": said.push(planSummary(planWeek(op))); break;
         case "add_block": {
-          const d = toDate(op.date) || today();
+          const d = toDate(op.date);
           let s = toMin(op.start), e = toMin(op.end);
           const cat = CATS[op.cat] ? op.cat : "other";
-          if (!op.title || s == null || e == null || e <= s) { said.push("Not saved yet. What start and end time should I use?"); break; }
+          if (!d || !op.title || s == null || e == null || e <= s) throw new Error("Nothing saved. What date, start and end time should I use?");
+          const clash = day(d).blocks.find(b => !b.skipped && !b.studyWindow && b.start < e && s < b.end);
+          if (clash) throw new Error(`No, sir, this is not feasible. ${op.title} overlaps ${clash.title} on ${d}. Which time or activity should change?`);
           day(d).blocks.push({ id: uid(), title: String(op.title || "Untitled").slice(0, 80), cat, start: s, end: e, flex: false, done: false, date: d, src: "pg" });
+          if (SC.academic(op.title)) {
+            const [task] = SC.add([{ title: String(op.title).slice(0, 80), kind: "assignment", due: null, dueMin: null, est: null }]);
+            day(d).blocks.at(-1).tid = task.id;
+          }
           said.push(`Added ${op.title}${d === today() ? "" : d === addDays(today(), 1) ? " tomorrow" : " on " + d}.`);
           break;
         }
         case "delete_block": {
-          const f = findBlock(op.id); if (!f) break;
+          const f = findBlock(op.id); if (!f) throw new Error("That timetable item no longer exists. Which item should I remove?");
           S.days[f.d].blocks = S.days[f.d].blocks.filter(x => x.id !== op.id);
           said.push(`Removed ${f.b.title}.`);
           break;
         }
         case "update_block": {
-          const f = findBlock(op.id); if (!f) break;
+          const f = findBlock(op.id); if (!f) throw new Error("That timetable item no longer exists. Which item should I change?");
           const b = f.b, len = b.end - b.start;
           if (op.title) b.title = String(op.title).slice(0, 80);
           if (op.cat && CATS[op.cat]) b.cat = op.cat;
           const s = toMin(op.start), e = toMin(op.end);
+          if (op.start != null && s == null || op.end != null && e == null || (e ?? b.end) <= (s ?? b.start))
+            throw new Error("Nothing saved. The end time must be later than the start time.");
           if (s != null) { b.start = s; b.end = e != null && e > s ? e : Math.min(1440, s + len); b.flex = false; }
           else if (e != null && e > b.start) b.end = e;
           if (op.done != null) b.done = !!op.done;
@@ -131,7 +158,7 @@ export function apply(ops, { onDone } = {}) {
           said.push(`Updated ${b.title}.`);
           break;
         }
-        case "clear_day": { const d = toDate(op.date) || today(); day(d).blocks = []; said.push(`Cleared ${d === today() ? "today" : d}.`); break; }
+        case "clear_day": { const d = toDate(op.date); if (!d) throw new Error("Which day should I clear?"); day(d).blocks = day(d).blocks.filter(b => b.routine); said.push(`Cleared one-off entries on ${d}. Daily routines remain.`); break; }
         case "move_day": {
           const from = toDate(op.from), to = toDate(op.to);
           if (!from || !to || from === to) { said.push("Not moved. Tell me the source and destination day."); break; }
@@ -145,8 +172,8 @@ export function apply(ops, { onDone } = {}) {
           break;
         }
         case "add_assignment": {
-          if (!String(op.title || "").trim()) { said.push("What is the assignment called?"); break; }
-          if (op.due && !/^\d{4}-\d{2}-\d{2}$/.test(op.due)) { said.push("What date is the assignment due?"); break; }
+          if (!String(op.title || "").trim()) throw new Error("What is the assignment called?");
+          if (op.due && !/^\d{4}-\d{2}-\d{2}$/.test(op.due)) throw new Error("What date is the assignment due?");
           const [t] = SC.add([{ title: String(op.title).trim().slice(0, 200), kind: "assignment", due: op.due || null,
             dueMin: Number.isFinite(op.dueMin) ? op.dueMin : null, est: Number.isFinite(op.minutes) ? op.minutes : null }]);
           said.push(`Saved ${t.title} in School${t.due ? `, due ${t.due}` : ". What date is it due?"}.`);
@@ -181,6 +208,13 @@ export function apply(ops, { onDone } = {}) {
           if (r) said.push(`Removed ${C.EXERCISES[r.key].name} from your workout.`);
           break;
         }
+        case "attach_video": {
+          const key = C.findEx(op.exercise);
+          if (!key || !/^[\w-]{11}$/.test(op.videoId || "")) throw new Error("Which existing exercise and YouTube video should I use?");
+          C.custom().ex[key] = { ...C.EXERCISES[key], ...C.custom().ex[key],
+            video: { id: op.videoId, by: String(op.videoBy || "YouTube demonstration").slice(0, 80) } };
+          C.syncCustom(); said.push(`Attached the video to ${C.EXERCISES[key].name}.`); break;
+        }
         case "note": { if (op.text) { M.add(String(op.text), op.folder ? { folder: op.folder } : {}); said.push("Saved that note."); } break; }
         case "set": {
           const w = walk(op.path, true); if (!w) break;
@@ -202,8 +236,13 @@ export function apply(ops, { onDone } = {}) {
           said.push("Removed.");
           break;
         }
+        default: throw new Error("That command is not supported yet. Nothing saved.");
       }
-    } catch (e) { console.warn("op failed", op, e); said.push("I couldn't save that change. " + e.message); }
+    } catch (e) {
+      for (const k of Object.keys(S)) delete S[k];
+      Object.assign(S, JSON.parse(before)); C.syncCustom();
+      throw new Error(e.message || "I couldn't complete the whole command. Nothing saved.");
+    }
   }
   if (said.length) {
     C.syncCustom(); save();
