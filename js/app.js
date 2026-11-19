@@ -4,9 +4,9 @@ import { changes, describe, approval, applyProposal, validateChanges, reconcileW
 import { calendarDate } from "./dates.js";
 import { speakable, isNatural } from "./speech.js";
 import { CATS, EXERCISES, SPLITS, DEFAULT_MIN, GYM_WARMUP, stageOf } from "./library.js";
-import { intent, parseSchedule, matchBlock, parseClock, normalize, isEndCall } from "./nlu.js";
-import { placeItems, conflicts, firstGap } from "./scheduler.js";
-import { Voice, chime } from "./voice.js";
+import { intent, parseSchedule, matchBlock, parseClock, normalize, hasCalendarCue } from "./nlu.js";
+import { placeItems, conflicts, firstGap, gaps, activityKey } from "./scheduler.js";
+import { Voice } from "./voice.js";
 import * as C from "./coach.js";
 import * as BS from "./bass.js";
 import * as B from "./bible.js";
@@ -14,7 +14,6 @@ import * as M from "./brain.js";
 import * as LN from "./learn.js";
 import * as F from "./food.js";
 import * as SC from "./school.js";
-import * as AI from "./ai.js";
 import * as AG from "./agent.js";
 import * as SY from "./sync.js";
 import { PG_CLOUD, PG_VERSION } from "./config.js";
@@ -23,8 +22,10 @@ import * as HR from "./hearing.js";
 import { sayLike } from "./canto.js";
 import * as D from "./daily.js";
 import { weekOf, planWeek, planSummary } from "./timetable.js";
-import { cloudApi, VOICES as CLOUD_VOICES } from "./cloudvoice.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
+import { commandText, PHRASES } from "./phrasebook.js";
+import { carriedTasks, planCarryover, untimedTasks } from "./carryover.js";
+import { collectionCommand, findCollection, reservedCollection, saveCollection } from "./collections.js";
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -35,69 +36,45 @@ load();
 C.syncCustom();
 BS.bass(); B.bible(); M.notes(); LN.tracks();
 const addr = () => S.profile.address || "sir";
-const hello = () => `Hi, ${addr()}. How can I help you today?`;
-function startListening() {
-  voice.call = true;
-  // First morning start only, stored per device without exposing private settings.
-  if (nowMin() < 720 && S.dev.greetedDate !== today()) {
-    S.dev.greetedDate = today(); save(true);
-    const g = hello(); pushMsg("pg", g); voice.say(g, () => voice.listen("command"));
-  } else voice.listen("command");
-}
 const lc = s => s ? s.charAt(0).toLowerCase() + s.slice(1) : s;
 const ucf = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 const pickOne = a => a[Math.floor(Math.random() * a.length)];
+const carrySince = () => S.carrySince || addDays(today(), -1);
+const carryList = () => carriedTasks(S, today(), carrySince());
+const getUntimed = id => S.inbox.find(t => t.id === id) || carryList().find(t => t.id === id);
+function initCarryover() {
+  if (SY.locked()) return false;
+  const fresh = !S.carrySince;
+  if (fresh) S.carrySince = carrySince();
+  const date = today(), result = planCarryover(S, date, S.carrySince, day(date).blocks, nowMin());
+  if (fresh || result.changed) save();
+  return result.changed;
+}
 
 // ================= Voice wiring =================
 const voice = new Voice({
-  awaitingConfirmation: () => !!ui.proposal && !ui.correcting,
-  onState: m => paintVoice(m),
-  onHeard: t => { const el = $("#heard"); el.textContent = t ? "“" + t + "”" : ""; el.scrollTop = el.scrollHeight; paintReplay(t); },
-  onWake: () => { openAssistant(true); $("#heard").textContent = ""; },
-  onGreet: () => startListening(),
-  onHangUp: () => { $("#heard").textContent = ""; paintVoice(voice.mode); },
-  onCommand: text => { ui.checkedIn = false; $("#heard").textContent = ""; run(text, true); },
+  onState: paintVoice,
+  onTranscript: t => {
+    $("#ask").value = t;
+    $("#heard").textContent = "Check the transcript, then tap Send.";
+    if (S.voice.autoSend) $("#composer").requestSubmit();
+  },
   onError: code => {
-    if (code === "repeated") { toast("Repeated audio detected. Tap Edit transcript to check or restore intentional repetition, then Done speaking."); return; }
-    if (code === "blocked" && S.voice.handsFree) { needTap(); return; }
-    const msg = { unsupported: "Voice isn't supported in this browser. Use Chrome, Edge or Safari, or type.", blocked: "Microphone is blocked. Allow it in your browser settings.", network: "Speech service unreachable. Check your connection.", nomic: "No microphone found.", speech: "Audio stopped. Tap Hear reply.", hearing: "One audio segment could not be transcribed. Your earlier words are still here. Repeat the missing part, then tap Done speaking." }[code];
-    if (msg) toast(msg);
-    if (code === "nomic") { S.voice.handsFree = false; save(); if (ui.view === "settings") render(); }
+    const msg = { unsupported: "Recording isn’t available here. You can still type.", "not-allowed": "Microphone blocked. Allow it in your browser settings or type instead.", "service-not-allowed": "Speech recognition is unavailable. Type instead.", network: "Your browser couldn’t transcribe this. Try again online or type.", "audio-capture": "No microphone available. Type instead.", "no-speech": "No words heard. Record again or type." }[code];
+    toast(msg || "Couldn’t transcribe. Record again or type.");
   }
 });
 voice.voiceURI = S.voice.voiceURI; voice.rate = S.voice.rate; voice.pickVoice();
-// PG's natural voice and hearing run on PG Cloud once its code is version 2 or newer.
-const CV = { v: 0 };
-voice.cloudVoice = S.voice.cloudVoice || "apollo";
-voice.cloud = { ...cloudApi(() => SY.url(), () => S.dev.cloud?.token || ""), ok: () => SY.on() && CV.v >= 2 && S.voice.natural === true };   // paid cloud voice is opt-in only; free phone voice by default
-async function probeCloud() {
-  if (!SY.on()) { CV.v = 0; return; }
-  try { const j = await (await fetch(SY.url() + "/", { cache: "no-store" })).json(); CV.v = +j.v || 1; } catch { return; }
-  if (ui.view === "settings") render();
-}
-probeCloud();
-
-function paintVoice(m) {
-  $("#orb").dataset.state = m; $("#dockOrb").dataset.state = m;
-  const onCall = voice.call && m !== "off" && m !== "wake";
-  setStatus(onCall ? { command: "Take your time. Tap Done speaking when ready.", thinking: "Thinking…", speaking: "Speaking · tap to interrupt" }[m] : { off: voice.supported ? "Tap to talk" : "Type to PG", wake: "Say “Hi PG”", command: "Take your time. Tap Done speaking when ready.", thinking: "Thinking…", speaking: "Speaking…" }[m]);
-  $("#listenPill").textContent = onCall ? "On a call with PG" : m === "wake" ? "Listening for “Hi PG”" : m === "command" ? "Listening…" : "";
-  $("#endCall").hidden = !onCall;
-  $("#finishTurn").hidden = m !== "command";
-  $("#editTranscript").hidden = m !== "command";
-  $("#finishTurn").disabled = !!voice.tapFinishing;
-  if (m === "command" && voice.tapFinishing) setStatus("Finishing your words…");
-  paintReplay();
-  $("#orb").setAttribute("aria-label", m === "command" ? "Done speaking" : "Talk to PG");
-  document.body.classList.toggle("on-call", onCall);
-  if (m === "command" || m === "speaking" || m === "thinking") openAssistant(false);
-  if ((m === "wake" || m === "off") && ui.autoClose && !voice.call) { ui.autoClose = false; setTimeout(() => { if (voice.mode === "wake" || voice.mode === "off") closeAssistant(); }, 1800); }
-  keepAwake();
-}
 function setStatus(t) { $("#orbStatus").textContent = t; }
-function paintReplay(draft = voice.cmd()) {
-  $("#readReply").hidden = ["speaking", "thinking"].includes(voice.mode)
-    || (voice.mode === "command" && !!draft) || !S.chat.some(x => x.who === "pg");
+function paintVoice(mode) {
+  for (const el of [$("#orb"), $("#dockOrb")]) {
+    el.dataset.state = mode;
+    el.setAttribute("aria-label", mode === "command" ? "Stop recording" : "Record a command");
+  }
+  setStatus({ off: "Tap to record", command: "Recording · tap to stop", thinking: "Finishing transcript…" }[mode]);
+  $("#listenPill").textContent = mode === "command" ? "Recording" : "";
+  $("#finishTurn").hidden = mode !== "command";
+  if (mode !== "off") openAssistant();
 }
 
 // ================= Assistant panel =================
@@ -108,7 +85,7 @@ assistantScreen.addEventListener?.("change", () => {
   else if (["command", "thinking", "speaking"].includes(voice.mode)) openAssistant();
 });
 function openAssistant() { if (!isMobile()) return; $("#assistant").classList.add("open"); $("#scrim").hidden = false; }
-function closeAssistant() { $("#assistant").classList.remove("open"); $("#scrim").hidden = true; }
+function closeAssistant() { voice.kill(); $("#assistant").classList.remove("open"); $("#scrim").hidden = true; }
 function pushMsg(who, text, html) {
   S.chat.push({ id: uid(), who, text, html: html || "", t: Date.now() });
   S.chat = S.chat.slice(-60); save();
@@ -118,7 +95,6 @@ function paintChat() {
   const el = $("#chat");
   el.innerHTML = S.chat.length ? S.chat.slice(-30).map(m => `<div class="msg ${m.who}">${m.html || esc(m.text)}</div>`).join("") : "";
   el.scrollTop = el.scrollHeight;
-  paintReplay();
 }
 const SUGGEST = {
   today: ["What's next?", "What should I eat today?", "Is my plan realistic?"],
@@ -127,17 +103,17 @@ const SUGGEST = {
   bible: ["Today's reading", "I read today's reading", "What did I learn?"],
   gym: ["What should I eat today?", "Make my shopping list", "Give me a recipe"],
   notes: ["What have I learned?", "Save a revelation: ", "I'm learning SolidWorks"],
-  settings: ["Hi PG", "What's next?", "Read my schedule"]
+  settings: ["Brief me", "What's next?", "What do I have today?"]
 };
 function paintSuggest() {
-  $("#suggest").innerHTML = (SUGGEST[ui.view] || SUGGEST.today).map(s => s.endsWith(": ")
+  $("#suggest").innerHTML = (ui.view === "today" ? PHRASES[0].slice(1) : SUGGEST[ui.view] || SUGGEST.today).map(s => s.endsWith(": ")
     ? `<button class="chip" data-fill="${esc(s)}">${esc(s.replace(/: $/, ""))}</button>`
     : `<button class="chip" data-say="${esc(s)}">${esc(s)}</button>`).join("");
 }
 // speakable() lives in speech.js
 function reply(text, opts = {}) {
   if (ui.draftReplies) { ui.draftReplies.push({ text, opts }); return; }
-  if (!text) { voice.afterReply(); return; }
+  if (!text) return;
   if (ui.quiet) { ui.quiet.push(text); if (opts.view) go(opts.view, opts.date); return; }
   // He told PG new plans: remind him of plans he already had and may have forgotten.
   if (ui.turn && !ui.turn.used && !opts.then) {
@@ -151,99 +127,185 @@ function reply(text, opts = {}) {
   }
   pushMsg("pg", text, opts.html);
   if (opts.view) { go(opts.view, opts.date); if (opts.spoken) ui.autoClose = isMobile(); }
-  if (S.voice.speak !== false) voice.say(opts.speak || speakable(text, opts.full), opts.then);
-  else voice.afterReply();
+  if (opts.readAloud) voice.say(speakable(text, true));
 }
 
 // ================= Command handling =================
-async function run(text, spoken = false) {
-  text = String(text || "").trim();
-  if (!text) { voice.afterReply(); return; }
-  if (ui.running) { toast("Please finish the current command first."); return; }
-  ui.running = true;
-  $("#composer").setAttribute("aria-busy", "true");
-  $("#composer .send").disabled = true;
-  // Fix misheard or mistyped words from the words around them ("end the corner" -> "end the call").
-  const fixed = HR.clean(text);
-  pushMsg("me", fixed);
-  if (fixed !== text) S.chat.at(-1).raw = text;
-  text = fixed;
-  const dates = [...Array(8)].map((_, i) => addDays(today(), i));
-  ui.turn = { before: new Set(dates.flatMap(d => (S.days[d]?.blocks || []).map(b => b.id))), dates };
+function receipt(p) {
+  const summary = p.summary.join("; ") || "Saved";
+  const title = /^(?:Add|Save|Added|Created|Assignment saved)\b/.test(summary) ? "Added" : /^Remove\b/.test(summary) ? "Removed" : /^(?:Done|Completed)\b/.test(summary) ? "Done" : "Updated";
+  const html = `<div class="result-card"><strong>${title}</strong><div>${esc(summary)}</div><div class="row"><button class="btn" data-act="undo-action" data-id="${esc(p.id)}">Undo</button><button class="btn" data-act="edit-action" data-id="${esc(p.id)}">Edit</button></div></div>`;
+  reply(`${title}: ${summary}`, { html });
+  toast(`${title}: ${p.summary[0] || "saved"}`, "Undo", () => undoAction(p.id));
+}
+function applyAction(p) {
+  if (!applyProposal(S, p)) return;
+  // Keep reversible deltas local; they can include text removed from live data.
+  S.dev.actions = [...(S.dev.actions || []), p].slice(-10);
+  const added = p.changes.filter(c => c.path.join(".") === "school.tasks")
+    .flatMap(c => (c.after || []).filter(t => !(c.before || []).some(b => b.id === t.id)));
+  if (added.length === 1) ui.lastAddedTask = added[0].id;
+  save(); C.syncCustom(); render(); receipt(p);
+  if (document.hidden) systemNotice(p.summary.join("; "));
+}
+function undoAction(id) {
+  const p = (S.dev.actions || []).findLast(x => !x.undone && (!id || x.id === id));
+  if (!p) { reply("There’s no recent action to undo."); return; }
   try {
-    if (ui.proposal && !ui.correcting) {
+    applyProposal(S, { id: uid(), changes: p.changes.map(c => ({ path: c.path, before: c.after, after: c.before })) });
+    p.undone = true; save(); C.syncCustom(); render(); reply("Undone. The previous values were restored."); toast("Undone.");
+  } catch { reply("Can’t undo safely because part of that entry has changed. Edit the current entry instead."); }
+}
+function needsConfirmation(text, delta) {
+  if (delta.some(c => c.path[0] === "weekPlans")
+    || /^(?:clear|wipe|reset|erase)\b|\bmove (?:my |the |all |everything |whole )*(?:day|schedule|timetable)\b/i.test(text)) return true;
+  const surviving = new Set(delta.filter(c => c.path[0] === "days").flatMap(c => (Array.isArray(c.after) ? c.after : []).map(b => b.id)));
+  const removed = delta.flatMap(c => Array.isArray(c.before) ? c.before.filter(x => x?.id && !(c.after || []).some(y => y?.id === x.id)).map(x => ({ x, root: c.path[0] })) : []);
+  const assignments = new Set(removed.filter(({ root }) => root === "school").map(({ x }) => x.id));
+  const separate = removed.filter(({ x, root }) => root !== "days" || !surviving.has(x.id) && !assignments.has(x.tid));
+  return separate.length > 1 || removed.some(({ root }) => root === "routines" || root === "collections");
+}
+async function run(raw, spoken = false) {
+  raw = String(raw || "").trim();
+  if (!raw || ui.running || SY.locked()) return;
+  const cleaned = commandText(HR.clean(raw));
+  const text = (S.phrases || []).find(p => p.from.toLowerCase() === cleaned.toLowerCase())?.to || cleaned;
+  if (!text) return;
+  ui.running = true;
+  $("#composer .send").disabled = true;
+  pushMsg("me", raw);
+  try {
+    if (ui.proposal) {
       const answer = approval(text);
-      if (answer === "yes") {
-        const p = ui.proposal;
-        applyProposal(S, p); save(); await flush();
-        const addedTasks = p.changes.filter(c => c.path.join(".") === "school.tasks")
-          .flatMap(c => (c.after || []).filter(t => !(c.before || []).some(b => b.id === t.id)));
-        if (addedTasks.length === 1) ui.lastAddedTask = addedTasks[0].id;
-        // The gate applies the stored records, never reruns the parser or model.
-        ui.proposal = null; ui.pending = p.nextPending; ui.correcting = false;
-        C.syncCustom(); render();
-        pushMsg("pg", "Saved. " + p.summary.join("; ") + ".");
-        if (p.nextPending && p.followup) return reply(p.followup);
-        await chime("success"); voice.afterReply(); return;
-      }
-      if (answer === "no") {
-        ui.correcting = true;
-        return reply("Nothing saved. What should I change? Say cancel to discard it.");
-      }
-      if (isEndCall(normalize(text))) return endCall();
-      return reply("Please confirm again. Say yes if the details are correct, or no if they are wrong.");
+      const p = ui.proposal;
+      if (!answer) return reply("Confirm or cancel the pending change first.");
+      ui.proposal = null;
+      if (answer === "yes") return applyAction(p);
+      return reply("Cancelled. Nothing changed.");
     }
-    if (/^(?:cancel|never mind|nevermind)$/i.test(text.trim()) && ui.proposal) {
-      ui.proposal = null; ui.correcting = false; ui.pending = null;
-      pushMsg("pg", "Cancelled. Nothing saved."); voice.afterReply(); return;
+    if (/^(?:undo(?: that| last action)?|that’s wrong, remove it|that's wrong, remove it)[.!]?$/i.test(text)) return undoAction();
+    const correction = text.match(/^(?:no[, ]+)?(?:make it|change (?:that|it|the last one) to)\s+(.+)$/i);
+    if (correction) {
+      const last = (S.dev.actions || []).findLast(x => !x.undone);
+      const list = last?.changes.flatMap(c => c.path.at(-1) === "blocks" ? (c.after || []).filter(b => !(c.before || []).some(x => x.id === b.id && JSON.stringify(x) === JSON.stringify(b))) : []) || [];
+      if (list.length !== 1) return reply("I can’t tell which entry to change. Say its name and the new time or date.");
+      const b = list[0], input = correction[1];
+      const date = calendarDate(input, today()) || b.date;
+      const start = calendarDate(input, today()) ? b.start : parseClock(input);
+      if (start == null) return reply("No change. Give a weekday or a time.");
+      const before = structuredClone(S); let after;
+      beginDraft();
+      try { AG.apply([{ op: "update_block", id: b.id, date, start, end: start + b.end - b.start }]); after = endDraft(); }
+      finally { if (inDraft()) endDraft(); }
+      const delta = changes(before, after);
+      if (!delta.length) return reply("That entry already has those details.");
+      return applyAction({ id: uid(), original: text, changes: delta, summary: describe({ changes: delta }) });
     }
-    if (!ui.proposal && !ui.pending && approval(text)) {
-      return reply("There is no change awaiting confirmation. What would you like to do?");
-    }
-    // A corrected command is evaluated against the last approved data, not a saved preview.
-    const correcting = ui.correcting ? ui.proposal : null;
-    if (correcting) {
-      ui.pending = null;
-      // Keep the original instruction in context for a model-assisted partial correction.
-      ui.correctionContext = `Original request: ${correcting.original}. Rejected preview: ${correcting.summary.join("; ")}. Correction: `;
-    }
-    const before = JSON.parse(JSON.stringify(S));
-    const oldPending = ui.pending;
+    ui.original = raw;
+    const before = structuredClone(S);
     ui.draftReplies = []; beginDraft();
     let after, replies;
     try {
-      if (correcting) applyProposal(S, correcting);
       await handle(text, spoken);
+      if (S.carrySince && changes(before, S).some(c => c.path[0] === "days" || c.path[0] === "inbox")) {
+        const date = today();
+        planCarryover(S, date, S.carrySince, day(date).blocks, nowMin());
+      }
       after = endDraft(); replies = ui.draftReplies;
-    } catch (e) {
-      if (inDraft()) endDraft();
-      ui.pending = oldPending;
-      throw e;
-    } finally { ui.draftReplies = null; ui.correctionContext = null; C.syncCustom(); }
+    }
+    finally { if (inDraft()) endDraft(); ui.draftReplies = null; C.syncCustom(); }
     reconcileWindows(before, after);
     const delta = changes(before, after);
-    try { validateChanges(before, after, delta); }
-    catch (error) { ui.pending = oldPending; throw error; }
-    render();
+    validateChanges(before, after, delta);
     if (delta.length) {
-      const proposal = { id: uid(), original: text, changes: delta, nextPending: ui.pending,
-        followup: replies.flatMap(r => r.text.match(/\b(?:What|When|Which|How)\b[^?]*\?/g) || []).at(-1) };
-      proposal.summary = describe(proposal);
-      if (proposal.summary.length > 70) throw new Error("That change is too large to confirm safely. Please split it into smaller commands.");
-      ui.proposal = proposal; ui.correcting = false; ui.pending = null;
-      return reply("Please confirm the following. " + proposal.summary.join("; ") + ". Say yes if correct, or no if wrong.", { full: true });
+      const p = { id: uid(), original: text, changes: delta, summary: describe({ changes: delta }) };
+      if (needsConfirmation(text, delta)) {
+        ui.proposal = p;
+        const label = `Confirm: ${p.summary.join("; ")}`;
+        return reply(label, { html: `${esc(label)}<div class="row"><button class="btn" data-say="yes">Yes</button><button class="btn" data-say="no">No</button></div>` });
+      }
+      applyAction(p);
+      if (replies.length) {
+        const { text: message, opts } = replies.at(-1);
+        if (opts.view) go(opts.view, opts.date);
+        if (message && /\b(?:overlaps|didn’t fit|didn't fit|no time yet)\b/i.test(message)) reply(message, opts);
+      }
+    } else for (const r of replies) reply(r.text, r.opts);
+  } catch (error) {
+    if (inDraft()) endDraft();
+    reply(error.message || "Nothing saved. Try again.");
+  } finally {
+    if (ui.logMiss) {
+      S.dev.missed = [...(S.dev.missed || []), ui.logMiss].slice(-200);
+      ui.logMiss = null; save(true);
     }
-    // No mutation: questions and clarification keep their normal spoken reply.
-    if (correcting) { ui.proposal = correcting; ui.correcting = true; }
-    for (const r of replies) reply(r.text, r.opts);
-    if (!replies.length) voice.afterReply();
+    ui.running = false;
+    ui.original = null;
+    $("#composer .send").disabled = false;
+    await flush();
+    if (SY.on()) SY.push();
   }
-  catch (e) { console.error(e); reply(e.message || "Nothing saved. Please give the details again."); }
-  finally {
-    ui.running = false; ui.turn = null;
-    $("#composer").setAttribute("aria-busy", "false"); $("#composer .send").disabled = false;
-    await flush(); if (SY.on()) SY.push();
+}
+
+function unrecognized(text) {
+  const original = ui.original || text;
+  if (inDraft()) ui.logMiss = original;
+  return reply("I didn’t understand. Nothing was saved.", { html: `<div>I didn’t understand. Nothing was saved.</div><div class="row"><button class="btn" data-act="fallback-note" data-text="${esc(original)}">Save as a note</button><button class="btn" data-act="fallback-category" data-text="${esc(original)}">Save in a new category…</button><button class="btn" data-act="fallback-web" data-text="${esc(original)}">Run as a search</button></div>` });
+}
+function previewNote(text) {
+  return reply("Review this note before saving.", { html: `<div>Review this note before saving:</div><p>${esc(text)}</p><button class="btn" data-act="fallback-note" data-text="${esc(text)}">Review and save</button>` });
+}
+function openHandbook(filter = "") {
+  const sh = $("#sheet");
+  const q = filter.trim().toLowerCase();
+  sh.innerHTML = `<h3>What can I say?</h3><form data-form="handbook" class="row wrap"><input name="q" class="input" placeholder="Search commands" aria-label="Find a command" value="${esc(filter)}"><button class="btn">Filter</button></form>${PHRASES.map(([title, ...phrases]) => {
+    const matches = phrases.filter(p => !q || `${title} ${p}`.toLowerCase().includes(q));
+    return matches.length ? `<h4>${esc(title)}</h4>${matches.map(p => `<div class="set-row"><span>${esc(p)}</span><button class="btn" data-act="try-phrase" data-text="${esc(p)}">Try it</button></div>`).join("")}` : "";
+  }).join("")}<p class="note" data-phrase-demo aria-live="polite">Try it never saves anything.</p><button class="btn" data-act="close-sheet">Close</button>`;
+  if (!sh.open) sh.showModal();
+}
+function openCollections(id) {
+  const c = S.collections.find(x => x.id === id), sh = $("#sheet");
+  sh.innerHTML = c ? `<h3>${esc(c.name)}</h3><div class="list">${c.items.map(x => `<div class="set-row"><span>${x.done ? "Done: " : ""}${esc(x.text)}</span><div class="row wrap"><button class="btn" data-act="collection-tick" data-group="${esc(c.id)}" data-id="${esc(x.id)}" aria-label="${x.done ? "Uncheck" : "Complete"} ${esc(x.text)}">${x.done ? "Uncheck" : "Done"}</button><button class="btn" data-act="collection-item-edit" data-group="${esc(c.id)}" data-id="${esc(x.id)}" aria-label="Edit ${esc(x.text)}">Edit</button></div></div>`).join("")}</div><form data-form="collection" class="field"><input type="hidden" name="group" value="${esc(c.name)}"><label class="field"><span>New item</span><input required class="input" name="entry"></label><button class="btn primary">Add item</button></form><div class="row wrap"><button class="btn" data-act="collections">All collections</button><button class="btn danger" data-say="${esc(`Delete category ${c.name}`)}" data-act="collection-delete">Delete category</button><button class="btn" data-act="close-sheet">Close</button></div>`
+    : `<h3>Collections</h3>${S.collections.map(x => `<button class="btn" data-act="collections" data-id="${esc(x.id)}">${esc(x.name)} (${x.items.length})</button>`).join("") || "<p>No custom collections yet.</p>"}<form data-form="collection" class="field"><label class="field"><span>New collection</span><input class="input" name="group" required></label><button class="btn primary">Create</button></form><button class="btn" data-act="close-sheet">Close</button>`;
+  if (!sh.open) sh.showModal();
+}
+function handleCollection(text) {
+  const p = collectionCommand(text);
+  if (!p || reservedCollection(p.name)) return false;
+  const c = findCollection(S.collections, p.name);
+  if (p.op === "create" || p.op === "add") {
+    const { c: target, created } = saveCollection(S.collections, p.name, p.text, p.kind);
+    reply(`${created ? `Created category: ${target.name}. ` : ""}${p.text ? `Added: ${p.text}.` : !created ? `Already exists: ${target.name}.` : ""}`);
+  } else if (!c) return false;
+  else if (p.op === "show") reply(`${c.name}: ${c.items.map(x => x.text).join("; ") || "Empty"}.`, { html: `<strong>${esc(c.name)}</strong><button class="btn" data-act="collections" data-id="${esc(c.id)}">Open collection</button>` });
+  else if (p.op === "delete") S.collections = S.collections.filter(x => x.id !== c.id);
+  else if (p.op === "rename") {
+    if (reservedCollection(p.to) || findCollection(S.collections, p.to)) return reply("That name is already in use."), true;
+    c.aliases = [...new Set([...(c.aliases || []), c.name])]; c.name = ucf(p.to);
+  } else {
+    const exact = c.items.filter(x => x.text.trim().toLowerCase() === p.text.trim().toLowerCase());
+    if (exact.length !== 1) return reply(`I couldn't identify a single item in ${c.name}. Open the collection to choose it.`), true;
+    if (p.op === "done") exact[0].done = true;
+    else c.items = c.items.filter(x => x.id !== exact[0].id);
   }
+  return true;
+}
+async function showSearch(query) {
+  const q = String(query || "").trim().slice(0, 350);
+  if (!q) return reply("Enter a search query.");
+  const google = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+  const computed = WEB.calculate(q);
+  if (computed != null) return reply(`Answer: ${computed}. Calculated on this device.`);
+  let result;
+  try {
+    result = /\bweather\b/i.test(q) ? await WEB.weather(q) : WEB.SPORTS_RE.test(q) && /\b(?:scores?|results?|fixtures?)\b/i.test(q) ? await WEB.sports(q) : await WEB.search(q);
+  } catch {}
+  const cards = result?.cards ?? (result?.text ? (result.sources || []).slice(0, 1).map(x => ({ ...x, text: result.text })) : []);
+  ui.lastSearch = cards.map(c => c.text).join(" ");
+  const summary = cards.length ? "Search results" : "No clear answer found";
+  const html = `<div class="search-card"><strong>${summary}</strong>${cards.map(c => `<article><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.title)}</a><p>${esc(c.text)}</p><div class="row wrap"><button class="btn" data-act="fallback-note" data-text="${esc(`${c.text}\n${c.url}`)}">Save as note</button><button class="btn" data-act="fallback-category" data-text="${esc(`${c.text}\n${c.url}`)}">Save to a category</button></div></article>`).join("")}<a class="btn" href="${esc(google)}" target="_blank" rel="noopener">Open full search in Google</a></div>`;
+  return reply(summary, { html });
 }
 
 const blocksOf = d => sortedBlocks(d);
@@ -276,24 +338,7 @@ const YES = /^(?:yes|yeah|yea|yep|yup|ya|sure|ok|okay|alright|all right|sounds g
 const NO = /^(?:no|nah|nope|not really|no thanks?|no thank you|don't|do not|not now|maybe later|leave it|i'm good|it's fine|keep it)(?: pg| sir| thanks?)*$/;
 // Answers that only make sense after PG asked something
 // ================= Daily companion =================
-const zhSay = z => `⟦yue:${z}⟧`;
 // Hong Kong clock: the same verse through 21:00; one Cantonese sentence from 21:01.
-function endCall() {
-  const minute = nowMin(), hang = { then: () => voice.hangUp() };
-  if (minute <= 21 * 60) {
-    const v = D.verse();
-    const t = `Before you go, ${addr()}, here's a verse for your day. ${v.ref}: ${v.text} ${pickOne(["Have a blessed day.", "Go well today.", "Have a great day."])}`;
-    return reply(t, { ...hang, full: true });
-  }
-  if (minute > 21 * 60) {
-    const c = D.teachDaily(), bye = "Good night";
-    const text = `Today's Cantonese, ${addr()}: ${c.zh} (say it: ${c.jp}) means "${c.en}" This is the same sentence for today. ${bye}.`;
-    const html = `<div>Today's Cantonese. Practise this same sentence today.</div>${cantoCard(c)}<div>${bye}, ${esc(addr())}.</div>`;
-    const sp = `Today's Cantonese, ${addr()}. ${zhSay(c.zh)} It means: ${c.en.replace(/\(.*?\)/g, "")} Once more. ${zhSay(c.zh)} ${bye}.`;
-    return reply(text, { ...hang, html, speak: speakable(sp, true) });
-  }
-  return reply(pickOne([`You're welcome, ${addr()}. Talk soon.`, `Anytime, ${addr()}. Ending the call.`, `My pleasure, ${addr()}. Bye for now.`]), hang);
-}
 function doReport(spoken) {
   const r = D.report();
   let t = `Here's your update, ${addr()}. ${r.text}`;
@@ -324,13 +369,13 @@ async function daily(text, bare, spoken) {
   if (/\bteach me (?:some |one |two |2 |a few |more )?(?:cantonese|canto)\b|\bcantonese (?:lesson|sentences?) (?:now|please)\b/.test(b)) {
     const c = D.teachDaily();
     return reply(`Today's sentence: ${c.zh} (say it: ${c.jp}) means "${c.en}" We'll practise this one today.`,
-      { speak: speakable(`Today's sentence. ${zhSay(c.zh)} It means: ${c.en} Once more. ${zhSay(c.zh)}`, true), html: cantoCard(c) }), true;
+      { html: cantoCard(c) }), true;
   }
   if (/\b(?:what|which) cantonese (?:have i|did i) (?:learn|learned|learnt)|\b(?:show|open|read) (?:me )?my cantonese\b|\bmy cantonese (?:sentences|words|list)\b/.test(b)) {
     const l = D.learned();
     openCanto();
-    if (!l.length) return reply("You haven't learned any yet. After 9:01 PM, ending a call gives you one sentence to practise that day."), true;
-    return reply(`You've learned ${l.length} sentence${l.length === 1 ? "" : "s"}. The latest: ${l[0].zh} means "${l[0].en}"`, { speak: speakable(`You've learned ${l.length}. The latest one. ${zhSay(l[0].zh)} It means: ${l[0].en}`, true) }), true;
+    if (!l.length) return reply("No learned phrases yet. Tap Learned on the Cantonese card on Today."), true;
+    return reply(`You've learned ${l.length} sentence${l.length === 1 ? "" : "s"}. The latest: ${l[0].zh} means "${l[0].en}"`), true;
   }
   return false;
 }
@@ -340,7 +385,7 @@ function cantoCard(c) {
 function openCanto() {
   const l = D.learned(), sh = $("#sheet");
   sh.innerHTML = `<h3>Cantonese</h3><p class="note" style="margin:0 0 8px">One sentence per day. Repeat it throughout today. ${l.length} of ${D.CANTO_N} saved. Tap a sentence to hear it.</p>
-    ${l.length ? `<ol class="canto-list">${l.map(c => `<li><button class="canto-play" data-act="canto-play" data-zh="${esc(c.zh)}" aria-label="Play ${esc(c.en)}"><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">Say it: ${esc(c.jp)}</span><span>${esc(c.en)}</span></button></li>`).join("")}</ol>` : `<p class="note">Nothing yet. After 9:01 PM, ending a call teaches one sentence for that day.</p>`}
+    ${l.length ? `<ol class="canto-list">${l.map(c => `<li><button class="canto-play" data-act="canto-play" data-zh="${esc(c.zh)}" aria-label="Play ${esc(c.en)}"><b lang="zh-HK">${esc(c.zh)}</b><span class="faint">Say it: ${esc(c.jp)}</span><span>${esc(c.en)}</span></button></li>`).join("")}</ol>` : `<p class="note">Tap Learned on Today to save a phrase here.</p>`}
     <div class="sheet-actions"><button class="btn" data-act="canto-more">Practise today's sentence</button><button class="btn ghost" data-act="close-sheet">Close</button></div>`;
   if (!sh.open) sh.showModal();
 }
@@ -411,11 +456,6 @@ async function followUp(p, bare, text, spoken) {
   if (p.type === "schedule-review") {
     if (YES.test(bare)) return await commitSchedule(p.items, spoken, p.replace || []), true;
     if (NO.test(bare) || /^(?:cancel|never ?mind|stop)$/.test(bare)) return reply("Nothing changed, sir. Please give me the corrected activity, day, start and end time."), true;
-    return false;
-  }
-  if (p.type === "ai-calendar") {
-    if (YES.test(bare)) return reply(await finishTalk(p.r, true), { spoken }), true;
-    if (NO.test(bare) || /^(?:cancel|never ?mind|stop)$/.test(bare)) return reply("Nothing changed, sir."), true;
     return false;
   }
   if (p.type === "week-complete") {
@@ -506,7 +546,7 @@ async function followUp(p, bare, text, spoken) {
     return false;
   }
   if (p.type === "more") {
-    if (NO.test(bare) || /^(?:no )?(?:that's (?:it|all)|nothing(?: else)?|i'm good|all good)/.test(bare)) return reply(`Okay, ${addr()}. Talk soon.`, { then: () => voice.call ? voice.hangUp() : voice.afterReply() }), true;
+    if (NO.test(bare) || /^(?:no )?(?:that's (?:it|all)|nothing(?: else)?|i'm good|all good)/.test(bare)) return true;
     if (YES.test(bare)) return reply("Go ahead."), true;
     return false;
   }
@@ -525,6 +565,43 @@ function schoolReply(res, head, spoken) { render(); return reply((head ? head + 
 
 async function handle(text, spoken) {
   const bare0 = normalize(text).replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
+  const forced = text.match(/^search (?:the )?web (?:for )?(.+)$/i);
+  if (forced) return showSearch(forced[1]);
+  const calculated = WEB.calculate(text);
+  if (calculated != null) return reply(`Answer: ${calculated}. Calculated on this device.`);
+  const remember = (ui.original || text).match(/^(?:PG[, ]+)?(?:save this|remember (?:this|that))(?=\s|:|$)\s*(?::\s*)?(.*)$/i);
+  if (remember) {
+    const pending = remember[1].trim() || [...S.chat].reverse().filter(m => m.who === "me")[1]?.text || "";
+    return pending && !/^\s*(?:save this|remember (?:this|that))[.!?]?\s*$/i.test(pending)
+      ? previewNote(pending) : reply("No note text yet. Try “save this: bring the spare cable”.");
+  }
+  if (/^(?:brief me|read it)[.!?]?$/i.test(text) && ui.lastSearch) return reply(ui.lastSearch, { readAloud: true });
+  if (/^(?:brief me|what'?s my day)[.!?]?$/i.test(text)) {
+    const date = today();
+    const entries = live(date).map(b => `${b.title} from ${sayTime(b.start)} to ${sayTime(b.end)}`);
+    const due = SC.pending().filter(t => t.due && t.due <= date).map(t => `${t.title}, due ${SC.fmt.dueText(t)}`);
+    const untimed = [...untimedTasks(S, date, date, carrySince()), ...carryList()].map(t => t.title);
+    return reply([`Today, ${fmtDay(date, true)}.`, entries.length ? entries.join("; ") + "." : "No timed activities.", due.length ? `Due: ${due.join("; ")}.` : "", untimed.length ? `No time yet: ${untimed.join(", ")}.` : ""].filter(Boolean).join(" "), { readAloud: /^brief me/i.test(text), view: "today", date });
+  }
+  if (handleCollection(text)) return;
+  const everyday = text.match(/^(?:for (?:my )?(?:everyday|daily) tasks(?:[, ]+))?(?:add|include|put) (.+?)(?: (?:to|in) (?:my )?(?:everyday|daily) tasks)?[.!]?$/i);
+  if (everyday && /\b(?:everyday|daily) tasks\b/i.test(text)) {
+    const ops = everyday[1].split(/\s+(?:and|also)\s+|,\s*/i).map(title => ({ op: "add_routine", title }));
+    return reply(AG.apply(ops).join(" "), { view: "today", date: today() });
+  }
+  const forgetEveryday = text.match(/^(?:remove|delete|drop|take off) (.+?) from (?:my )?(?:everyday|daily) tasks[.!]?$/i);
+  if (forgetEveryday) {
+    const matches = namedBlocks(forgetEveryday[1], S.routines.filter(r => !r.disabled));
+    if (matches.length !== 1) return reply(matches.length ? "More than one task matches. Use the exact title shown under Everyday tasks." : "No matching everyday task.");
+    return reply(AG.apply([{ op: "remove_routine", id: matches[0].id }]).join(" "));
+  }
+  const free = bare0.match(/^when am i free(?: (?:on )?(.+))?$/);
+  if (free && (!free[1] || calendarDate(free[1], today()))) {
+    const date = free[1] ? calendarDate(free[1], today()) : today();
+    const from = date === today() ? Math.max(S.profile.dayStart, nowMin()) : S.profile.dayStart;
+    const slots = gaps(blocksOf(date), from, S.profile.dayEnd);
+    return reply(slots.length ? `Free ${fmtDay(date)}: ${slots.map(b => `${sayTime(b.start)} to ${sayTime(b.end)}`).join("; ")}.` : `No free slots of 20 minutes or more on ${fmtDay(date, true)}.`);
+  }
   const pantry = text.match(/^(?:please )?(?:make|generate|build|give me|find)(?: me)? (?:a |some )?recipes? (?:with|using|from) (.+)$/i)
     || text.match(/^(?:what can i (?:cook|make) with|i have these ingredients[: ]+)\s*(.+)$/i);
   if (pantry) {
@@ -547,15 +624,10 @@ async function handle(text, spoken) {
     const clock = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Hong_Kong", hour: "numeric", minute: "2-digit", hour12: true }).format(new Date());
     return reply(`${addr()}, it's ${fmtDay(today(), true)}, ${clock}, Hong Kong time.`);
   }
-  if (/^(?:please )?(?:read|repeat|say|speak)(?: out)? (?:your |the )?(?:last |whole |full |complete )?(?:reply|response|answer)(?: again| in full)?$/.test(bare0)) {
-    const last = [...S.chat].reverse().find(m => m.who === "pg");
-    if (last) { voice.say(speakable(last.text, true)); return; }
-  }
-  if (isEndCall(bare0) || /^(?:(?:okay|ok|thanks|thank you|pg)[ ,]+)*(?:good ?night|goodbye|bye|hang up)(?: pg| sir| please| now)*$/.test(bare0)) { ui.pending = null; return endCall(); }
   const personal = M.capturePersonal(text);
   const remembered = M.personalAnswer(text);
   if (remembered) return reply(remembered);
-  if (personal && (!AI.on() || text.length < 180 && !/\b(?:how|why|what|should|could|can you|help me)\b/i.test(text)))
+  if (personal)
     return reply(`Saved, ${addr()}. ${personal.text}`);
   // Daily reminders are definitions, separate from any single day's timetable.
   const dailyReminder = text.match(/^(?:(?:pg|please|can you)[, ]+)*(?:remind me to|remind me|add (?:a )?daily reminder (?:to|for)) (.+?) (?:every day|daily)(?: at (.+?))?[.!]?$/i)
@@ -578,7 +650,7 @@ async function handle(text, spoken) {
   if (await daily(text, bare0, spoken)) return;
   const it = intent(text);
   const d = ui.view === "today" && ui.pinDate ? ui.date : today();
-  // Read/check the actual saved timetable before consulting the model.
+  // Read the actual saved timetable.
   if (it.type === "now" || /\bwhat (?:am i supposed to|am i meant to|should i|do i need to) (?:be )?(?:do|doing)\b.*\b(?:now|at the moment)\b/i.test(text)) {
     const active = live(today()).filter(b => b.start <= nowMin() && nowMin() < b.end), next = upcoming()[0];
     let answer;
@@ -619,7 +691,7 @@ async function handle(text, spoken) {
       save(); return reply(`Marked ${routines[0].title} as done for today, ${addr()}. It stays as a daily reminder.`, { view: "today", date: today(), spoken });
     }
   }
-  if (/\b(?:build|create|generate|regenerate|rebuild|compile|plan)\b/i.test(text) && /\b(?:weekly|week|timetable)\b/i.test(text) && !AI.on()) {
+  if (/\b(?:build|create|generate|regenerate|rebuild|compile|plan)\b/i.test(text) && /\b(?:weekly|week|timetable)\b/i.test(text)) {
     openWeekPlanner();
     return reply("Tell me the tasks and their minutes in this planner, choose the days and breaks, then press Build timetable. Your existing fixed commitments stay in place.");
   }
@@ -633,19 +705,9 @@ async function handle(text, spoken) {
     && timed.some(x => x.s != null || x.e != null) && timed.every(x => x.cat !== "other"))
     return scheduleFrom(text, spoken, true);
   if (!ui.editing && !["greet", "hush", "dismiss", "school_add"].includes(it.type) && await localEdit(text, spoken)) return;
-  // Known intents stay local. Only open-ended conversation needs a model request.
-  if (AI.on() && !ui.quiet && ["ask", "schedule"].includes(it.type)) {
-    setStatus("Thinking…");
-    try { const ans = await aiChat(text, M.search(text, 4)); if (ans) return reply(ans, { spoken }); return voice.afterReply(); }
-    catch (e) { console.warn(e); ui.aiFail = AI.friendlyError(e); if (/Cloudflare AI isn't connected/.test(ui.aiFail) && !/^(?:what'?s next|read my schedule)/i.test(text.trim())) return reply(ui.aiFail); }
-  }
   switch (it.type) {
-    case "greet": {
-      return reply(hello());
-    }
-    case "hush": return reply(voice.call ? pickOne(["Sure, go ahead.", "Okay, I'm listening.", `Go ahead, ${addr()}.`]) : "Okay.", { then: () => voice.call ? voice.listen("command") : voice.afterReply() });
-    case "dismiss": return reply(it.bye || voice.call ? pickOne([`Okay, ${addr()}. I'm here if you need me.`, `Talk soon, ${addr()}.`, `Okay. Just say Hi PG when you need me.`]) : "Okay.", { then: () => voice.call ? voice.hangUp() : voice.afterReply() });
-    case "thanks": if (voice.call) ui.pending = { type: "more" }; return reply(voice.call ? `Anytime, ${addr()}. Anything else?` : `Anytime, ${addr()}.`);
+    case "greet": return reply("Try “What’s next?” or “Add gym tomorrow at 5 pm.”");
+    case "hush": case "dismiss": case "thanks": return reply("No changes.");
     case "help": return reply("Tell me your day and I'll plan it. I also teach you bass, keep your Bible plan, coach the gym, plan your meals and shopping, and remember what you learn.");
     case "now": {
       const c = current(), nx = upcoming()[0];
@@ -694,11 +756,7 @@ async function handle(text, spoken) {
       return reply(n.folder === "about" ? pickOne([`Got it, I'll remember that about you.`, `Noted. I wrote that in your Learned things about PraiseGod folder.`]) : `Saved to ${M.FOLDERS[n.folder].label}${n.refs.length ? `, linked to ${n.refs[0]}` : ""}.`);
     }
     case "recall": return recall(it.q, spoken);
-    case "ask": {
-      const ev = parseSchedule(text, { date: d, today: today(), now: nowMin() }).filter(i => i.kind === "event" && (i.s != null || i.e != null));
-      if (ev.length) return scheduleFrom(text, spoken);
-      return recall(it.q, spoken, true);
-    }
+    case "ask": case "unknown": { const q = WEB.webQuery(text); return q ? showSearch(q) : unrecognized(text); }
     // ---- Bible ----
     case "bible_plan": {
       const i = B.findBook(it.book);
@@ -744,7 +802,7 @@ async function handle(text, spoken) {
     // ---- Learning anything ----
     case "learn": {
       setStatus("Thinking…");
-      const steps = AI.on() ? await aiLearn(it.topic).catch(() => null) : null;
+      const steps = null;
       const tr = LN.create(it.topic, steps); ui.topic = "learn";
       return reply(LN.brief(tr), { view: "notes", spoken });
     }
@@ -814,18 +872,15 @@ async function handle(text, spoken) {
       if (SC.nonAcademic(text)) return scheduleFrom(text, spoken, true);
       const list = SC.parse(text);
       if (!list.length) return scheduleFrom(text, spoken);
-      if (!SC.academic(text)) {
-        ui.pending = { type: "academic-context", tasks: list, original: text };
-        return reply(`Is ${list.map(t => t.title).join("; ")} schoolwork or a personal activity, sir? Nothing saved.`, { spoken });
-      }
+      if (!SC.academic(text)) return unrecognized(text);
       const slotItems = parseSchedule(text.replace(/\b(?:due|deadline|submit|hand in)\b.*$/i, ""), { date: today(), today: today(), now: nowMin() });
       const slotEvents = slotItems.filter(i => i.kind === "event");
       if (list.length === 1 && slotEvents.length === 1 && slotEvents[0].s != null && slotEvents[0].e != null && !needsAsk(slotItems)) {
         slotEvents[0].title = list[0].title; slotEvents[0].cat = "study";
         SC.add(list); return reviewSchedule(slotItems, spoken);
       }
-      ui.pending = { type: "assignment-slot", tasks: list };
-      return reply(`What day, start time and end time should I put ${list.map(t => t.title).join("; ")} on the timetable? I'll add it to both School and the timetable after you confirm. Nothing saved yet.`, { spoken });
+      SC.add(list);
+      return reply(`Assignment saved: ${list.map(t => t.title).join("; ")}. Pinned on Today.`, { view: "today", date: today() });
     }
     case "school_plan": {
       openWeekPlanner();
@@ -838,7 +893,7 @@ async function handle(text, spoken) {
       SC.finish(t); render();
       if (it.min) return tookReply(t, it.min, spoken);
       ui.pending = { type: "actual", tid: t.id }; ui.lastTask = t.id;
-      return reply(`Nice work, ${addr()}. ${t.title} is done. Roughly how long did it take you in total?`, { view: "school", spoken });
+      return reply(`Done: ${t.title}.`, { view: "school", spoken });
     }
     case "school_took": {
       const t = SC.tasks().find(x => x.id === ui.lastTask) || SC.tasks().filter(x => x.done).sort((a, b) => (b.doneOn || "").localeCompare(a.doneOn || "")).at(0);
@@ -891,11 +946,6 @@ function completeCoach(cat, spoken) {
 async function recall(q, spoken, open) {
   const general = !/\babout\b|\bin [a-z]/.test(q) && /\b(?:what (?:have|did) i (?:learn|learned|learnt)|my (?:revelations|notes|lessons)|what revelations)\b/.test(q);
   let found = general ? M.notes().slice(0, 3) : M.search(q, 3);
-  if (AI.on() && (open || found.length)) {
-    setStatus("Thinking…");
-    const ans = await aiChat(q, found.length ? found : M.search(q, 6)).catch(e => { console.warn(e); return null; });
-    if (ans) return reply(ans);
-  }
   if (general && found.length) return reply(`Your latest: ` + found.map(n => `“${n.text}”`).join(" "), { view: "notes", spoken });
   const a = M.answer(q, found);
   if (a) return reply(a);
@@ -913,49 +963,36 @@ function renameCoachBlocks(d) {
 }
 
 async function scheduleFrom(text, spoken, deterministic = false) {
-  const ctx = { date: spoken && spoken !== "typed" ? today() : ui.view === "today" && ui.pinDate ? ui.date : today(), today: today(), now: nowMin() };
+  if (!hasCalendarCue(text)) return unrecognized(text);
+  const ctx = { date: today(), today: today(), now: nowMin() };
   // "can you add reading at 9pm" -> "reading at 9pm", so the title is just "Reading"
   const asked = text.replace(/^(?:(?:ok(?:ay)?|so|and|also|then|pg|hey|please)[ ,]+)*(?:(?:can|could|would|will) you (?:please )?|please |i want (?:you )?to |i need (?:you )?to |i'd like (?:you )?to |let's |go ahead and )?(?:add|put|schedule|book|pencil in|block out|block off|set up)\s+(?:in |me |a |an |some )?(?=\S)/i, "");
-  let items = parseSchedule(asked || text, ctx);
-  let events = items.filter(i => i.kind === "event");
-  // With the AI on, chatty or vague lines go to conversation instead of becoming calendar blocks.
-  const chatty = /^(?:oh|um+|uh+|so|well|hmm+|maybe|i think|i feel|i'?m (?:so |really |kind of |a bit )?(?:tired|sad|stressed|bored|happy|excited|worried|feeling)|honestly|you know|to be honest|what do you think|do you think|should i|why|how come|tell me|can you explain)\b/i.test(text.trim()) || /\?\s*$/.test(text);
-  const vague = events.some(e => e.cat === "other" && e.s == null && e.e == null);
-  // Only put things on the calendar when he clearly asks (a time, a day, or words like add / schedule / put).
-  const cue = /\b(?:add|schedule|put|plan|book|remind|block|set up|move|pencil|slot|fit|\d{1,2}(?::\d\d)? ?(?:am|pm|a\.m\.|p\.m\.)|at \d|from \d|for \d+ ?(?:min|minutes|hours?|h)\b|tomorrow|tonight|this (?:morning|afternoon|evening)|in the (?:morning|afternoon|evening)|later today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next week|due)\b/i.test(text);
-  const talkAbout = /\b(?:talk|chat|speak|tell me) (?:about|to you about)|\blet'?s talk\b/i.test(text);
-  if (!deterministic && AI.on() && !ui.quiet && events.length && (chatty || vague || talkAbout || !cue)) events = [];
-  if (!events.length && AI.on() && !ui.quiet) {
-    setStatus("Thinking…");
-    try { const ans = await aiChat(text, M.search(text, 4)); if (ans) return reply(ans); }
-    catch (e) { const m = AI.friendlyError(e); return reply(/Cloudflare/.test(m) ? m : `${m} You can check it in More, under PG's AI brain.`); }
-  }
-  if (!events.length) {
-    const a = M.answer(text, M.search(text, 2));
-    if (a) return reply(a);
-    return reply(`Sorry, ${addr()}, I didn't catch that. Try: bass lesson at 6:30, or what's next?`);
-  }
-  // Don't guess: ask for any missing time or length first.
-  const gap = needsAsk(items);
-  if (gap) { ui.pending = { type: "clarify", items, tries: 0 }; return reply(askLine(gap), { spoken }); }
+  const clean = (asked || text).replace(/\b(?:to|on|in) (?:my |the )?(?:calendar|timetable|schedule)\b/gi, "").replace(/^(?:my |the )?(?:calendar|timetable|schedule)\s*:\s*/i, "");
+  const venue = clean.match(/(?:\bvenue(?: is|:)|\bat (?:the )?)([a-z][^;?!]*?)[.!]?$/i);
+  const location = venue && !/^(?:noon|midnight|half past|quarter|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i.test(venue[1].trim()) ? venue[1].trim() : "";
+  const items = parseSchedule(location ? clean.slice(0, venue.index) : clean, ctx);
+  const events = items.filter(i => i.kind === "event");
+  if (!events.length) return unrecognized(text);
+  if (location && events.length === 1) events[0].venue = location;
   return reviewSchedule(items, spoken);
 }
 async function reviewSchedule(items, spoken, replacing = []) {
   const events = items.filter(i => i.kind === "event");
   if (events.some(i => i.invalidRange || i.e != null && i.s != null && i.e <= i.s))
     return reply("Nothing saved. One end time is before its start time. Please give the day and the start and end times with AM or PM.");
-  const name = t => String(t).split(" · ")[0].toLowerCase().replace(/[^a-z0-9]/g, "");
-  const alternatives = events.flatMap(i => blocksOf(i.date).filter(b => !b.done && !b.routine
-    && name(b.title) === name(i.title) && (b.start !== i.s || b.end !== (i.e ?? i.s + i.dur))).map(b => ({ id: b.id, date: i.date })));
-  const inferredReplacement = alternatives.some(b => !replacing.some(old => old.id === b.id));
-  replacing = [...new Map([...replacing, ...alternatives].map(b => [b.id, b])).values()];
-  if (!inDraft() && (inferredReplacement || events.some(i => i.ambiguous) || spoken && spoken !== "typed")) {
-    ui.pending = { type: "schedule-review", items, replace: replacing };
-    const previous = replacing.map(x => { const b = blocksOf(x.date).find(b => b.id === x.id); return b && { ...b, date: x.date }; }).filter(Boolean);
-    const replaceLine = previous.length ? ` This would replace ${previous.map(b => `${b.title} at ${sayTime(b.start)} on ${fmtDay(b.date, true)}`).join("; ")}.` : "";
-    return reply(`Not saved yet, ${addr()}. I heard: ` + events.map(i => `${i.title} on ${fmtDay(i.date, true)}, ${sayTime(i.s)} to ${sayTime(i.e ?? i.s + i.dur)}`).join("; ") + `.${replaceLine} Is that correct?`, { full: true });
+  const timed = [], untimed = [];
+  for (const i of items) {
+    if (i.kind !== "event") { timed.push(i); continue; }
+    if (i.s == null || i.ambiguous) {
+      if (!S.inbox.some(t => t.date === i.date && activityKey(t.title) === activityKey(i.title))) {
+        S.inbox.push({ id: uid(), title: i.title, date: i.date, cat: i.cat, venue: i.venue || "", dur: i.durDefault ? 60 : i.dur || 60 });
+        untimed.push(i);
+      }
+    } else timed.push({ ...i, dur: i.e == null && i.durDefault ? 60 : i.dur });
   }
-  return commitSchedule(items, spoken, replacing);
+  if (timed.some(i => i.kind === "event")) await commitSchedule(timed, spoken, replacing);
+  if (untimed.length) return reply(`No time yet: ${untimed.map(i => `${i.title} on ${fmtDay(i.date, true)}`).join("; ")}. Set a time from Today.`, { view: "today", date: untimed[0].date });
+  if (!timed.some(i => i.kind === "event")) return reply("Already on your timetable, or no activity was found.");
 }
 async function commitSchedule(items, spoken, replacing = []) {
   const events = items.filter(i => i.kind === "event");
@@ -963,6 +1000,7 @@ async function commitSchedule(items, spoken, replacing = []) {
   const snaps = dates.map(snapshot);
   for (const old of replacing) day(old.date).blocks = day(old.date).blocks.filter(b => b.id !== old.id);
   const res = placeItems(items, day, { today: today(), now: nowMin(), dayStart: S.profile.dayStart, dayEnd: S.profile.dayEnd });
+  if (res.duplicates.length && !res.added.length && !res.unplaced.length) return reply("Already on your timetable.");
   for (const b of [...res.added, ...res.updated]) if (SC.academic(b.title)) {
     const [task] = SC.add([{ title: b.title, kind: "assignment", due: null, dueMin: null, est: null }]);
     b.tid = task.id;
@@ -1015,219 +1053,7 @@ function reviewText() {
   return t;
 }
 
-// ================= Optional AI (user's own key) =================
-async function callAI(system, user, json) { return AI.call(system, user, { json }); }
-async function aiExtract(text, ctx) {
-  const sys = `Extract schedule items from speech. Today is ${ctx.today}. Fix speech-to-text errors (e.g. "solid work" = SolidWorks, "based lessons" = bass lessons, wrong AM/PM). Return JSON {"items":[{"title":"","category":"class|study|work|commute|gym|bass|bible|church|learn|band|meal|meeting|social|rest|other","date":"YYYY-MM-DD","start":"HH:MM or null","end":"HH:MM or null","minutes":number or null}]} in the order spoken. Return {"items":[]} if none.`;
-  const raw = await callAI(sys, text, true);
-  const o = JSON.parse(raw.replace(/^```json\s*|```$/g, ""));
-  const toM = s => { if (!s) return null; const [h, m] = s.split(":").map(Number); return h * 60 + m; };
-  return (o.items || []).map(x => { const s = toM(x.start), e = toM(x.end); const cat = CATS[x.category] ? x.category : "other"; return { kind: "event", title: x.title || "Task", cat, date: x.date || ctx.date, s, e, dur: x.minutes || (s != null && e != null ? e - s : DEFAULT_MIN[cat]) }; });
-}
-function aiContext(notes = []) {
-  const d = today(), now = nowMin();
-  const sched = live(d).map(b => `${fmtTime(b.start)}-${fmtTime(b.end)} ${b.title}`).join("; ") || "nothing planned";
-  const due = SC.pending().slice(0, 6).map(t => `${t.title}${t.due ? " due " + t.due : ""}`).join("; ") || "none";
-  let meals = ""; try { meals = F.todayMeals(d, false).map(m => `${m.when}: ${m.r.t}`).join("; "); } catch {}
-  const facts = M.facts().slice(0, 25).map(n => "- " + n.text).join("\n") || "- nothing yet";
-  const mem = notes.length ? notes.map(n => `- ${n.date} (${M.FOLDERS[n.folder].label}): ${n.text}`).join("\n") : "";
-  return `Now: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Hong_Kong", weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })} Hong Kong time (UTC+8). Today is ${today()}. Do not use the server timezone or infer the date from his greeting. He lives in Hong Kong.
-Today's timetable: ${sched}.
-Assignments: ${due}.
-Today's suggested meals: ${meals || "none"}.
-His goals: ${D.goals().map(g => g.text).join("; ") || "none saved yet"}.
-Learned things about PraiseGod:
-${facts}${mem ? `\nHis saved notes that may apply:\n${mem}` : ""}
-These are permanent memories, even if this is a new call. Use them to answer personal questions. Never say you don't know his personal life when the answer is here.`;
-}
-const REFUSE = /\b(?:can(?:'|’|no)t|cannot|unable to|not able to|don't have (?:the )?(?:ability|access|permission)|no way to|outside (?:of )?my|beyond my)\b/i;
-const ACTION = /\b(?:add|put|include|insert|create|make|schedule|book|plan|set|change|edit|update|rename|move|shift|push back|swap|replace|switch|remove|delete|drop|cancel|clear|take (?:out|off|away)|get rid of|increase|decrease|raise|lower|turn (?:on|off)|mark|log|save|write down|note)\b/i;
-function history(n = 10) {
-  // Leave out old refusals so the AI doesn't copy them
-  return S.chat.slice(-n - 1, -1).filter(m => m.text && !(m.who !== "me" && REFUSE.test(m.text))).map(m => ({ role: m.who === "me" ? "user" : "assistant", content: m.text }));
-}
-// A natural back-and-forth with PG. The AI can also ask the app to do things and remember facts.
-async function aiTalk(text, notes = [], web = null, live = false) {
-  const sys = `You are PG, PraiseGod's personal assistant and partner, talking with him by voice like on a phone call. Call him "${addr()}" now and then, not every sentence.
-Speak naturally and warmly, like a smart friend who knows him well. You can talk about ANYTHING he brings up: faith and the Bible, life, feelings, relationships, school subjects, science, history, tech and coding, money, business, health, fitness, food, music, sports, news, ideas, jokes, advice or just casual chat. Give real, thoughtful answers with substance, share your view when he asks, and keep the conversation going like a real person would. Never refuse a normal topic or steer him back to the app. For business (starting or growing a business, marketing, sales, pricing, money, investing, companies, side hustles, creator products), answer like a sharp business mentor with clear, practical steps; search the internet for real company facts, numbers, prices and market news.
-His words come from voice recognition or quick typing, so some words may be misheard or misspelled, like "corner" when he said "call", "jim" for "gym", "base" for "bass", or a word that sounds alike but makes no sense in the sentence. Work out what he really meant from the whole sentence and the conversation so far, act on that, and don't mention the mistake. When you changed any word, put his corrected sentence in "heard". When you write Cantonese, give the Chinese characters, then an easy English-style "say it" spelling with NO tone numbers (for example 你好 "say it: nay hoh" means hello), then the meaning. Never use Jyutping numbers like nei5. You have the internet. When answering needs current or exact facts you aren't sure of (news, weather, sports, prices, people, recent events, places, opening hours, anything "latest" or "today", or anything after 2024), don't guess: reply with "search" set to a short web search query and "say" empty, and you'll get live results back. Write the query like a good Google search with the key words only, and put in the year or date when he says "this year", "today" or "latest" (today is ${today()}). Never say you can't access the internet. When you search, leave "say" empty: never say "let me check" or "one moment", because you get the results straight away.
-Never promise to do something later ("I'll add", "I'll look"). Either do it now with "ops"/"do" in this same reply, or ask the question you need answered.
-Personal memories: save explicit disclosures immediately in "remember", even if they are about relationships or faith. "I love Maya" means save "You love Maya." This is about his life, not a one-off question. Never wait for repeated mentions of a personal fact. Do not save hypothetical examples or questions as facts.
-Assignments must be saved in School with add_assignment, never just a calendar block. Save the known title and deadline now; ask for any missing due date/time or study estimate without discarding the assignment.
-For moving a whole timetable, use move_day with from and to. Do not recreate its items with add_block. A move removes the old entries and preserves IDs.
-Daily reminders use add_routine. They survive clearing or moving the timetable, and are stopped only when he explicitly asks. An untimed daily habit can be saved as a checklist, without inventing a time.
-The weekly table and checklist share the same saved blocks. For weekly generation/regeneration use plan_week, not a pile of add_block operations. Ask for missing task durations, eligible days, daily start/end times and preferred work/break lengths before planning. Existing weekly_plans contain confirmed settings and task lists; reuse those and include prior tasks when he adds more, unless he explicitly removes them. Keep fixed commitments, completed work and daily routines. Do not promise more work than fits; report any unallocated minutes. For advice: UNC's calendar guidance recommends fixed commitments first, time estimates, color coding, buffer time and readjusting: https://learningcenter.unc.edu/tips-and-tools/using-planners . Cornell recommends balanced activities, spreading work and real breaks: https://lsc.cornell.edu/how-to-study/studying-for-and-taking-exams/guidelines-for-creating-a-study-schedule/ . These are principles, not permission to invent his personal availability or durations.
-Gym edits must use add_exercise with the exact gym day, real exercise name, cues, sets and reps. Do not call it saved if you did not return an operation. Do not claim an "inner chest" muscle can be isolated or that one exercise will open a chest gap. Explain that chest development is overall and the shape varies. Any videoId must come from his actual YouTube URL or live internet results, never an invented ID. Video search links are searches, not a fetched or watched video.
-Every exercise you add with add_exercise automatically gets a "Watch on YouTube" form-video button in his Gym tab, made from its "search" field (for example "incline dumbbell press proper form"). So when he asks for videos, add the exercise with a good "search", and tell him the video button is on the exercise in the Gym tab. Exercises already in his plan already have that video button.${web ? `
-
-LIVE INTERNET RESULTS for his question, fetched just now (${new Date().toString().slice(0, 24)}):
-${web.text}
-
-Answer from these results. Be specific with the real facts and numbers, mention where they came from by name (like "according to Reuters"), and don't set "search" again. If the results don't answer it, say so honestly.` : ""} Your specialty is still his life and his PG app: his schedule, plans, gym, food, Bible, bass, school and goals, so when a topic touches those, use his data below.
-Keep replies easy to listen to: usually one to four spoken sentences. If he asks you to explain, teach or go deeper, you can talk longer, up to about eight sentences. No lists, no markdown, no emojis. Ask a short follow-up question when it helps. Use what you know about him below, and his own notes when they apply.
-He is a Christian student who plays bass, goes to the gym and wants high-protein, high-fiber food.
-
-${aiContext(notes)}
-
-You are fully in control of his app and you CAN change anything in it: timetable, gym exercises, Bible plan, bass, songs, shopping list, notes, food, school and settings. The only thing you can't touch is API keys and private settings. Never tell him you can't change the app or that he should do it himself.
-NEVER ASSUME. Before you change anything, make sure you know every detail the change needs: which day, what time it starts, how long it lasts or when it ends, which exact item he means, names, amounts, sets and reps. If any detail is missing or unclear, make no change yet ("ops" and "do" empty) and ask for ALL the missing details in one short question. Don't fill gaps with defaults or your own picks. Use the conversation so far: if he already gave a detail, don't ask for it again, and once he has answered, make the change with "ops" (or "do") in that reply and say briefly what you did. Only when he says "you choose", "anything" or "up to you" may you pick a sensible option yourself, and then tell him what you picked. If you need knowledge (like which exercise works a muscle), you may suggest one, but still ask him to confirm the details before adding it. Asking is not refusing.
-When he tells you his plans for the day, add each one he gave full details for, and ask about the ones missing a time or length.
-When he tells you a goal, save it with {"op":"push","path":"goals","value":{"text":"...","made":"${today()}"}}.
-
-APP DATA (today is ${today()}):
-${AG.snapshot()}
-
-Example: he says "add an exercise for my chest" -> {"say":"We could use a cable chest fly, sir. Should I add it to push day, and how many sets and reps would you like?","ops":[],"do":[],"remember":[]}
-Then he says "push day, 3 sets of 10 to 15" -> {"say":"","ops":[{"op":"add_exercise","day":"push","name":"Cable chest fly","muscles":"Chest","cues":["Use a comfortable light load","Keep a slight bend in your elbows","Bring your hands together under control without shoulder pain"],"search":"cable chest fly proper form","sets":3,"reps":"10-15","rest":60}]}
-Reply ONLY with JSON: {"say": "what you say out loud", "ops": [direct changes], "do": ["plain commands for the app"], "remember": ["new lasting facts about him"], "search": "web search query, only when you need the internet", "heard": "his corrected sentence, only if you fixed a misheard word", "topic": "what this is about"}.
-${AG.TOOLS}
-"do" is for when he clearly wants the app to act. Write each as a short command the app understands, for example "gym at 5pm", "bass lesson tomorrow at 6:30pm", "I have a history essay due Friday", "add eggs to my shopping list", "I don't eat pork", "is my plan realistic", "move gym to 7pm", "clear today". Leave it empty otherwise.
-For homework, assignments, essays, projects and tests, use add_assignment and keep the exact name he gave. Never make up a due time or a timetable slot he didn't say.
-"remember" is ONLY for lasting things about him that will still be true next month: who he is (school, church, city, age, job), people in his life, likes and dislikes, food rules and allergies, habits and routines, goals and dreams, skills he's working on, strong opinions and values, and how he wants PG to talk or act. NOT for one-off questions, today's plans, passing moods, things he asked you to look up, or facts about the world. Write each as a "You ..." sentence. Leave it empty if nothing new.
-"topic" is a 1 to 3 word label for what his message is about, like "business", "premier league", "bass guitar", "bible", "fitness", "coding" or "cantonese". Use "" for small talk, greetings and simple app commands.`;
-  const concise = "\nLatency matters: answer in 1 to 3 short sentences unless he explicitly asks for detail. Never reinterpret an explicit time, date, activity or AM/PM. A work session is not a deadline. Never invent extra study sessions. Ask one short question when unsure.";
-  const detailed = /\b(?:detail|thorough|step.by.step|full explanation|explain fully)\b/i.test(text);
-  const raw = await AI.call(sys + concise, [...history(6), { role: "user", content: live ? text + "\n\n(PG note: this needs live facts from the internet, so reply with a \"search\" query.)" : text }], { json: true, max: detailed ? 900 : 450 });
-  const o = AI.parseJSON(raw) || { say: String(raw || "").trim() };
-  {
-    const heard = typeof o.heard === "string" ? o.heard.trim() : "";
-    const me = S.chat.at(-1)?.who === "me" ? S.chat.at(-1) : S.chat.slice().reverse().find(m => m.who === "me");
-    if (heard && me && me.text === text && heard.toLowerCase() !== text.toLowerCase() && heard.length < text.length * 1.6 + 10) { me.raw = me.raw || text; me.text = heard; save(); paintChat(); }
-    if (!web && typeof o.topic === "string") D.noteTopic(o.topic, M);
-  }
-  // He needs the internet: look it up, then answer from the live results.
-  const q = !web && typeof o.search === "string" ? o.search.trim() : "";
-  if (q && !(Array.isArray(o.ops) && o.ops.length)) {
-    setStatus("Searching the internet…");
-    const found = WEB.SPORTS_RE.test(q + " " + text) ? await WEB.sports(q + " " + text).catch(() => null) || await WEB.search(q).catch(() => null)
-      : WEB.WEATHER_RE.test(q + " " + text) ? await WEB.weather(text).catch(() => null) : await WEB.search(q).catch(e => (console.warn(e), null));
-    if (found) return aiTalk(text, notes, found);
-    return { sources: [], say: `I searched the internet for that, ${addr()}, but couldn't find a reliable answer. Want me to try it a different way?`, ops: [], do: [], remember: [] };
-  }
-  if (web) {
-    // The answer must come from the results: never "let me check" or a bare "Search".
-    let say = String(o.say || "").trim();
-    if (!say || /^search\b|let me (?:check|look|search|find)|i(?:'ll| will) (?:check|look|search)|one moment|hold on/i.test(say) && say.length < 90) say = web.spoken || `Here's what I found, ${addr()}: ${web.sources.slice(0, 2).map(x => x.title).join("; ")}.`;
-    o.say = say; o.search = "";
-  }
-  // Cantonese from the AI: swap any Jyutping numbers (nei5 hou2) for the easy spelling (nay hoh).
-  if (typeof o.say === "string" && /[\u4e00-\u9fff]/.test(o.say)) o.say = o.say.replace(/\b(?:[a-z]{1,6}[1-6](?:\s+|(?=[^a-z0-9])|$)){2,}/gi, m => sayLike(m.trimEnd()) + (/\s$/.test(m) ? " " : ""));
-  const r = { sources: web?.sources || [], say: String(o.say || "").trim(), ops: Array.isArray(o.ops) ? o.ops : [], do: (Array.isArray(o.do) ? o.do : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3), remember: (Array.isArray(o.remember) ? o.remember : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3) };
-  // He asked for a change but the AI only talked (or said it couldn't): ask again, just for the changes.
-  if (!web && !r.ops.length && !r.do.length && REFUSE.test(r.say) && ACTION.test(text)) {
-    try {
-      const raw2 = await AI.call(`You turn PraiseGod's request into changes to his PG app. You CAN change everything in the app below, so never refuse. Never assume: if the request is missing a detail the change needs (which day, start time, length, which item, amounts, sets and reps), make no change and put one short question asking for all the missing details in "say". Use the earlier conversation for details he already gave.
-APP DATA (today is ${today()}):
-${AG.snapshot()}
-
-${AG.TOOLS}
-"do" is a list of short plain commands for the app, like "gym at 5pm" or "add eggs to my shopping list".
-Reply ONLY with JSON: {"say": "one short spoken sentence saying what you did, calling him ${addr()}", "ops": [...], "do": [...]}. If it is not a change request at all, reply {"say": "", "ops": [], "do": []}.`, [...history(6), { role: "user", content: text }], { json: true, max: 900 });
-      const o2 = AI.parseJSON(raw2) || {};
-      const ops = Array.isArray(o2.ops) ? o2.ops : [], dos = (Array.isArray(o2.do) ? o2.do : []).filter(x => typeof x === "string" && x.trim()).slice(0, 3);
-      if (ops.length || dos.length) Object.assign(r, { ops, do: dos, say: String(o2.say || "").trim() || (REFUSE.test(r.say) ? "" : r.say) });
-      else if (/\?\s*$/.test(String(o2.say || "")) && !REFUSE.test(o2.say)) r.say = String(o2.say).trim();
-    } catch (e) { console.warn(e); }
-  }
-  if (!r.ops.length && !r.do.length && REFUSE.test(r.say) && ACTION.test(text)) r.say = `I didn't catch exactly what to change, ${addr()}. Say it once more, like "add cable crossovers to push day".`;
-  return r;
-}
-async function aiChat(text, notes = []) {
-  const before = inDraft() ? JSON.parse(JSON.stringify(S)) : null;
-  try { return await aiChatImpl(text, notes); }
-  catch (error) {
-    if (before && inDraft()) {
-      for (const k of Object.keys(S)) delete S[k];
-      Object.assign(S, before); C.syncCustom();
-    }
-    throw error;
-  }
-}
-async function aiChatImpl(text, notes = []) {
-  if (ui.correctionContext) text = ui.correctionContext + text;
-  // Weather and obviously live questions go to the internet first, so the answer is fast and real.
-  let web = null;
-  if (WEB.WEATHER_RE.test(text)) { setStatus("Checking the weather…"); web = await WEB.weather(text).catch(e => (console.warn(e), null)); }
-  else if (WEB.SPORTS_RE.test(text) && !ACTION.test(text)) { setStatus("Checking the fixtures…"); web = await WEB.sports(text).catch(e => (console.warn(e), null)); }
-  let r;
-  try { r = await aiTalk(text, notes, web, !web && WEB.LIVE_RE.test(text) && !ACTION.test(text)); }
-  catch (e) { if (web?.spoken) { ui.sources = web.sources; return web.spoken; } throw e; }   // AI down: still give the live weather
-  ui.sources = r.sources?.length && r.say ? r.sources : null;
-  for (const op of r.ops || []) if (op.op === "add_exercise" || op.op === "attach_video") {
-    // Discard invented IDs. Keep only a user-supplied URL or a validated lookup.
-    const supplied = text.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/))([\w-]{11})/i)?.[1];
-    const video = await WEB.exerciseVideo(op.name || op.exercise, supplied).catch(() => null);
-    delete op.videoId;
-    if (op.op === "attach_video" && !video) throw new Error("I couldn't check that YouTube video. Nothing saved. Please try a different video.");
-    if (video) { op.videoId = video.id; op.videoBy = video.by; }
-  }
-  const explicit = parseSchedule(text, { date: today(), today: today(), now: nowMin() }).filter(x => x.kind === "event" && x.s != null && x.e != null);
-  const proposed = (r.ops || []).filter(o => o.op === "add_block");
-  // Explicit user ranges are constraints, not suggestions to the model.
-  if (proposed.length && explicit.length) {
-    for (const it of explicit) {
-      const candidate = proposed.find(o => String(o.title).toLowerCase() === it.title.toLowerCase());
-      const min = v => typeof v === "number" ? v : /^(\d{1,2}):(\d{2})$/.test(String(v)) ? +String(v).split(":")[0] * 60 + +String(v).split(":")[1] : null;
-      if (!candidate || candidate.date !== it.date || min(candidate.start) !== it.s || min(candidate.end) !== it.e)
-        throw new Error(`Nothing saved. The generated plan did not preserve ${it.title} on ${it.date}, ${sayTime(it.s)} to ${sayTime(it.e)}. Please give that timetable directly.`);
-    }
-  }
-  return finishTalk(r);
-}
-// Run what the AI asked for quietly, then speak its reply.
-async function finishTalk(r, confirmed = false) {
-  const calendar = (r.ops || []).filter(o => /block|clear_day|move_day|plan_week/.test(o.op || "") || /^(?:days|school)(?:\.|$)/.test(o.path || ""));
-  const commands = (r.do || []).filter(c => /\b(?:at|from|to|until|schedule|plan|timetable|study|assignment|church|move|remove|delete)\b|\d/.test(c));
-  if (!inDraft() && !confirmed && (calendar.length || commands.length)) {
-    const summary = calendar.map(o => {
-      const old = Object.values(S.days).flatMap(d => d.blocks || []).find(b => b.id === o.id);
-      const time = x => x == null ? "" : typeof x === "number" ? sayTime(x) : x;
-      if (o.op === "plan_week") return `build week ${o.weekStart}: ${(o.tasks || []).map(t => `${t.title}, ${t.minutes} minutes, ${(t.days || []).join(", ")}`).join("; ")}, between ${o.start} and ${o.end}, ${o.focusMinutes} minutes work / ${o.breakMinutes} minutes rest`;
-      if (o.op === "move_day") return `move ${o.from} to ${o.to}`;
-      if (o.path) return `change ${o.path}: ${JSON.stringify(o.value ?? o.id)}`;
-      return `${o.op.replace(/_/g, " ")}: ${o.title || old?.title || o.id || "all entries"}, ${o.date || old?.date || today()}${o.start != null || old ? `, ${time(o.start ?? old?.start)} to ${time(o.end ?? old?.end)}` : ""}`;
-    }).concat(commands);
-    ui.pending = { type: "ai-calendar", r };
-    return `Not saved yet, ${addr()}. Please check: ${summary.join("; ")}. Is that correct?`;
-  }
-  (r.remember || []).forEach(f => { if (!M.facts().some(n => n.text.toLowerCase() === f.toLowerCase())) M.add(f, { folder: "about" }); });
-  const done = [];
-  if (r.ops?.length) {
-    const lines = AG.apply(r.ops, { onDone: undo => toast("PG made changes.", "Undo", () => { undo(); C.syncCustom(); render(); toast("Undone."); }) });
-    if (r.ops.some(o => /exercise/.test(o.op))) {
-      const added = r.ops.find(o => o.op === "add_exercise");
-      if (added?.day) C.switchDay(C.dayKeyFor(added.day) || added.day);
-      const ex = added && C.findEx(added.name); if (ex) ui.openEx = ex;
-      go("gym");
-    }
-    else if (r.ops.some(o => o.op === "add_assignment")) go("school");
-    else if (r.ops.some(o => o.op === "plan_week")) go("today", r.ops.find(o => o.op === "plan_week").weekStart || today());
-    else if (r.ops.some(o => /block|clear_day/.test(o.op))) go("today", r.ops.map(o => o.date).find(x => /^\d{4}-/.test(x || "")) || today());
-    else render();
-    // The application, not the model, is the authority on whether a write succeeded.
-    done.push(...lines);
-  }
-  for (const c of r.do) {
-    ui.quiet = [];
-    try { await handle(c, false); done.push(...ui.quiet); }
-    finally { ui.quiet = null; }
-  }
-  if (r.do.length) render();
-  r.do = r.do || [];
-  if (!r.say && !done.length) return null;
-  if (done.length) return [...new Set(done)].join(" ");
-  if (!r.ops.length && !r.do.length && /^(?:done|added|saved|updated|moved|removed|deleted|i(?:'ve| have) (?:added|saved|updated|moved|removed))/i.test(r.say) && !r.remember.length)
-    return `I haven't saved a change yet, ${addr()}. What exactly should I change?`;
-  return r.say;
-}
-async function aiLearn(topic) {
-  const raw = await callAI(`Make a beginner-to-advanced learning plan. Return JSON {"steps":[{"t":"short step title","d":"one sentence","q":"a YouTube search query for this step"}]} with 6 to 8 steps.`, topic, true);
-  const o = JSON.parse(raw.replace(/^```json\s*|```$/g, ""));
-  return (o.steps || []).filter(s => s.t).slice(0, 8);
-}
-
-
-// ================= Add / delete / replace in plain words =================
+ // ================= Add / delete / replace in plain words =================
 const WD = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 const DEL_RE = /^(?:(?:ok(?:ay)?|so|and|also|please|pg|hey|actually|now|then|oh)[ ,]+)*(?:(?:can|could|would|will) you |please |i want (?:you )?to |i need (?:you )?to |i'd like (?:you )?to |let's |lets |go ahead and |just )?(delete|remove|cancel|drop|scrap|erase|clear|skip|ditch|take out|take off|take away|get rid of|forget about|no more|no)\b\s*(.*)$/;
 const NEG_RE = /^(?:(?:ok(?:ay)?|so|actually|honestly|pg|and|but|oh)[ ,]+)*i(?:'m| am)? ?(?:not (?:going|gonna|doing|able)|won't|will not|can't|cannot|don't (?:want|wanna|need|have time)|do not (?:want|need)|no longer|am not)\b(?: (?:to|be|going to|gonna|for))?(?: (?:go(?:ing)? to|go|do(?:ing)?|make it to|make|have|attend(?:ing)?|practi[cs]e|practi[cs]ing|study|studying|read(?:ing)?|play(?:ing)?|train(?:ing)?|hit|do the))?\s*(.*)$/;
@@ -1282,9 +1108,8 @@ function splitClauses(text) {
 function exerciseCmd(c) {
   const add = c.match(/^(?:(?:can|could) you |please )?(?:add|put|include|throw in) (?:in )?(?:a |an |the |some )?(.+?) (?:to|into|in|on) (?:my |the )?(?:(push|pull|legs?|upper|lower|full body) )?(?:day|workout|routine|exercises?|exercise list|gym(?: list| plan| day| routine)?)\b/);
   // Vague asks ("an exercise for my chest") need the AI to choose one
-  if (add && /^(?:new |another |one more |good |better )?(?:exercises?|workouts?|moves?|something|one|it|that|this)\b|\bfor (?:my |the )?/i.test(add[1])) return AI.on() ? "@ai" : "Tell me which exercise to add, like cable crossovers to push day. Or connect an AI in Settings and I'll pick one for you.";
+  if (add && /^(?:new |another |one more |good |better )?(?:exercises?|workouts?|moves?|something|one|it|that|this)\b|\bfor (?:my |the )?/i.test(add[1])) return "Tell me which exercise to add, like cable crossovers to push day.";
   if (add) {
-    if (AI.on() && !ui.quiet) return "@ai";
     const sets = c.match(/(\d+) sets? (?:of )?(\d+(?:\s*(?:to|-)\s*\d+)?)/);
     if (!add[2] || !sets) return "Which gym day, and how many sets and reps should I use?";
     const r = C.addExercise({ name: add[1].replace(/\s+exercise$/, ""), sets: +sets[1], reps: sets[2] }, add[2]);
@@ -1329,7 +1154,6 @@ async function localEdit(text, spoken) {
       || low.match(/\b(tomorrow)'?s? (?:schedule|timetable|plans?) (?:back )?to (today)\b/);
     if (m) { const lines = AG.apply([{ op: "move_day", from: m[1], to: m[2] }]); return reply(lines.join(" "), { view: "today", date: m[2] === "today" ? today() : addDays(today(), 1), spoken }), true; }
     // Let the AI resolve unstructured wording, without a partial delete/add.
-    if (AI.on() && !ui.quiet) return false;
     return reply("Which day should I move the timetable from, and which day should it go to?"), true;
   }
   const ex = exerciseCmd(low.replace(/[,.;]/g, ""));
@@ -1396,8 +1220,6 @@ async function localEdit(text, spoken) {
     if (/\b(?:add|put|schedule|plan|book|move|shift|push|pencil|slot|fit|make|change|\d{1,2}(?::\d\d)?\s?(?:am|pm)|at \d)\b/.test(c)) adds.push(c);
   }
   if (!acted && !adds.length && !said.length) return false;
-  // With an AI key, anything PG couldn't pin down goes to the AI instead of failing.
-  if (AI.on() && !ui.quiet && said.some(x => /^I couldn't find/.test(x))) { Object.values(snaps).forEach(sn => { day(sn.d).blocks = sn.blocks; }); return false; }
   for (const a of adds) {
     ui.quiet = []; ui.editing = true;
     try { await handle(a, false); said.push(...ui.quiet); }
@@ -1445,7 +1267,6 @@ function render() {
   document.title = TITLES[ui.view] + " · PG";
   paintSuggest();
 }
-function greeting() { const h = Math.floor(nowMin() / 60); return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"; }
 const catVar = c => `--c:${(CATS[c] || CATS.other).color}`;
 const bar = p => `<div class="bar"><i style="width:${p}%"></i></div>`;
 
@@ -1453,19 +1274,31 @@ function viewToday() {
   const d = ui.date, isT = d === today(), bl = blocksOf(d), n = nowMin();
   const cf = conflicts(bl);
   const cur = isT ? current() : null, nx = isT ? upcoming()[0] : null;
-  let h = `<div class="spread"><div class="eyebrow">${esc(fmtDay(d, true))}</div>
+  const due = SC.pending().filter(t => isT || t.due === d);
+  let h = due.length ? `<section aria-label="Assignments due"><h2 class="sec"><span>${isT ? "Assignments due" : "Due this day"}</span></h2><div class="card due-list">${due.map(t => {
+    const hours = t.due ? (+new Date(`${t.due}T00:00:00+08:00`) + (t.dueMin ?? 1439) * 60000 - Date.now()) / 3600000 : null;
+    const status = hours == null ? "" : hours < 0 ? "Overdue" : hours <= 24 ? `Due in ${Math.max(1, Math.ceil(hours))} hr` : `Due in ${Math.ceil(hours / 24)} days`;
+    return `<div class="set-row ${hours != null && hours < 0 ? "due-overdue" : hours != null && hours <= 48 ? "due-soon" : ""}"><div><strong>${esc(t.title)}</strong><div class="sub">${esc(t.due ? fmtDay(t.due, true) : "No due date")} · ${t.dueMin == null ? "No due time" : fmtTime(t.dueMin)}${status ? ` · ${status}` : ""}</div></div><button class="btn" data-act="task-done" data-id="${esc(t.id)}" aria-label="Mark ${esc(t.title)} done">Done</button></div>`;
+  }).join("")}</div></section>` : "";
+  h += `<div class="spread"><div class="eyebrow">${esc(fmtDay(d, true))}</div>
     <div class="day-nav"><button class="icon-btn" data-act="day" data-n="-1" aria-label="Previous day"><svg><use href="#i-left"/></svg></button>
     ${isT ? "" : `<button class="chip" data-act="day" data-n="0">Today</button>`}
     <button class="icon-btn" data-act="day" data-n="1" aria-label="Next day"><svg><use href="#i-right"/></svg></button></div></div>
-    <h1 class="title">${isT ? `${greeting()}, <em>${esc(addr())}</em>.` : esc(fmtDay(d))}</h1>`;
-  if (isT) { const v = D.verse(); h += `<details class="daily-verse"><summary>Today's verse · ${esc(v.ref)}</summary><p>${esc(v.text)}</p><button class="btn sm" data-say="Read today's verse">Hear verse</button></details>`; }
-  h += weeklyTable(d);
+    <h1 class="title">${isT ? "Today" : esc(fmtDay(d))}</h1>`;
+  if (isT) { const v = D.verse(); h += `<details class="daily-verse"><summary>Today's verse · ${esc(v.ref)}</summary><p>${esc(v.text)}</p></details>`; }
   if (cur) {
     const pct = Math.round((n - cur.start) / (cur.end - cur.start) * 100);
     h += `<p class="note" aria-label="Happening now">Now: ${esc(cur.title)}, until ${fmtTime(cur.end)} · ${pct}% through. ${coachLink(cur)}</p>`;
   } else if (nx) {
     h += `<p class="note" aria-label="Up next">Next: ${esc(nx.title)}, ${fmtTime(nx.start)} to ${fmtTime(nx.end)} · in ${fmtDur(nx.start - n)}. ${coachLink(nx)}</p>`;
   }
+  const unscheduled = [...untimedTasks(S, d, today(), carrySince()), ...(isT ? carryList() : [])];
+  if (isT) {
+    const c = D.dailyCanto(d, ui.cantoDay === d ? ui.cantoOffset : 0);
+    h += `<section class="card"><h2 class="sec"><span>Cantonese today</span></h2><div lang="zh-HK" class="canto-phrase">${esc(c.zh)}</div><p class="note">${esc(c.jp)} · ${esc(c.en)}</p><div class="row wrap"><button class="btn" data-act="canto-play" data-zh="${esc(c.zh)}">Hear it</button><button class="btn" data-act="canto-skip">Another one</button><button class="btn" data-act="canto-learn" data-id="${c.i}">Learned</button></div></section>`;
+  }
+  if (unscheduled.length) h += `<h2 class="sec"><span>No time yet</span></h2><div class="card">${unscheduled.map(t => `<div class="set-row"><div>${esc(t.title)}${t.venue ? ` · ${esc(t.venue)}` : ""}${isT && t.date && t.date < d ? `<div class="sub">Carried over from ${esc(fmtDay(t.date, true))}</div>` : ""}</div><div class="row"><button class="btn" data-act="inbox-done" data-id="${esc(t.id)}" aria-label="Mark ${esc(t.title)} done">Done</button><button class="btn" data-act="inbox-time" data-id="${esc(t.id)}" aria-label="Set time for ${esc(t.title)}">Set time</button><button class="btn ghost" data-act="inbox-del" data-id="${esc(t.id)}" aria-label="Remove ${esc(t.title)} from this list">Remove</button></div></div>`).join("")}</div>`;
+  h += weeklyTable(d);
   if (!bl.length) {
     h += `<div class="empty"><p>${isT ? "Your day is open." : "Nothing planned."}</p><button class="btn" data-act="add"><svg><use href="#i-plus"/></svg>Add</button></div>`;
   } else {
@@ -1478,7 +1311,7 @@ function viewToday() {
         <div><div class="blk ${b.done ? "done" : ""} ${isLive ? "live" : ""}" style="${catVar(b.cat)}" role="button" tabindex="0" data-act="edit" data-id="${b.id}" aria-label="${esc(b.title)}, ${fmtTime(b.start)} to ${fmtTime(b.end)}">
           <div class="blk-title">${esc(b.title)}</div>
           <button class="check" data-act="toggle" data-id="${b.id}" aria-label="${b.done ? "Mark not done" : "Mark done"}"><svg><use href="#i-check"/></svg></button>
-          <div class="blk-meta"><span class="tag cat" style="${catVar(b.cat)}">${esc((CATS[b.cat] || CATS.other).label)}</span><span class="tnum">${fmtDur(b.end - b.start)}</span>${cf.has(b.id) ? `<span class="tag warn">Overlaps</span>` : ""}${coachLink(b)}</div>
+          <div class="blk-meta"><span class="tag cat" style="${catVar(b.cat)}">${esc((CATS[b.cat] || CATS.other).label)}</span><span class="tnum">${fmtDur(b.end - b.start)}</span>${b.carriedFrom ? `<span class="tag">Carried over</span>` : ""}${b.venue ? `<span>${esc(b.venue)}</span>` : ""}${cf.has(b.id) ? `<span class="tag warn">Overlaps</span>` : ""}${coachLink(b)}</div>
         </div></div></div>`;
     }
     if (!nowDrawn && n < 1440) h += nowLine(n);
@@ -1490,19 +1323,11 @@ function viewToday() {
       <button class="tile" data-view="bass" style="${catVar("bass")}"><span class="eyebrow">Bass · ${BS.finished() ? "Done" : "Lesson " + BS.lessonNo()}</span><b>${esc(BS.finished() ? "Course complete" : ls.t)}</b>${bar(BS.pct())}</button>
       <button class="tile" data-view="bible" style="${catVar("bible")}"><span class="eyebrow">Bible${st ? " · " + st.pct + "%" : ""}</span><b>${esc(st ? (B.todays().doneToday ? "Done for today" : bibleRef()) : "Choose a book")}</b>${bar(st ? st.pct : 0)}</button></div>`;
   }
-  if (isT && SC.pending().length) {
-    const t = SC.pending()[0];
-    h += `<button class="tile wide" data-view="school" style="${catVar("study")}"><span class="eyebrow">School · ${SC.pending().length} due</span><b>${esc(t.title)} · ${esc(t.due ? fmtDay(t.due) : "no date")}</b></button>`;
-  }
   const routines = (S.routines || []).filter(r => !r.disabled && r.start == null);
-  if (routines.length) h += `<h2 class="sec"><span>Every day</span></h2><div class="card"><p class="note">Daily reminders stay here. Checking one off only completes it for this day.</p>${routines.map(r => {
+  if (routines.length) h += `<h2 class="sec"><span>Everyday tasks</span></h2><div class="card"><p class="note">Checking one off only completes it for this day.</p>${routines.map(r => {
     const done = S.routineDone?.[`${r.id}:${d}`];
     return `<div class="set-row"><span>${esc(r.title)}</span><button class="btn sm" data-act="routine-check" data-id="${esc(r.id)}" aria-pressed="${!!done}">${done ? "Done today" : "Mark done"}</button></div>`;
   }).join("")}</div>`;
-  if (S.inbox.length) {
-    h += `<h2 class="sec"><span>To-do</span></h2><div class="card">${S.inbox.map(t => `<div class="set-row"><div><div class="lbl">${esc(t.title)}</div><div class="sub">${fmtDur(t.dur || 30)}</div></div>
-      <div class="row"><button class="btn sm" data-act="fit" data-id="${t.id}">Fit in</button><button class="btn sm ghost" data-act="inbox-del" data-id="${t.id}">Remove</button></div></div>`).join("")}</div>`;
-  }
   return h;
 }
 function weeklyTable(date) {
@@ -1754,7 +1579,7 @@ function viewSchool() {
   h += `<details class="fold"><summary>How PG plans</summary><div class="card list tips">${SC.RULES.map(x => `<div class="rule"><b>${esc(x.t)}</b><p>${esc(x.d)}</p><a class="faint tip-src" href="${esc(x.url)}" target="_blank" rel="noopener">Source</a></div>`).join("")}</div></details>`;
   return h;
 }
-// ================= PG Cloud: sync, passcode, Workers AI =================
+// ================= PG Cloud: sync and passcode =================
 const ago = t => { if (!t) return "not yet"; const s = Math.round((Date.now() - t) / 1000); return s < 60 ? "just now" : s < 3600 ? Math.round(s / 60) + " min ago" : fmtTime(new Date(t).getHours() * 60 + new Date(t).getMinutes()); };
 function cloudSteps(open) {
   return `<details class="fold" ${open ? "open" : ""}><summary>Set up PG Cloud (about 3 minutes, free)</summary>
@@ -1762,10 +1587,10 @@ function cloudSteps(open) {
       <li>In Cloudflare, open <a href="https://dash.cloudflare.com/?to=/:account/workers/d1" target="_blank" rel="noopener">D1 SQL database</a>. Press Create Database, name it <b>pg</b>, and press Create.</li>
       <li>Open <a href="https://dash.cloudflare.com/?to=/:account/workers-and-pages/create" target="_blank" rel="noopener">Workers and Pages</a>. Press Create application, then Start with Hello World. Name it <b>pg-cloud</b> and press Deploy.</li>
       <li>Press Edit code. Clear everything in worker.js, paste the PG Cloud code, and press Deploy.</li>
-      <li>In the Worker's Bindings tab, press Add binding. Pick <b>Workers AI</b> and type <b>AI</b> as the name. Add one more: <b>D1 database</b>, name <b>DB</b>, and pick <b>pg</b>.</li>
+      <li>In the Worker's Bindings tab, add a <b>D1 database</b> named <b>DB</b> and pick <b>pg</b>. No AI binding is needed.</li>
       <li>Copy the Worker's address (it ends in .workers.dev) into PG Cloud address here. Type your passcode and press Connect. The first device you connect sets the passcode.</li>
     </ol>
-    <button class="btn" type="button" data-act="cloud-copy">Copy PG Cloud code</button></details>`;
+    <a class="btn" href="https://github.com/PraiseGod07/pg/blob/master/worker/pg-worker.js" target="_blank" rel="noopener">Open PG Cloud code</a></details>`;
 }
 function cloudSettings() {
   if (SY.on()) return `<h2 class="sec"><span>PG Cloud</span></h2><div class="card">
@@ -1774,29 +1599,22 @@ function cloudSettings() {
     <div class="row"><button class="btn" data-act="cloud-sync">Sync now</button><button class="btn" data-act="cloud-others">Sign out other devices</button><button class="btn ghost" data-act="cloud-off">Stop syncing here</button></div>${cloudSteps(false)}</div>`;
   const st = ui.cloudStatus;
   return `<h2 class="sec"><span>PG Cloud</span></h2><div class="card">
-    <p class="note" style="margin-top:0">Keep your laptop and phone the same, lock PG with a passcode, and run PG's AI on your Cloudflare Workers AI. It all lives in your own Cloudflare account.</p>
+    <p class="note" style="margin-top:0">Unlock and sync your devices using your Cloudflare Worker. No AI service or keys are required.</p>
     ${st ? `<div class="ai-status ${st.err ? "err" : ""}" role="status"><i></i><span>${esc(st.text)}</span></div>` : ""}
     <form class="ai-form" data-form="cloud">
-      ${PG_CLOUD ? "" : `<label class="field"><span>PG Cloud address</span><input class="input" name="url" value="${esc(SY.url())}" placeholder="https://pg-cloud.yourname.workers.dev" autocomplete="off" spellcheck="false" autocapitalize="off" inputmode="url"></label>`}
+      <label class="field"><span>PG Cloud address</span><input class="input" name="url" value="${esc(SY.url())}" placeholder="https://pg-cloud.yourname.workers.dev" autocomplete="off" spellcheck="false" autocapitalize="off" inputmode="url"></label>
       <label class="field"><span>Passcode</span><input class="input" name="code" type="password" inputmode="numeric" autocomplete="off" placeholder="Your passcode"></label>
       <div class="row"><button class="btn primary" type="submit">Connect</button></div>
     </form>${cloudSteps(!SY.url())}</div>`;
 }
-function naturalVoice() {
-  if (!SY.on() || !CV.v || CV.v >= 5) return "";
-  return `<div class="update-box"><b>Update PG Cloud to protect your saved data</b><p class="note" style="margin:4px 0 8px">Copy the code, open pg-cloud in Cloudflare, press Edit code, replace the code and Deploy. Keep the same Worker and database. This prevents simultaneous device saves overwriting each other and keeps cloud recovery copies.</p><div class="row"><button class="btn primary sm" data-act="cloud-copy">Copy PG Cloud code</button><a class="btn sm" href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener">Open Cloudflare</a></div></div>`;
-}   // PG uses the free built-in phone voice
-function copyCloud() { navigator.clipboard?.writeText(AI.CLOUD_CODE).then(() => toast("PG Cloud code copied. Paste it in Cloudflare."), () => toast("Couldn't copy. Open worker/pg-worker.js in the PG GitHub repo.")); }
 async function connectCloud(address, code, done) {
   try {
     const r = await SY.unlock(address, code);
-    if (S.ai.provider === "none" || !AI.on() || S.ai.provider === "cloudflare") { S.ai = { ...S.ai, provider: "cloudflare", ok: false }; save(); }
     afterSync(); done?.(null, r);
     toast(r.adopted ? "Connected. This device now has your PG data." : r.first ? "PG Cloud is set up. Your passcode is saved." : "Connected. This device's data is now in PG Cloud.");
-    if (S.ai.provider === "cloudflare") connectAI();
   } catch (e) { done?.(e); }
 }
-function afterSync() { if (CV.v < 5) probeCloud(); C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); if (!ui.pinDate) ui.date = today(); paintLock(); paintChat(); render(); }
+function afterSync() { C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); if (!ui.pinDate) ui.date = today(); initCarryover(); paintLock(); paintChat(); render(); }
 function paintLock() {
   let el = $("#lock");
   if (!SY.locked()) { el?.remove(); document.body.classList.remove("locked"); return; }
@@ -1819,28 +1637,6 @@ SY.init({
   changed: () => afterSync(),
   revoked: () => { voice.kill?.(); afterSync(); }
 });
-function aiSettings() {
-  const st = ui.aiStatus || (AI.on() ? { ok: S.ai.ok, text: S.ai.ok ? `Connected to ${AI.label()}` : "Saved. Tap Test to check it works." } : { text: "Not connected" });
-  const pv = S.ai.provider && !["none", "auto"].includes(S.ai.provider) ? S.ai.provider : "";
-  return `<h2 class="sec"><span>PG's AI brain</span></h2><div class="card ai-card">
-    <p class="note" style="margin-top:0">Paste an API key from any AI company, like ChatGPT, Claude, Gemini, Grok, DeepSeek, Groq, Mistral, Perplexity or OpenRouter, so PG can hold real conversations. PG figures out which one it is. ${SY.on() ? "PG Cloud keeps the key on your other devices too." : "The key stays on this device unless PG Cloud is on."}</p>
-    <div class="ai-status ${st.ok ? "ok" : st.err ? "err" : ""}" role="status"><i></i><span>${esc(st.text)}${st.ok ? ` · ${esc(AI.modelOf())}` : ""}</span></div>
-    <form class="ai-form" data-form="ai">
-      <label class="field" data-ai-key ${pv === "cloudflare" ? "hidden" : ""}><span>API key</span><input class="input" name="key" type="password" data-act="ai-key-live" value="${esc(S.ai.key)}" placeholder="Paste your key here" autocomplete="off" spellcheck="false" autocapitalize="off"></label>
-      <div class="grid2"><label class="field"><span>Provider</span><select class="input" name="provider" data-act="ai-prov"><option value="">Detect from key</option>${Object.entries(AI.PROVIDERS).map(([k, v]) => `<option value="${k}" ${pv === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
-      <label class="field"><span>Model <span class="faint">(optional)</span></span><input class="input" name="model" value="${esc(S.ai.model && AI.modelOf() === S.ai.model ? S.ai.model : "")}" placeholder="${esc(pv ? (AI.PROVIDERS[pv].model || "PG picks one") : "PG picks one")}" autocomplete="off" spellcheck="false" autocapitalize="off"></label></div>
-      <p class="note ai-cf" data-ai-cf ${pv === "cloudflare" ? "" : "hidden"}>${SY.on() ? "Uses Workers AI on your PG Cloud. No key needed." : "Connect PG Cloud above first. Then PG uses your Workers AI with no key."}</p>
-      <label class="field" data-ai-base ${pv === "custom" ? "" : "hidden"}><span>Web address of the AI</span><input class="input" name="base" value="${esc(S.ai.base || "")}" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false" autocapitalize="off" inputmode="url"></label>
-      <div class="row"><button class="btn primary" type="submit">Save and connect</button>${AI.on() ? `<button class="btn" type="button" data-act="ai-test">Test</button><button class="btn ghost" type="button" data-act="ai-clear">Remove key</button>` : ""}</div>
-    </form>
-    <details class="fold"><summary>Where to get a key</summary><p class="note">${Object.values(AI.PROVIDERS).filter(v => v.keyUrl).map(v => `<a href="${v.keyUrl}" target="_blank" rel="noopener">${esc(v.label.replace(/ \(.*\)$/, ""))}</a>`).join(" · ")}. One OpenRouter key works with models from almost every company.</p></details></div>`;
-}
-function showBase(f) { const b = f?.querySelector("[data-ai-base]"); if (b) b.hidden = f.provider.value !== "custom"; const c = f?.querySelector("[data-ai-cf]"); if (c) c.hidden = f.provider.value !== "cloudflare"; const k = f?.querySelector("[data-ai-key]"); if (k) k.hidden = f.provider.value === "cloudflare"; }
-async function connectAI() {
-  ui.aiStatus = { text: "Connecting…" }; render();
-  try { await AI.test(); S.ai.ok = true; save(); ui.aiStatus = null; render(); toast(`PG is connected to ${AI.label()}.`); }
-  catch (e) { S.ai.ok = false; save(); ui.aiStatus = { err: true, text: AI.friendlyError(e) }; render(); }
-}
 function viewSettings() {
   const vs = voice.voices();
   const tm = m => pad(Math.floor(m / 60)) + ":" + pad(m % 60);
@@ -1848,22 +1644,19 @@ function viewSettings() {
   return `<h1 class="title">More <span class="faint" style="font-size:var(--text-xs);font-family:inherit;font-weight:400">v${PG_VERSION}</span></h1>
   <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} thing${M.facts().length === 1 ? "" : "s"} PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button><button class="tile" data-act="goals-open" style="${catVar("gym")}"><span class="eyebrow">Goals</span><b>${D.goals().length ? D.goals().length + " goal" + (D.goals().length > 1 ? "s" : "") : "Add your goals"}</b></button><button class="tile" data-act="canto-open" style="${catVar("social")}"><span class="eyebrow">Cantonese</span><b>${D.learned().length} learned</b></button></div>
   ${cloudSettings()}
-  ${aiSettings()}
   <h2 class="sec"><span>Voice setup</span></h2><div class="card">
-    <div class="set-row"><div class="lbl">Always listen for “Hi PG”<span class="faint" style="display:block;font-weight:400;font-size:var(--text-xs)">${voice.supported ? "Off means PG only listens after you press the button. Some phones beep when it's on." : "Not supported here"}</span></div>${sw("handsfree", S.voice.handsFree, "Hands-free wake word", !voice.supported)}</div>
-    <div class="set-row"><div class="lbl">Speak replies</div>${sw("speak", S.voice.speak !== false, "Speak replies")}</div>
-    <div class="set-row"><div class="lbl">Spoken reminders</div>${sw("alerts", S.voice.alerts, "Spoken reminders")}</div>
+    <div class="set-row"><div class="lbl">Send automatically after recording</div>${sw("autosend", S.voice.autoSend, "Send automatically after recording")}</div>
+    <div class="set-row"><div class="lbl">Timetable notifications</div>${sw("alerts", S.voice.alerts, "Timetable notifications")}</div>
+    <div class="set-row"><div class="lbl">Speak reminders</div>${sw("alarm-speech", S.voice.alarmSpeech, "Speak reminders")}</div>
     <div class="set-row"><div class="lbl">Heads-up</div><select class="input" style="width:auto" data-act="heads" aria-label="Heads-up minutes">${[0, 5, 10, 15].map(m => `<option value="${m}" ${S.voice.heads === m ? "selected" : ""}>${m ? m + " min before" : "Off"}</option>`).join("")}</select></div>
     <div class="set-row"><div class="lbl">Keep screen awake</div>${sw("awake", S.voice.keepAwake, "Keep screen awake")}</div>
-    ${naturalVoice()}
-    <div class="grid2" style="margin-top:var(--space-3)" ${voice.cloud.ok() ? "hidden" : ""}>
+    <div class="grid2" style="margin-top:var(--space-3)">
       <label class="field"><span>Voice on this device</span><select class="input" data-act="voice"><option value="">Automatic (any available voice)</option>${vs.map(v => `<option value="${esc(v.voiceURI)}" ${(voice.voiceURI || voice.voice?.voiceURI) === v.voiceURI ? "selected" : ""}>${esc(v.name)}${isNatural(v) ? " (natural)" : ""}</option>`).join("")}</select></label>
       <label class="field"><span>Speed</span><select class="input" data-act="rate">${[0.9, 1, 1.1, 1.2].map(r => `<option value="${r}" ${S.voice.rate === r ? "selected" : ""}>${r}×</option>`).join("")}</select></label></div>
     <p class="faint" role="status">${voice.voice ? `Free device voice: ${esc(voice.voice.name)}.` : "Using your browser's default voice while the voice list loads."} Any available voice is allowed. This choice stays on this device.</p>
-    <p class="faint">Speak freely, then tap Done speaking. No special phrase is needed. PG pauses listening while reading its reply; tap the microphone to interrupt, or Hear reply to replay it.</p>
+    <p class="faint">Tap to record, tap again to stop, then check the transcript and send. PG does not listen when closed or locked. Your browser may use its own online speech service. Typing works offline.</p>
     <details><summary>Phone voice help</summary><p class="faint">If audio is quiet, check your phone volume, silent mode and Bluetooth output. Use Test selected voice here. You can also choose or install voices in your phone's speech settings. No paid voice service is required. <a href="https://support.google.com/accessibility/android/answer/6006983?hl=en" target="_blank" rel="noopener">Android speech settings</a>; <a href="https://support.apple.com/en-gb/guide/iphone/iph96b214f0/ios" target="_blank" rel="noopener">Apple speech settings</a>.</p></details>
     <button class="btn sm" data-act="refresh-voices">Refresh voices</button>
-    <button class="btn sm" data-act="test-voice"><svg><use href="#i-speaker"/></svg>Test selected voice</button>
   </div>
   <h2 class="sec"><span>You</span></h2><div class="card"><div class="grid3">
     <label class="field"><span>PG calls you</span><input class="input" data-act="address" value="${esc(addr())}"></label>
@@ -1872,9 +1665,15 @@ function viewSettings() {
     <div class="grid2"><label class="field"><span>Gym split</span><select class="input" data-act="split">${Object.entries(SPLITS).map(([k, v]) => `<option value="${k}" ${S.gym.split === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
     <label class="field"><span>Bible version</span><select class="input" data-act="version">${["NKJV", "KJV", "NIV", "ESV", "NLT", "AMP"].map(v => `<option ${B.bible().version === v ? "selected" : ""}>${v}</option>`).join("")}</select></label></div></div>
   <h2 class="sec"><span>Data</span></h2><div class="card"><div class="row">
+    <button class="btn" data-act="collections">Collections</button><button class="btn" data-act="handbook">What can I say?</button><button class="btn" data-act="missed-export">Export missed phrases</button>
     <button class="btn sm" data-act="backup">Back up</button><button class="btn sm" data-act="restore">Restore</button><button class="btn sm" data-act="clear-chat">Clear chat</button><button class="btn sm danger" data-act="reset">Erase all</button>
     <input type="file" id="restoreFile" accept="application/json,.json" hidden></div>
-    <p class="note">Install: Safari › Share › Add to Home Screen, or Chrome › Install app.</p></div>`;
+    <p class="note">Web search sends the query to PG Cloud and search providers. It does not send your timetable, notes, goals or collections.</p>
+    <p class="note">Install: Safari › Share › Add to Home Screen, or Chrome › Install app.</p></div>
+  <h2 class="sec"><span>My phrases</span></h2><div class="card">
+    ${S.phrases.map(p => `<div class="set-row"><span>${esc(p.from)} → ${esc(p.to)}</span><button class="btn" data-act="phrase-del" data-id="${esc(p.id)}" aria-label="Remove phrase ${esc(p.from)}">Remove</button></div>`).join("")}
+    <form data-form="phrase" class="field"><label class="field"><span>When I say</span><input class="input" name="from" required></label><label class="field"><span>Run this command</span><input class="input" name="to" required></label><button class="btn primary">Save phrase</button></form>
+  </div>`;
 }
 
 // ================= Edit sheet =================
@@ -1907,6 +1706,52 @@ document.addEventListener("click", e => {
   const a = el.dataset.act, id = el.dataset.id;
   const d = ui.date;
   switch (a) {
+    case "handbook": openHandbook(); break;
+    case "try-phrase": {
+      const t = commandText(HR.clean(el.dataset.text)), it = intent(t);
+      const items = hasCalendarCue(t) && /^(?:add|put|schedule|book)\b/i.test(t)
+        ? parseSchedule(t, { date: today(), today: today(), now: nowMin() }).filter(i => i.kind === "event") : [];
+      const demo = $("p[data-phrase-demo]");
+      if (demo) { demo.textContent = items.length ? items.map(i => `${i.title}: ${i.date}${i.s == null ? ", no time yet" : `, ${fmtTime(i.s)}`}`).join("; ") + ". Nothing saved."
+        : `Preview: ${it.type === "unknown" ? "Look for a matching command" : it.type.replaceAll("_", " ")}. Nothing saved.`; demo.scrollIntoView({ block: "nearest" }); }
+      break;
+    }
+    case "phrase-del": S.phrases = S.phrases.filter(p => p.id !== id); save(); render(); break;
+    case "collections": openCollections(id); break;
+    case "collection-delete": $("#sheet").close(); openAssistant(); run(el.dataset.say); break;
+    case "collection-tick":
+    case "collection-item-edit": {
+      const c = S.collections.find(x => x.id === el.dataset.group), item = c?.items.find(x => x.id === id);
+      if (!item) break;
+      if (a === "collection-tick") { item.done = !item.done; save(); openCollections(c.id); break; }
+      $("#sheet").innerHTML = `<form data-form="collection-item" data-id="${esc(id)}" data-group="${esc(c.id)}"><h3>Edit item</h3><textarea class="input" name="entry" required aria-label="Item text">${esc(item.text)}</textarea><div class="row wrap"><button class="btn danger" name="choice" value="remove">Remove item</button><button class="btn primary" name="choice" value="save">Save item</button><button type="button" class="btn" data-act="collections" data-id="${esc(c.id)}">Cancel</button></div></form>`;
+      break;
+    }
+    case "fallback-note":
+    case "fallback-category": {
+      const sh = $("#sheet"), cat = a === "fallback-category";
+      sh.innerHTML = `<form data-form="${cat ? "collection" : "note-preview"}"><h3>${cat ? "Save to a category" : "Save as a note"}</h3>${cat ? `<label class="field"><span>Category name</span><input class="input" name="group" value="${esc(el.dataset.text.trim().split(/\s+/).slice(0, 4).join(" "))}" required></label>` : ""}<label class="field"><span>Text to save</span><textarea class="input" name="entry" required>${esc(el.dataset.text)}</textarea></label><div class="row wrap"><button class="btn primary">Save</button><button type="button" class="btn" data-act="close-sheet">Cancel</button></div></form>`;
+      if (!sh.open) sh.showModal();
+      break;
+    }
+    case "fallback-web": showSearch(el.dataset.text); break;
+    case "missed-export": {
+      const phrases = S.dev.missed || [];
+      if (!phrases.length) { toast("No missed phrases to export."); break; }
+      const url = URL.createObjectURL(new Blob([phrases.join("\n")], { type: "text/plain" }));
+      const a = document.createElement("a"); a.href = url; a.download = "pg-missed-phrases.txt"; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); break;
+    }
+    case "undo-action": undoAction(id); break;
+    case "edit-action": {
+      const p = (S.dev.actions || []).find(x => x.id === id);
+      if (!p) break;
+      const targets = p.changes.filter(c => c.path.at(-1) === "blocks").flatMap(c =>
+        (c.after || []).filter(b => !(c.before || []).some(a => JSON.stringify(a) === JSON.stringify(b)))
+          .filter(b => day(c.path[1]).blocks.some(x => x.id === b.id)).map(b => ({ id: b.id, date: c.path[1] })));
+      if (targets.length === 1) { go("today", targets[0].date); openEditor(targets[0].id); }
+      else { $("#ask").value = p.original; openAssistant(); $("#ask").focus(); }
+      break;
+    }
     case "day": ui.date = el.dataset.n === "0" ? today() : addDays(ui.date, +el.dataset.n); ui.pinDate = ui.date !== today(); render(); break;
     case "week": ui.date = addDays(ui.date, +el.dataset.n * 7); ui.pinDate = ui.date !== today(); render(); break;
     case "week-day": go("today", el.dataset.date); break;
@@ -1914,8 +1759,8 @@ document.addEventListener("click", e => {
     case "week-plan": openWeekPlanner(); break;
     case "add": openEditor(null); break;
     case "edit": if (e.target.closest(".check,.tag.link")) return; openEditor(id); break;
-    case "toggle": { e.stopPropagation(); const b = day(d).blocks.find(x => x.id === id); if (b) { b.done = !b.done; if (b.done && b.tid) SC.noteDone(b); save(); render(); if (b.done) chime("ok"); } break; }
-    case "task-done": { const t = SC.tasks().find(x => x.id === id); if (t) { SC.finish(t); ui.pending = { type: "actual", tid: t.id }; ui.lastTask = t.id; render(); openAssistant(); reply(`Nice work. How long did ${t.title} take you in total?`); } break; }
+    case "toggle": { e.stopPropagation(); const b = day(d).blocks.find(x => x.id === id); if (b) { b.done = !b.done; if (b.done && b.tid) SC.noteDone(b); save(); render(); } break; }
+    case "task-done": { const t = SC.tasks().find(x => x.id === id); if (t) { SC.finish(t); render(); toast(`Done: ${t.title}.`); } break; }
     case "task-del": confirmSheet("Remove this assignment?", "Its study sessions come off your timetable.", "Remove", () => { SC.remove(id); render(); }); break;
     case "replan": openWeekPlanner(); break;
     case "go": e.stopPropagation(); go(el.dataset.v); break;
@@ -1924,12 +1769,18 @@ document.addEventListener("click", e => {
     case "goal-del": D.removeGoal(el.dataset.id); openGoals(); render(); break;
     case "canto-open": openCanto(); break;
     case "canto-play": sayCanto(el.dataset.zh); break;
+    case "canto-learn":
+    case "canto-skip": {
+      if (a === "canto-learn") D.markCanto(+id);
+      const date = today();
+      ui.cantoOffset = (ui.cantoDay === date ? ui.cantoOffset : 0) + 1;
+      ui.cantoDay = date; render(); break;
+    }
     case "canto-more": D.teachDaily(); openCanto(); render(); break;
     case "routine-check": {
       const key = `${id}:${ui.date || today()}`;
       S.routineDone ||= {}; S.routineDone[key] = !S.routineDone[key]; save(); render(); break;
     }
-    case "cv-test": voice.cloudVoice = S.voice.cloudVoice || "apollo"; voice.player.unlock(); voice.say(hello()); break;
     case "del-block": { const snap = snapshot(d); day(d).blocks = day(d).blocks.filter(x => x.id !== id); save(); $("#sheet").close(); render(); undoable(snap, "Deleted."); break; }
     case "fit": {
       const t = S.inbox.find(x => x.id === id); if (!t) break;
@@ -1939,10 +1790,29 @@ document.addEventListener("click", e => {
       day(d).blocks.push({ id: uid(), title: t.title, cat: t.cat, start: s, end: s + (t.dur || 30), flex: true, done: false, date: d, src: "inbox" });
       S.inbox = S.inbox.filter(x => x.id !== id); save(); render(); toast(`${t.title} at ${fmtTime(s)}.`); break;
     }
-    case "inbox-del": S.inbox = S.inbox.filter(x => x.id !== id); save(); render(); break;
+    case "inbox-done":
+    case "inbox-del": {
+      const t = getUntimed(id);
+      if (!t) break;
+      const done = a === "inbox-done";
+      if (t.source) {
+        t.source.carryResolved = true;
+        if (done) { t.source.done = true; t.source.completedOn = today(); }
+      } else if (done) { t.done = true; t.completedOn = today(); }
+      else S.inbox = S.inbox.filter(x => x !== t);
+      save(); render(); toast(`${done ? "Done" : "Removed"}: ${t.title}.`); break;
+    }
+    case "inbox-time": {
+      const t = getUntimed(id);
+      if (t) {
+        const sh = $("#sheet");
+        sh.innerHTML = `<form data-form="inbox-time" data-id="${esc(id)}"><h3>${esc(t.title)}</h3><label class="field"><span>Start time</span><input class="input" type="time" name="time" required></label><div class="sheet-actions"><button type="button" class="btn" data-act="close-sheet">Cancel</button><button class="btn primary">Save time</button></div></form>`;
+        sh.showModal();
+      } break;
+    }
     case "ex": ui.openEx = ui.openEx === el.dataset.k ? null : el.dataset.k; render(); break;
     case "play": ui.playing.add(el.dataset.vid); render(); break;
-    case "set": { const p = gymProgress(); const k = el.dataset.k, i = +el.dataset.i; p.sets[k] = p.sets[k] || []; p.sets[k][i] = !p.sets[k][i]; save(); render(); if (p.sets[k][i]) chime("ok"); break; }
+    case "set": { const p = gymProgress(); const k = el.dataset.k, i = +el.dataset.i; p.sets[k] = p.sets[k] || []; p.sets[k][i] = !p.sets[k][i]; save(); render(); break; }
     case "gymday": S.gym.override = el.dataset.k; S.gym.overrideDate = today(); save(); renameCoachBlocks(today()); render(); break;
     case "speak-gym": reply(C.gymBrief(today(), false)); break;
     case "gym-finish": completeCoach("gym"); break;
@@ -1954,28 +1824,24 @@ document.addEventListener("click", e => {
     case "shop-del": F.removeItem(id); render(); break;
     case "shop-build": F.build(); render(); toast("List rebuilt."); break;
     case "shop-clear": F.clearGot(); render(); break;
-    case "bass-done": chime("ok"); completeCoach("bass"); break;
+    case "bass-done": completeCoach("bass"); break;
     case "bass-repeat": BS.logTry(); reply(`No problem. We'll stay on ${BS.lesson().t.toLowerCase()} next time.`); break;
     case "speak-bass": reply(BS.brief(minsFor("bass", 30))); break;
     case "bass-jump": BS.jump(+el.dataset.i); renameCoachBlocks(today()); render(); toast(`Lesson ${+el.dataset.i + 1} is up next.`); break;
-    case "bible-done": chime("ok"); completeCoach("bible"); break;
+    case "bible-done": completeCoach("bible"); break;
     case "note-del": M.remove(id); render(); break;
     case "folder": ui.folder = el.dataset.k; render(); break;
-    case "ai-test": connectAI(); break;
-    case "cloud-copy": copyCloud(); break;
     case "cloud-sync": SY.push().then(ok => { render(); toast(ok ? "Saved to PG Cloud." : SY.status()); }); break;
     case "cloud-others": if (confirm("Sign out every other device? They'll need the passcode again, and their copy of PG is cleared.")) SY.signOutOthers().then(() => toast("Other devices are signed out."), e => toast(e.message)); break;
     case "cloud-off": SY.disconnect(); if (S.ai.provider === "cloudflare") S.ai.ok = false; save(true); render(); toast("This device stopped syncing."); break;
-    case "ai-clear": S.ai = { provider: "none", key: "", model: "", ok: false }; ui.aiStatus = null; save(); render(); toast("Key removed from this device."); break;
     case "about-folder": ui.folder = "about"; ui.q = ""; go("notes"); break;
-    case "learn-done": { const tr = LN.tracks().find(t => t.id === id); const r = LN.complete(tr); render(); if (r) { chime("ok"); toast(r.next ? `Next: ${r.next.t}` : `${tr.topic} complete.`); } break; }
+    case "learn-done": { const tr = LN.tracks().find(t => t.id === id); const r = LN.complete(tr); render(); if (r) { toast(r.next ? `Next: ${r.next.t}` : `${tr.topic} complete.`); } break; }
     case "learn-del": confirmSheet("Remove this learning plan?", "", "Remove", () => { LN.remove(id); render(); }); break;
     case "song-del": S.band.songs = S.band.songs.filter(s => s.id !== id); save(); render(); break;
     case "refresh-voices": voice.pickVoice(); render(); break;
-    case "test-voice": if (voice.cloud?.ok()) voice.player.unlock(); voice.say(hello(), undefined, true); break;
     case "backup": {
       const a2 = document.createElement("a");
-      a2.href = URL.createObjectURL(new Blob([JSON.stringify({ ...S, ai: { provider: "none", key: "", model: "" } }, null, 1)], { type: "application/json" }));
+      a2.href = URL.createObjectURL(new Blob([JSON.stringify(SY.syncContent(S), null, 1)], { type: "application/json" }));
       a2.download = `pg-backup-${today()}.json`; document.body.appendChild(a2); a2.click(); a2.remove(); toast("Backup downloaded."); break;
     }
     case "restore": $("#restoreFile").click(); break;
@@ -1991,13 +1857,11 @@ document.addEventListener("change", e => {
   if (!a) { if (el.id === "restoreFile") restoreFrom(el.files[0]); return; }
   const v = el.value;
   switch (a) {
-    case "handsfree": S.voice.handsFree = el.checked; save(); voice.enableHandsFree(el.checked); if (el.checked) toast("Say “Hi PG” any time."); break;
-    case "speak": S.voice.speak = el.checked; save(); break;
+    case "autosend": S.voice.autoSend = el.checked; save(); break;
+    case "alarm-speech": S.voice.alarmSpeech = el.checked; save(); break;
     case "alerts": S.voice.alerts = el.checked; save(); if (el.checked && "Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {}); break;
     case "heads": S.voice.heads = +v; save(); break;
     case "awake": S.voice.keepAwake = el.checked; save(); keepAwake(); break;
-    case "cvoice": S.voice.cloudVoice = v; voice.cloudVoice = v; save(); voice.player.unlock(); voice.say(`Hi ${addr()}. This is how I sound now.`); break;
-    case "natural": S.voice.natural = el.checked; save(); render(); break;
     case "voice": S.voice.voiceURI = v; voice.voiceURI = v; voice.pickVoice(); save(); break;
     case "rate": S.voice.rate = +v; voice.rate = +v; save(); break;
     case "address": S.profile.address = v.trim() || "sir"; save(); break;
@@ -2005,9 +1869,6 @@ document.addEventListener("change", e => {
     case "dayend": { const [h, m] = v.split(":").map(Number); S.profile.dayEnd = h * 60 + m; save(); break; }
     case "split": S.gym.split = v; S.gym.splitChosen = true; S.gym.idx = 0; S.gym.override = null; save(); renameCoachBlocks(today()); break;
     case "version": B.bible().version = v; save(); break;
-    case "ai-provider": S.ai.provider = v; save(); render(); break;
-    case "ai-key": S.ai.key = v.trim(); save(); break;
-    case "ai-model": S.ai.model = v.trim(); save(); break;
     case "song-p": { const s = S.band.songs.find(x => x.id === el.dataset.id); if (s) { s.progress = +v; s.last = today(); save(); render(); } break; }
     case "w": C.setWeight(el.dataset.k, v, ""); break;
   }
@@ -2016,13 +1877,55 @@ let qT;
 document.addEventListener("input", e => {
   const el = e.target;
   if (el.dataset.act === "song-p") { const row = el.closest(".song"); const st = stageOf(+el.value); const lab = row.querySelector(".song-stage"); lab.className = "song-stage " + st.tone; lab.innerHTML = `<span class="tnum">${el.value}%</span> · ${st.label}`; }
-  if (el.dataset.act === "ai-key-live") { const pv = AI.detect(el.value), sel = el.form?.provider; if (sel && !sel.dataset.touched) { sel.value = pv || ""; showBase(el.form); } }
-  if (el.dataset.act === "ai-prov") { el.dataset.touched = 1; showBase(el.form); }
-  if (el.name === "provider" && el.form?.dataset.form === "ai") el.dataset.touched = "1";
   if (el.dataset.act === "note-q") { clearTimeout(qT); qT = setTimeout(() => { ui.q = el.value; render(); const s = $(".search"); s.focus(); s.setSelectionRange(s.value.length, s.value.length); }, 250); }
 });
 document.addEventListener("submit", e => {
   const f = e.target;
+  if (f.dataset.form === "handbook") { e.preventDefault(); openHandbook(f.q.value); return; }
+  if (f.dataset.form === "phrase") {
+    e.preventDefault();
+    const from = commandText(HR.clean(f.from.value)), to = f.to.value.trim();
+    if (!from || !to) return;
+    const prior = S.phrases.find(x => x.from.toLowerCase() === from.toLowerCase());
+    if (prior) prior.to = to;
+    else S.phrases.push({ id: uid(), from, to });
+    save(); render(); toast("Phrase saved."); return;
+  }
+  if (f.dataset.form === "collection" || f.dataset.form === "note-preview" || f.dataset.form === "collection-item") {
+    e.preventDefault();
+    const values = new FormData(f);
+    const entry = String(values.get("entry") || "").trim();
+    if (f.dataset.form === "note-preview") {
+      if (!entry) return;
+      M.add(entry, { exact: true }); $("#sheet").close(); render(); toast("Note saved."); return;
+    }
+    if (f.dataset.form === "collection-item") {
+      const c = S.collections.find(x => x.id === f.dataset.group), item = c?.items.find(x => x.id === f.dataset.id);
+      if (!item) return;
+      if (e.submitter?.value === "remove") c.items = c.items.filter(x => x !== item);
+      else if (entry) { item.text = entry; delete item.amount; delete item.unit; }
+      save(); openCollections(c.id); return;
+    }
+    try {
+      const { c } = saveCollection(S.collections, values.get("group"), entry);
+      save(); openCollections(c.id); toast(entry ? `Saved in ${c.name}.` : `Collection: ${c.name}.`);
+    } catch (err) { toast(err.message); }
+    return;
+  }
+  if (f.dataset.form === "inbox-time") {
+    e.preventDefault();
+    const t = getUntimed(f.dataset.id);
+    if (!t) return;
+    const [h, m] = f.time.value.split(":").map(Number), start = h * 60 + m, end = start + (t.dur || 60);
+    if (!Number.isInteger(start) || end > 1440) return toast("Choose an earlier time so the activity ends before midnight.");
+    const date = t.date && t.date > today() ? t.date : today();
+    const blocks = day(date).blocks;
+    if (!blocks.some(b => activityKey(b.title) === activityKey(t.title) && b.start === start && b.end === end))
+      blocks.push({ id: uid(), title: t.title, cat: t.cat, start, end, date, venue: t.venue || "", fixed: true, flex: false, priority: t.source?.priority || 2, done: false, src: "manual", ...(t.source?.tid ? { tid: t.source.tid } : {}) });
+    if (t.source) t.source.carryResolved = true;
+    else S.inbox = S.inbox.filter(x => x !== t);
+    save(); $("#sheet").close(); render(); toast(`Scheduled ${t.title} at ${fmtTime(start)}.`); return;
+  }
   if (f.dataset.form === "week-plan") {
     e.preventDefault();
     try {
@@ -2038,10 +1941,10 @@ document.addEventListener("submit", e => {
       const result = planWeek({ weekStart: week, start: values.get("from"), end: values.get("until"),
         focusMinutes: +values.get("focus"), breakMinutes: +values.get("rest"), tasks });
       $("#sheet").close(); go("today", days.find(d => d >= today()) || week);
-      pushMsg("pg", planSummary(result)); flush().then(() => chime("success")); return;
+      pushMsg("pg", planSummary(result)); return;
     } catch (error) { f.querySelector("[data-week-error]").textContent = error.message; return; }
   }
-  if (f.id === "composer") { e.preventDefault(); if (ui.running) return; chime("unlock"); const t = $("#ask").value; $("#ask").value = ""; voice.kill(); run(t, "typed"); return; }
+  if (f.id === "composer") { e.preventDefault(); if (ui.running) return; const t = $("#ask").value; $("#ask").value = ""; voice.kill(); run(t, "typed"); return; }
   if (f.dataset.form === "unlock" || f.dataset.form === "cloud") {
     e.preventDefault();
     const code = f.code.value, url = f.url ? f.url.value : PG_CLOUD, btn = f.querySelector("button[type=submit]");
@@ -2055,29 +1958,10 @@ document.addEventListener("submit", e => {
     });
     return;
   }
-  if (f.dataset.form === "ai") {
-    e.preventDefault();
-    const key = f.key.value.trim();
-    if (f.provider.value === "cloudflare") {
-      S.ai = { ...S.ai, provider: "cloudflare", model: f.model.value.trim(), ok: false }; save();
-      if (!SY.on()) { ui.aiStatus = { err: true, text: "Connect PG Cloud above first." }; render(); return; }
-      connectAI(); return;
-    }
-    if (!key) { toast("Paste your API key first."); return; }
-    const prov = f.provider.value || AI.detect(key) || "auto";
-    const base = f.base.value.trim();
-    if (prov === "custom" && !/^https:\/\//.test(base)) { ui.aiStatus = { err: true, text: "Paste the AI's web address. It starts with https:// and usually ends in /v1." }; render(); return; }
-    S.ai = { provider: prov, key, model: f.model.value.trim(), base, ok: false }; save();
-    connectAI(); return;
-  }
   if (f.dataset.form === "goal") { e.preventDefault(); const t = f.g.value.trim(); if (t) { D.addGoal(t); openGoals(); render(); } return; }
   if (f.dataset.form === "pantry") {
     e.preventDefault(); ui.pantryInput = f.ingredients.value.trim();
     ui.pantryResult = F.pantryMatches(ui.pantryInput); render(); return;
-  }
-  if (f.dataset.form === "transcript") {
-    e.preventDefault(); const draft = f.transcript.value.trim(); $("#sheet").close();
-    voice.duplicateWarning = false; voice.listen("command", false, draft); return;
   }
   if (f.dataset.form === "song") { e.preventDefault(); const n = f.song.value.trim(); if (n) { C.addSong(n); render(); } return; }
   if (f.dataset.form === "note") { e.preventDefault(); const t = f.t.value.trim(); if (t) { const n = M.add(t); ui.folder = "all"; ui.q = ""; render(); toast(`Saved to ${M.FOLDERS[n.folder].label}.`); } return; }
@@ -2098,7 +1982,6 @@ document.addEventListener("submit", e => {
     const s = toM(fd.get("start")), en = toM(fd.get("end"));
     if (!Number.isInteger(s) || !Number.isInteger(en) || en <= s) { toast("Choose an end time after the start. For overnight entries, tell PG the next-day finish."); return; }
     const clash = day(d).blocks.find(b => b.id !== f.dataset.id && !b.skipped && !b.studyWindow && s < b.end && b.start < en);
-    if (clash) { toast(`Nothing saved. This overlaps ${clash.title}. Choose another time.`); return; }
     const data = { title: String(fd.get("title")).trim() || "Untitled", cat: fd.get("cat"), start: s, end: en };
     if (f.dataset.id) Object.assign(day(d).blocks.find(x => x.id === f.dataset.id), data, { flex: false });
     else day(d).blocks.push({ id: uid(), ...data, flex: false, done: false, date: d, src: "manual" });
@@ -2106,39 +1989,25 @@ document.addEventListener("submit", e => {
       const [task] = SC.add([{ title: data.title, kind: "assignment", due: null, dueMin: null, est: null }]);
       const b = day(d).blocks.find(b => b.id === f.dataset.id) || day(d).blocks.at(-1); b.tid = task.id;
     }
-    save(); $("#sheet").close(); render(); toast(f.dataset.id ? "Saved." : "Added.");
+    save(); initCarryover(); $("#sheet").close(); render();
+    const stillClashes = clash && day(d).blocks.some(x => x.id === clash.id && s < x.end && en > x.start);
+    toast(stillClashes ? `Saved. Overlaps ${clash.title}.` : f.dataset.id ? "Saved." : "Added.");
   }
 });
 $("#orb").addEventListener("click", () => orbTap());
 $("#dockOrb").addEventListener("click", () => { openAssistant(); orbTap(); });
-$("#asClose").addEventListener("click", closeAssistant);
-$("#endCall").addEventListener("click", () => { voice.hush(); voice.hangUp(); toast("Call ended."); });
-$("#finishTurn").addEventListener("click", () => { if (voice.mode === "command") voice.tap(); });
-$("#editTranscript").addEventListener("click", () => {
-  const draft = voice.cmd(); voice.kill();
-  const sheet = $("#sheet");
-  sheet.innerHTML = `<h3>Edit transcript</h3><form data-form="transcript"><label class="field"><span>Your words, including any intentional repetition</span><textarea class="input" name="transcript" rows="7">${esc(draft)}</textarea></label><div class="sheet-actions"><button class="btn primary" type="submit">Use transcript</button></div></form>`;
-  sheet.showModal();
-});
-$("#readReply").addEventListener("click", () => {
-  const last = S.chat.findLast(x => x.who === "pg");
-  if (last) { if (voice.cloud?.ok()) voice.player.unlock(); voice.say(speakable(last.text)); }
-});
+$("#finishTurn").addEventListener("click", () => voice.stop());
 $("#scrim").addEventListener("click", closeAssistant);
 function orbTap() {
-  if (voice.cloud?.ok()) voice.player.unlock();
-  if (!voice.supported) { openAssistant(); $("#ask").focus(); toast("Voice isn't available in this browser. Type to PG instead."); return; }
-  // Press to talk: PG greets you, then listens. Nothing listens in the background.
-  if (voice.mode === "off" || voice.mode === "wake") {
-    if (S.voice.speak === false) { S.voice.speak = true; save(); }
-    voice.call = true; openAssistant(false);
-    chime("unlock");
-    startListening();
-    return;
-  }
-  voice.tap();
+  if (SY.locked()) return;
+  if (voice.mode === "command") { voice.stop(); return; }
+  if (voice.mode !== "off") return;
+  openAssistant();
+  $("#heard").textContent = "";
+  voice.hush();
+  if (!voice.start()) $("#ask").focus();
 }
-
+$("#asClose").addEventListener("click", closeAssistant);
 function confirmSheet(title, body, cta, fn) {
   const sh = $("#sheet");
   sh.innerHTML = `<h3>${esc(title)}</h3>${body ? `<p class="note" style="margin:0">${esc(body)}</p>` : ""}<div class="sheet-actions"><span></span><span class="row"><button class="btn ghost" data-act="close-sheet">Cancel</button><button class="btn danger" id="cfm">${esc(cta)}</button></span></div>`;
@@ -2166,7 +2035,8 @@ function toast(msg, action, fn) {
 const alerted = new Set();
 let lastCalendarDay = today();
 function tick() {
-  if (inDraft() || ui.running) return;
+  if (SY.locked() || inDraft() || ui.running) return;
+  initCarryover();
   const n = nowMin(), d = today();
   if (lastCalendarDay !== d) {
     if (ui.date === lastCalendarDay && !ui.pinDate) ui.date = d;
@@ -2195,40 +2065,40 @@ function tick() {
   }
 }
 function notify(msg) {
-  chime("ok");
   pushMsg("pg", msg);
-  if (S.voice.speak !== false) voice.say(speakable(msg));
-  if (document.hidden && "Notification" in window && Notification.permission === "granted") { try { new Notification("PG", { body: msg, icon: "icon-192.png" }); } catch {} }
+  if (S.voice.alarmSpeech) voice.say(speakable(msg));
+  systemNotice(msg);
+}
+function systemNotice(msg) {
+  if (!document.hidden || !("Notification" in window) || Notification.permission !== "granted") return;
+  navigator.serviceWorker?.getRegistration().then(reg => reg?.showNotification("PG", { body: msg, icon: "icon-192.png" })).catch(() => {});
 }
 let lock = null;
 async function keepAwake() {
-  const want = S.voice.keepAwake && S.voice.handsFree && !document.hidden;
+  const want = S.voice.keepAwake && !document.hidden;
   try {
     if (want && !lock && navigator.wakeLock) { lock = await navigator.wakeLock.request("screen"); lock.addEventListener("release", () => { lock = null; }); }
     if (!want && lock) { await lock.release(); lock = null; }
   } catch { lock = null; }
 }
-document.addEventListener("visibilitychange", () => { keepAwake(); if (!document.hidden && S.voice.handsFree && voice.mode === "off") voice.listen("wake"); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) voice.kill(); else if (!SY.locked()) tick(); keepAwake(); });
 
 // ================= Boot =================
 renameCoachBlocks(today());
-paintChat(); render(); paintVoice("off"); paintLock(); SY.pull();
+paintChat(); render(); paintVoice("off"); paintLock();
+requestAnimationFrame(() => setTimeout(() => {
+  Promise.resolve(SY.pull()).finally(() => { if (initCarryover()) render(); });
+  if (!SY.locked() && S.dev.aiRetired === "pending") {
+    S.dev.aiRetired = "shown"; save(true); toast("AI removed. You can now delete your API keys.");
+  }
+}, 0));
 setInterval(tick, 20000);
-// Always listening for "Hi PG". Some browsers (like iPhone Safari) need one tap first.
-function needTap() {
-  if (ui.tapWait) return; ui.tapWait = true;
-  navigator.permissions?.query({ name: "microphone" }).then(p => { if (p.state === "denied") toast("Microphone is blocked. Allow it for this site in your browser settings so PG can hear Hi PG."); }).catch(() => {});
-  toast("Tap anywhere so PG can start listening for Hi PG.");
-  const go = () => { ui.tapWait = false; document.removeEventListener("pointerdown", go, true); if (S.voice.handsFree && voice.mode === "off") { voice.handsFree = true; voice.listen("wake"); } };
-  document.addEventListener("pointerdown", go, true);
-}
-if (S.voice.handsFree && voice.supported) { voice.handsFree = true; voice.listen("wake"); }
-if ("serviceWorker" in navigator && location.protocol === "https:") {
-  // When a new version arrives, reload once so he's never stuck on an old copy (but never mid-call).
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
+  // Reload once when a new version arrives, but never while recording or typing.
   const had = !!navigator.serviceWorker.controller; let reloaded = false;
   navigator.serviceWorker.addEventListener("controllerchange", () => { if (!had || reloaded) return; const go = () => { if (voice.mode === "off" && !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || "")) { reloaded = true; location.reload(); } else setTimeout(go, 3000); }; go(); });
   navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(r => r.update()).catch(() => {});
 }
-window.PG = { run, S, voice, probeCloud };
+window.PG = { run, S, voice };
 
 function andWords(a) { return a.length < 2 ? (a[0] || "") : a.slice(0, -1).join(", ") + " and your " + a.at(-1); }

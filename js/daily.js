@@ -120,16 +120,17 @@ export function teachTwo() {
   save();
   return pick.map(i => ({ i, zh: CANTO[i][0], jp: sayLike(CANTO[i][1]), en: CANTO[i][2] }));
 }
-// One lesson for the entire local calendar day, repeated at every goodbye.
-// Deterministic date selection keeps phone and laptop on the same sentence.
-export function teachDaily() {
-  const date = today();
-  const ordinal = Math.floor(Date.parse(date + "T00:00:00Z") / 86400000);
-  const record = { i: ((ordinal % CANTO.length) + CANTO.length) % CANTO.length, date };
-  if (!canto().learned.some(x => x.date === date && x.i === record.i)) { canto().learned.push(record); save(); }
-  const [zh, jp, en] = CANTO[record.i] || CANTO[0];
-  return { i: record.i, zh, jp: sayLike(jp), en };
+export function dailyCanto(date = today(), offset = 0) {
+  const ordinal = Math.floor((Date.parse(date + "T00:00:00Z") - Date.UTC(2026, 10, 19)) / 86400000);
+  const i = ((ordinal + offset) % CANTO.length + CANTO.length) % CANTO.length;
+  const [zh, jp, en] = CANTO[i];
+  return { i, zh, jp: sayLike(jp), en };
 }
+export function markCanto(i) {
+  if (!CANTO[i] || canto().learned.some(x => x.i === i)) return;
+  canto().learned.push({ i, date: today() }); save();
+}
+export const teachDaily = () => dailyCanto();
 export function learned() {
   const seen = new Set(), out = [];
   for (const x of [...canto().learned].reverse()) { if (seen.has(x.i) || !CANTO[x.i]) continue; seen.add(x.i); out.push({ i: x.i, date: x.date, zh: CANTO[x.i][0], jp: sayLike(CANTO[x.i][1]), en: CANTO[x.i][2] }); }

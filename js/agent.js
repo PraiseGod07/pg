@@ -9,12 +9,12 @@ import * as SC from "./school.js";
 import { weekOf, planWeek, planSummary } from "./timetable.js";
 import { changes, validateChanges, reconcileWindows } from "./commands.js";
 import { calendarDate } from "./dates.js";
+import { activityKey } from "./scheduler.js";
 
 // Anything under these is off limits, both for reading and for writing.
 const PRIVATE = /^(?:ai|v|alwaysOn|dev|t)(?:\.|$)|(?:^|\.)(?:__proto__|constructor|prototype|key|apiKey|api_key|token|secret|password|credential|base|account)(?:\.|$)/i;
 export const isPrivate = path => PRIVATE.test(String(path || ""));
 
-const hhmm = m => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 function toMin(v) {
   if (typeof v === "number") return Number.isInteger(v) && v >= 0 && v <= 1440 ? v : null;
   const m = String(v || "").trim().toLowerCase().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
@@ -31,55 +31,6 @@ function toDate(v) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return calendarDate(s, today());
   return null;
 }
-
-// A compact picture of the app for the AI, without private settings.
-export function snapshot() {
-  const days = {};
-  for (let i = -1; i < 8; i++) {
-    const d = addDays(today(), i), bl = (S.days[d]?.blocks || []);
-    if (bl.length) days[d] = bl.slice().sort((a, b) => a.start - b.start).map(b => ({ id: b.id, title: b.title, cat: b.cat, start: hhmm(b.start), end: hhmm(b.end), ...(b.done ? { done: true } : {}) }));
-  }
-  const sp = C.split();
-  const gym = { split: sp.label, today: C.workoutFor().key, days: sp.days.map(d => ({ key: d.key, name: d.name, exercises: C.planOf(d.key).plan.map(p => ({ ex: p.ex, name: C.EXERCISES[p.ex]?.name, sets: p.sets, reps: p.reps })) })) };
-  const strip = o => JSON.parse(JSON.stringify(o ?? null, (k, v) => (isPrivate(k) ? undefined : v)));
-  const out = {
-    profile: strip(S.profile),
-    voice: { speak: S.voice.speak !== false, rate: S.voice.rate, alerts: S.voice.alerts, heads: S.voice.heads, handsFree: S.voice.handsFree, keepAwake: S.voice.keepAwake },
-    days, inbox: strip(S.inbox).slice(0, 20), gym,
-    band: strip({ instrument: S.band.instrument, songs: S.band.songs }),
-    bass: { lesson: (S.bass?.idx || 0) + 1 },
-    bible: strip({ plan: S.bible.plan, max: S.bible.max, version: S.bible.version }),
-    learn: strip((S.learn?.tracks || []).map(t => ({ id: t.id, topic: t.topic || t.title, step: t.idx }))),
-    food: strip({ kg: S.food?.kg, prefs: S.food?.prefs, list: (S.food?.list || []).slice(0, 40).map(i => ({ id: i.id, name: i.name || i.t, got: i.got })) }),
-    school: strip({ tasks: (S.school?.tasks || []).filter(t => !t.done).slice(0, 15).map(t => ({ id: t.id, title: t.title, due: t.due, est: t.est })), pref: S.school?.pref, cap: S.school?.cap }),
-    goals: (S.goals || []).map(g => ({ id: g.id, text: g.text })),
-    cantonese_learned: (S.canto?.learned || []).length,
-    routines: strip(S.routines || []),
-    weekly_plans: strip(Object.fromEntries(Object.entries(S.weekPlans || {}).filter(([w]) => w === weekOf(today()) || w === addDays(weekOf(today()), 7)))),
-    notes: (S.notes || []).slice(0, 30).map(n => ({ id: n.id, folder: n.folder, text: String(n.text).slice(0, 300) }))
-  };
-  let j = JSON.stringify(out);
-  if (j.length > 14000) { out.notes = out.notes.slice(0, 10); j = JSON.stringify(out); }
-  return j;
-}
-
-// Explain the edit tools to the AI.
-export const TOOLS = `"ops" is a list of direct changes to the app. Use the ids and keys from APP DATA. Available ops:
-- {"op":"add_block","date":"YYYY-MM-DD|today|tomorrow","title":"...","cat":"${Object.keys(CATS).join("|")}","start":"HH:MM","end":"HH:MM"}
-- {"op":"delete_block","id":"..."}   (delete one timetable item; one op per item)
-- {"op":"update_block","id":"...","title":"...","start":"HH:MM","end":"HH:MM","date":"YYYY-MM-DD","done":true}  (only the fields that change)
-- {"op":"clear_day","date":"YYYY-MM-DD"}
-- {"op":"move_day","from":"YYYY-MM-DD|tomorrow","to":"YYYY-MM-DD|today"} (move ALL timetable items, not copy; keep daily reminders)
-- {"op":"plan_week","weekStart":"YYYY-MM-DD Monday","start":"HH:MM","end":"HH:MM","focusMinutes":50,"breakMinutes":10,"tasks":[{"title":"History revision","minutes":90,"cat":"study","days":["YYYY-MM-DD"]}]} (minutes is TOTAL for each task across its eligible days, not per day. Ask him for missing days, durations, time window and break preferences; the numbers shown here are examples, not permission. Include all existing weekly-plan tasks when adding new tasks and regenerating. This replaces only future, uncompleted auto-planned sessions, keeps fixed/completed entries and schedules real rest breaks. Never replace a fixed appointment without asking.)
-- {"op":"add_assignment","title":"exact name","due":"YYYY-MM-DD","dueMin":null,"minutes":null} (schoolwork ONLY; MUST also include add_block with this exact title and the user's stated study day/start/end in this batch. If no study slot was given, ask first with no ops. A due date/time is NOT a study slot. Personal activities such as gym, church, shopping and meals never go into School.)
-- {"op":"add_routine","title":"Take vitamins","start":null,"minutes":5,"cat":"other"} (daily reminder; null start means untimed daily checklist)
-- {"op":"remove_routine","id":"..."} (only if he explicitly stops the daily routine)
-- {"op":"add_exercise","day":"<gym day key>","name":"Cable crossover","muscles":"Chest, front delts","cues":["cue 1","cue 2","cue 3"],"search":"cable crossover proper form","videoId":"only a real YouTube id supplied by him or internet results, otherwise omit","sets":3,"reps":"12-15","rest":60}
-- {"op":"remove_exercise","day":"<gym day key, optional>","exercise":"<ex key or name>"}
-- {"op":"attach_video","exercise":"<existing exact exercise name or key>","videoId":"<real supplied or checked YouTube id>","videoBy":"YouTube demonstration"} (replace the video on an existing exercise without changing its sets, reps or gym day)
-- {"op":"set","path":"dot.path","value":...}, {"op":"push","path":"dot.path","value":...}, {"op":"remove","path":"dot.path","id":"..."}  (for anything else in APP DATA, e.g. "profile.address", "voice.rate", "bible.max", "band.songs", "food.kg"; goals are {"op":"push","path":"goals","value":{"text":"...","made":"YYYY-MM-DD"}} and {"op":"remove","path":"goals","id":"..."})
-- {"op":"note","text":"...","folder":"spiritual|about|bass|fitness|learning|life"}
-Never use paths for API keys or private settings; they are not available.`;
 
 function findBlock(id) {
   for (const d of Object.keys(S.days)) { const b = (S.days[d].blocks || []).find(x => x.id === id); if (b) return { d, b }; }
@@ -127,13 +78,14 @@ export function apply(ops, { onDone } = {}) {
           const cat = CATS[op.cat] ? op.cat : "other";
           if (!d || !op.title || s == null || e == null || e <= s) throw new Error("Nothing saved. What date, start and end time should I use?");
           const clash = day(d).blocks.find(b => !b.skipped && !b.studyWindow && b.start < e && s < b.end);
-          if (clash) throw new Error(`No, sir, this is not feasible. ${op.title} overlaps ${clash.title} on ${d}. Which time or activity should change?`);
+          if (day(d).blocks.some(b => !b.skipped && b.start === s && b.end === e && activityKey(b.title) === activityKey(op.title))) { said.push("Already on your timetable."); break; }
           day(d).blocks.push({ id: uid(), title: String(op.title || "Untitled").slice(0, 80), cat, start: s, end: e, flex: false, done: false, date: d, src: "pg" });
           if (SC.academic(op.title)) {
             const [task] = SC.add([{ title: String(op.title).slice(0, 80), kind: "assignment", due: null, dueMin: null, est: null }]);
             day(d).blocks.at(-1).tid = task.id;
           }
           said.push(`Added ${op.title}${d === today() ? "" : d === addDays(today(), 1) ? " tomorrow" : " on " + d}.`);
+          if (clash) said.push(`Overlaps ${clash.title}.`);
           break;
         }
         case "delete_block": {
@@ -193,8 +145,8 @@ export function apply(ops, { onDone } = {}) {
         case "remove_routine": {
           const r = (S.routines || []).find(r => r.id === op.id);
           if (!r) { said.push("I couldn't find that daily reminder."); break; }
-          r.disabled = true;
-          for (const v of Object.values(S.days)) v.blocks = v.blocks.filter(b => b.routine !== r.id);
+          S.routines = S.routines.filter(x => x.id !== r.id);
+          for (const [date, v] of Object.entries(S.days)) if (date >= today()) v.blocks = v.blocks.filter(b => b.routine !== r.id || b.done);
           said.push(`Stopped the daily reminder for ${r.title}.`); break;
         }
         case "add_exercise": {

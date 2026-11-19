@@ -422,6 +422,13 @@ h2.sec { font-size: var(--text-sm); font-weight: 600; letter-spacing: .02em; col
   .dock-btn span { font-size: 10px; }
 }
 a.btn { color: var(--text); text-decoration: none; } a.btn.primary { color: var(--accent-ink); } a.tag { text-decoration: none; }
+.btn:not(.sm) { min-height: 44px; }
+.row.wrap, .due-list .row, .set-row .row, .result-card .row { flex-wrap: wrap; }
+.set-row > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.due-soon { border-inline-start: 3px solid var(--accent); padding-inline-start: .625rem; }
+.due-overdue { color: var(--bad); border-inline-start: 3px solid var(--bad); padding-inline-start: .625rem; }
+.search-card article { padding-block: .75rem; border-block-end: 1px solid var(--line-2); }
+.canto-phrase { font-size: 1.65rem; }
 /* v2.2 Food + shopping */
 .tabs { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); margin-bottom: var(--space-6); }
 .tab { border: 0; background: none; color: var(--muted); font-size: var(--text-sm); font-weight: 600; padding: 7px 16px; border-radius: 999px; }

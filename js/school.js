@@ -44,7 +44,7 @@ export const tasks = () => sch().tasks;
 export const nonAcademic = text => /\b(?:gym|workout|fitness|shopping|grocer(?:y|ies)|cooking|recipes?|meals?|church|bible|prayer|bass|rehearsal|vitamins?)\b/i.test(text)
   && !/\b(?:school|college|university|course|class|homework|coursework)\b/i.test(text);
 export const academic = text => !nonAcademic(text) && /\b(?:assignments?|homework|coursework|essays?|exams?|quizzes?|worksheets?|lab reports?|school (?:reports?|projects?|presentations?)|(?:math|physics|chemistry|history|english|solidworks|core subject|data analytics).*(?:projects?|reports?|presentations?))\b/i.test(text);
-export const pending = () => tasks().filter(t => !t.done).sort((a, b) => (a.due + pad4(a.dueMin)).localeCompare(b.due + pad4(b.dueMin)));
+export const pending = () => tasks().filter(t => !t.done).sort((a, b) => `${a.due || "9999"}${pad4(a.dueMin ?? 1440)}`.localeCompare(`${b.due || "9999"}${pad4(b.dueMin ?? 1440)}`));
 const pad4 = n => String(n ?? 1439).padStart(4, "0");
 
 // ---------- Parsing ----------

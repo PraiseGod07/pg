@@ -34,7 +34,7 @@ export async function hydrate() {
 export const DEFAULTS = () => ({
   v: 2,
   profile: { address: "sir", name: "", dayStart: 420, dayEnd: 1380 },
-  voice: { handsFree: false, voiceURI: "", rate: 1, alerts: true, heads: 5, keepAwake: false },
+  voice: { autoSend: false, alarmSpeech: false, voiceURI: "", rate: 1, alerts: true, heads: 5, keepAwake: false },
   days: {},            // { "YYYY-MM-DD": { blocks: [...] } }
   inbox: [],           // unscheduled tasks
   gym: { split: "ppl", idx: 0, override: null, overrideDate: null, log: [] , weights: {} },
@@ -45,7 +45,7 @@ export const DEFAULTS = () => ({
   learn: { tracks: [], active: null },
   food: { kg: null, week: null, list: [], made: null },
   chat: [],
-  ai: { provider: "none", key: "", model: "" },
+  routines: [], phrases: [], reminders: [], collections: [], goals: [],
   t: 0,                // last change, used to keep devices in sync
   dev: { trusted: false, cloud: { url: "", token: "", last: 0 } }   // this device only, never synced
 });
@@ -67,12 +67,31 @@ export function endDraft() {
 
 function merge(base, o) {
   for (const k in o) {
+    if (["__proto__", "prototype", "constructor"].includes(k)) continue;
     if (o[k] && typeof o[k] === "object" && !Array.isArray(o[k]) && base[k] && typeof base[k] === "object" && !Array.isArray(base[k])) merge(base[k], o[k]);
     else base[k] = o[k];
   }
   return base;
 }
 
+export function retireAI(state) {
+  if (Object.hasOwn(state, "ai")) {
+    delete state.ai;
+    if (state.dev && !state.dev.aiRetired) state.dev.aiRetired = "pending";
+  }
+  if (state.dev?.cloud?.baseline) delete state.dev.cloud.baseline.ai;
+  if (state.voice) for (const k of ["handsFree", "alwaysOn", "speak", "natural", "cloudVoice"]) delete state.voice[k];
+  return state;
+}
+export function migrate(state) {
+  retireAI(state);
+  for (const v of Object.values(state.days || {})) for (const b of v.blocks || []) {
+    b.fixed ??= b.flex === false;
+    b.priority ??= 2;
+    b.venue ??= "";
+  }
+  return state;
+}
 export function load() {
   // Ask the browser to keep PG's data even when the device is low on space.
   try { navigator.storage?.persist?.(); } catch {}
@@ -83,9 +102,8 @@ export function load() {
   S.dev.seen = 1;
   
   S.chat = (S.chat || []).slice(-60);
-  // v2.7: PG listens for "Hi PG" all the time by default
-  // v2.8: no background listening. PG listens only after you press the button.
-  if ((S.voice.alwaysOn || 0) < 2) { S.voice.alwaysOn = 2; S.voice.handsFree = false; }
+  migrate(S);
+  if (raw) { save(true); checkpoint(); }
   return S;
 }
 
@@ -101,7 +119,6 @@ export function importV1(o) {
         day(t.d).blocks.push({ id: uid(), title: t.t, cat, start, end, flex: false, done: false, date: t.d, src: "v1" });
       } else S.inbox.push({ id: uid(), title: t.t, cat, dur: t.est || 45, date: t.d || "" });
     });
-    if (o.ai && o.ai.key) S.ai = { provider: o.ai.provider || "gemini", key: o.ai.key, model: "" };
     save();
     return true;
   } catch { return false; }
@@ -121,7 +138,7 @@ export function save(quiet) { if (inDraft()) return; if (!quiet) S.t = Date.now(
 export function adopt(o, t) {
   checkpoint();
   const dev = S.dev, vu = S.voice?.voiceURI || "";
-  const next = merge(DEFAULTS(), o);
+  const next = migrate(merge(DEFAULTS(), o));
   for (const k of Object.keys(S)) delete S[k];
   Object.assign(S, next, { dev, t });
   S.voice.voiceURI = vu;
@@ -130,15 +147,16 @@ export function adopt(o, t) {
 export function wipe() { const fresh = DEFAULTS(); for (const k of Object.keys(S)) delete S[k]; Object.assign(S, fresh); S.dev.seen = 1; save(true); }
 export function day(d = today()) {
   const value = (S.days[d] = S.days[d] || { blocks: [] });
-  for (const r of (S.routines || []).filter(r => !r.disabled && Number.isFinite(r.start) && (!r.from || r.from <= d))) {
+  const weekday = new Date(`${d}T12:00:00Z`).getUTCDay();
+  for (const r of (S.routines || []).filter(r => !r.disabled && Number.isFinite(r.start) && (!r.from || r.from <= d) && (!r.days?.length || r.days.includes(weekday)))) {
     const id = `routine:${r.id}:${d}`;
     if (!value.blocks.some(b => b.id === id)) value.blocks.push({
       id, routine: r.id, title: r.title, cat: r.cat || "other", start: r.start,
-      end: r.start + r.minutes, date: d, done: false, flex: false, src: "routine"
+      end: r.start + r.minutes, date: d, done: false, fixed: true, flex: false, priority: r.priority || 2, venue: r.venue || "", src: "routine"
     });
   }
   return value;
 }
 export function sortedBlocks(d = today()) { return day(d).blocks.slice().sort((a, b) => a.start - b.start || a.end - b.end); }
 export function reset() { const dev = S.dev; S = DEFAULTS(); S.dev = dev; save(); }
-export function replace(o) { const dev = S.dev; S = merge(DEFAULTS(), o); S.dev = dev; save(); }
+export function replace(o) { const dev = S.dev; S = merge(DEFAULTS(), o); S.dev = dev; migrate(S); save(); checkpoint(); }

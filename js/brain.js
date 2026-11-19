@@ -37,8 +37,11 @@ export function refsIn(text) {
 
 export function notes() { if (!S.notes) S.notes = []; return S.notes; }
 export function add(text, opts = {}) {
-  text = String(text).trim().replace(/^[:,\s-]+/, "");
-  text = text.charAt(0).toUpperCase() + text.slice(1);
+  text = String(text).trim();
+  if (!opts.exact) {
+    text = text.replace(/^[:,\s-]+/, "");
+    text = text.charAt(0).toUpperCase() + text.slice(1);
+  }
   const n = { id: uid(), text, folder: classify(text, opts.folder), refs: refsIn(text), ctx: opts.ctx || "", date: today(), ts: Date.now() };
   if (opts.ctx && !n.refs.length && n.folder === "spiritual") n.refs = [opts.ctx];
   notes().unshift(n); save();

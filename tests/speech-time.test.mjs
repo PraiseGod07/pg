@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { speakable, chunks, isMale } from "../js/speech.js";
-import { parseSchedule, splitVoiceTurn } from "../js/nlu.js";
+import { parseSchedule } from "../js/nlu.js";
 
 const context = { date: "2026-11-15", today: "2026-11-15", now: 450 };
 test("long spoken replies retain their final words", () => {
@@ -41,12 +41,4 @@ test("male voice detection checks names and mobile identifiers, not defaults", (
   assert(!isMale({name:"English",voiceURI:"en-US"}));
   assert(!isMale({name:"Google UK English Female",voiceURI:"female"}));
   assert(!isMale({name:"Samantha",voiceURI:"samantha"}));
-});
-test("only an explicit trailing Your turn PG cue completes a spoken turn", () => {
-  for (const cue of ["Your turn PG", "your turn, PG.", "Your turn P. G.", "your turn pee gee", "your turn PJ"]) {
-    assert.deepEqual(splitVoiceTurn("I have more to say. " + cue), { complete:true,text:"I have more to say." });
-  }
-  for (const text of ["I'm still talking", "yes", "What's next?", "your turn", "Your turn PG is the phrase I will say later"]) {
-    assert.deepEqual(splitVoiceTurn(text), { complete:false,text });
-  }
 });

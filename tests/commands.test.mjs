@@ -33,11 +33,11 @@ test("changed data rejects a stale proposal before applying any of it", () => {
   assert.throws(() => applyProposal(state, p), /data changed/);
   assert.equal(state.profile.address, "sir");
 });
-test("new conflicts and invalid clocks are rejected", () => {
+test("new conflicts can coexist but invalid clocks are rejected", () => {
   const before = { days: { "2026-11-16": { blocks: [block("Church", 570, 900)] } } };
   const after = structuredClone(before);
   after.days["2026-11-16"].blocks.push(block("Meeting", 800, 960));
-  assert.throws(() => validateChanges(before, after, changes(before, after)), /not feasible/);
+  assert.doesNotThrow(() => validateChanges(before, after, changes(before, after)));
   after.days["2026-11-16"].blocks.at(-1).start = NaN;
   assert.throws(() => validateChanges(before, after, changes(before, after)), /valid date/);
 });
@@ -66,11 +66,11 @@ test("calendar dates reject invalid dates and weekday contradictions", () => {
   assert.throws(() => calendarDate("Monday November 17, 2026", context.today), /not monday/);
   assert.throws(() => calendarDate("2026-02-30", context.today), /invalid/);
 });
-test("School additions require a matching timetable slot and exclude personal activities", () => {
+test("School accepts due-only work and excludes personal activities", () => {
   const before = { school: { tasks: [] }, days: {} };
   const after = structuredClone(before);
   after.school.tasks.push({ id: "s", title: "Physics assignment" });
-  assert.throws(() => validateChanges(before, after, changes(before, after)), /day, start time/);
+  assert.doesNotThrow(() => validateChanges(before, after, changes(before, after)));
   after.days["2026-11-16"] = { blocks: [block("Physics assignment", 960, 1020)] };
   assert.doesNotThrow(() => validateChanges(before, after, changes(before, after)));
   after.school.tasks[0].title = "Gym";

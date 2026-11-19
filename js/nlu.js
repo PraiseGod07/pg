@@ -1,27 +1,11 @@
 import { looksLikeSchool, estIn } from "./school.js";
 import { clean as cleanHeard } from "./hearing.js";
-// PG language understanding: wake word, intents, and spoken-schedule parsing.
+// PG language understanding: intents and spoken-schedule parsing.
 // Works fully on-device. Built for messy speech-to-text (no punctuation, mis-heard words, wrong AM/PM).
 import { DEFAULT_MIN } from "./library.js";
 import { calendarDate } from "./dates.js";
 
-// ---------- Wake word ----------
-// Speech engines hear "Hi PG" many ways. Accept common variants, but only after a greeting word.
-const WAKE_RE = /\b(?:hi|hey|hay|high|hiya|okay|ok|hello|yo|oi)[\s,.!]*(?:pg|p\.?\s?g\.?|pee\s?gee|pea\s?gee|pj|p\.?\s?j\.?|bg|b\.?\s?g\.?|petey|pg's|pgs|pidgey|piji|pee\s?jay)(?=$|[\s,.!?])/i;
-export function findWake(text) {
-  const m = text.match(WAKE_RE);
-  if (!m) return null;
-  return { index: m.index, end: m.index + m[0].length, after: text.slice(m.index + m[0].length).replace(/^[\s,.!?]+/, "") };
-}
-export const stripWake = t => t.replace(WAKE_RE, " ").replace(/\s+/g, " ").trim();
-
-// Pauses and recognition-session endings are NOT a turn boundary.
-// Only this trailing spoken hand-off (or the explicit finish button) submits.
-export function splitVoiceTurn(raw) {
-  const text = String(raw || "").trim();
-  const cue = text.match(/\byour[\s,.:;!?-]+turn[\s,.:;!?-]+(?:p[.\s]*g|pee[\s-]*gee|p[.\s]*j)\.?[.!?,\s"'”“]*$/i);
-  return { complete: !!cue, text: cue ? text.slice(0, cue.index).replace(/[\s,]+$/, "").trim() : text };
-}
+const stripAddress = t => String(t || "").replace(/^\s*(?:(?:hi|hey|hello)[\s,.!]+)?(?:pg|p\.?\s*g\.?|pee\s+gee)(?=$|[\s,.!?])[\s,.!?]*/i, "");
 
 // ---------- Normalisation ----------
 const NUM = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
@@ -267,7 +251,7 @@ function resolve(items, ctx) {
 // ---------- Public: schedule parsing ----------
 // Returns ordered items: {kind:'event'|'anchor', title, cat, s, e, b, dur, date}
 export function parseSchedule(raw, ctx) {
-  const t = normalize(stripWake(raw));
+  const t = normalize(stripAddress(raw));
   // Successive ranges are boundaries even when speech contains no “then”.
   const rangeRE = new RegExp(`\\b(?:from\\s+|between\\s+)?${T_RE_SRC}\\s*(?:to|until|till|through|[–-])\\s*${T_RE_SRC}\\b`, "g");
   const ranges = [...t.matchAll(rangeRE)];
@@ -343,7 +327,7 @@ export const EX_ALIASES = [
 export const findExercise = t => (EX_ALIASES.find(([, re]) => re.test(t)) || [])[0] || null;
 
 export function intent(raw) {
-  const t = normalize(stripWake(raw));
+  const t = normalize(stripAddress(raw));
   const bare = t.replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
   if (!bare) return { type: "greet" };
   // "Can you stop" / "wait" means stop talking and listen, not end the call.
@@ -431,8 +415,10 @@ export function intent(raw) {
   if ((m = bare.match(/\b(?:i(?:'m| am)? (?:done|finished) with|i (?:finished|completed|did)|mark|check off) (?:the |my )?(.+?)(?: (?:as )?(?:done|complete|completed|finished))?$/))) return { type: "done", target: m[1] };
   if ((m = bare.match(/^(?:i(?:'m| am) )?(?:done|finished)$/))) return { type: "done", target: "" };
   if (/\?\s*$/.test(raw) || /^(?:what|how|why|should|can|could|is|are|do|does|when|where|who|which|give me|tell me|remind me)\b/.test(bare)) return { type: "ask", q: bare, text: raw };
-  return { type: "schedule", text: raw };
+  return hasCalendarCue(bare) ? { type: "schedule", text: raw } : { type: "unknown", text: raw };
 }
+
+export const hasCalendarCue = text => /\b(?:timetable|schedule|calendar|today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekdays?|weekends?|\d{4}-\d\d-\d\d|\d{1,2}:\d\d|\d{1,2}\s*(?:am|pm)|(?:at|from|between) \d{1,2}\b|\d{1,2} (?:to|until) \d{1,2}|in \d+ days?|on the \d{1,2}(?:st|nd|rd|th))\b/i.test(normalize(text)) || /\b(?:january|february|march|april|may|june|july|august|september|october|november|december) \d{1,2}\b/i.test(text);
 const NUMW = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
 
 // Fuzzy-match a spoken name against blocks

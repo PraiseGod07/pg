@@ -1,15 +1,12 @@
 // PG Cloud: your private PG server on your own Cloudflare account.
-// 1) Runs Workers AI for PG (needs a Workers AI binding named AI).
 // 2) Keeps PG's data so your laptop and phone stay the same (needs a D1 database binding named DB).
-// 3) Gives PG a natural voice (Deepgram Aura-2) and good hearing (Deepgram Nova-3), also through Workers AI.
 // 4) Lets PG look things up on the internet for free (DuckDuckGo, Google News, Bing and Wikipedia, then reads the top pages),
 //    and gets live weather from Open-Meteo.
 // 5) Only devices that enter your passcode can use it. The passcode is set the first time you connect
 //    and is stored only as a salted hash in your database. Wrong guesses are limited.
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, OPTIONS", "Access-Control-Allow-Headers": "authorization, content-type", "Access-Control-Max-Age": "86400" };
-const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-const VERSION = 5;
-const VOICES = /^(amalthea|andromeda|apollo|arcas|aries|asteria|athena|atlas|aurora|callista|cora|cordelia|delia|draco|electra|harmonia|helena|hera|hermes|hyperion|iris|janus|juno|jupiter|luna|mars|minerva|neptune|odysseus|ophelia|orion|orpheus|pandora|phoebe|pluto|saturn|thalia|theia|vesta|zeus)$/;
+const VERSION = 6;
+const withoutCredentials = data => JSON.stringify(data, (key, value) => /^(?:ai|dev|api[_-]?key|secret[_-]?key|search[_-]?key|access[_-]?token|password|credential)$/i.test(key) ? undefined : value);
 const out = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { ...CORS, "content-type": "application/json", "cache-control": "no-store" } });
 const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
 const rand = n => hex(crypto.getRandomValues(new Uint8Array(n)));
@@ -84,7 +81,7 @@ async function web(q, news) {
   ]);
   const dd = relevant(q, d), gg = relevant(q, g), ww = relevant(q, w), bb = relevant(q, bg);
   const results = (news ? [...gg.slice(0, 6), ...dd, ...bb, ...ww] : [...dd, ...bb.slice(0, 4), ...gg.slice(0, 4), ...ww]).filter((x, i, a) => x.title && x.url && a.findIndex(y => y.url === x.url) === i);
-  const read = results.filter(x => !x.text && !/news\.google\.com|youtube\.com|facebook\.com|instagram\.com|tiktok\.com|x\.com|twitter\.com|reddit\.com/.test(x.url)).slice(0, 2);
+  const read = results.filter(x => !x.text && !/news\.google\.com|youtube\.com|facebook\.com|instagram\.com|tiktok\.com|x\.com|twitter\.com|reddit\.com/.test(x.url)).slice(0, 4);
   const texts = await Promise.all(read.map(x => pageText(x.url)));
   read.forEach((x, i) => { if (texts[i]) x.text = texts[i]; });
   return { results: results.slice(0, 8), via: { ddg: d.length, news: g.length, wiki: w.length, bing: bb.length } };
@@ -97,7 +94,7 @@ export default {
     if (!db) return out({ error: { message: "PG Cloud needs a D1 database binding named DB." } }, 500);
     await setup(db);
     const pass = await get(db, "pass");
-    if (path === "/") return out({ pg: true, v: VERSION, voice: !!env.AI, ready: !!pass, ai: !!env.AI });
+    if (path === "/") return out({ pg: true, v: VERSION, ready: !!pass });
 
     if (path === "/unlock" && req.method === "POST") {
       const ip = req.headers.get("cf-connecting-ip") || "?", now = Date.now();
@@ -134,11 +131,11 @@ export default {
       // Recovery snapshot of the first state replaced each hour. Uses the
       // existing kv schema; no migrations, deletions, or renamed columns.
       if (cur) await db.prepare("INSERT INTO kv (k, v, t) VALUES (?, ?, ?) ON CONFLICT(k) DO NOTHING")
-        .bind("recovery:" + Math.floor(Date.now() / 3600000), cur.v, cur.t).run();
+        .bind("recovery:" + Math.floor(Date.now() / 3600000), withoutCredentials(JSON.parse(cur.v)), cur.t).run();
       const t = Math.max(Date.now(), (cur?.t || 0) + 1);
       const result = cur
-        ? await db.prepare("UPDATE kv SET v = ?, t = ? WHERE k = ? AND t = ?").bind(JSON.stringify(b.data), t, "state", b.base).run()
-        : await db.prepare("INSERT INTO kv (k, v, t) VALUES (?, ?, ?) ON CONFLICT(k) DO NOTHING").bind("state", JSON.stringify(b.data), t).run();
+        ? await db.prepare("UPDATE kv SET v = ?, t = ? WHERE k = ? AND t = ?").bind(withoutCredentials(b.data), t, "state", b.base).run()
+        : await db.prepare("INSERT INTO kv (k, v, t) VALUES (?, ?, ?) ON CONFLICT(k) DO NOTHING").bind("state", withoutCredentials(b.data), t).run();
       if (!result.meta?.changes) {
         const latest = await get(db, "state");
         return out({ t: latest?.t || 0, data: latest ? JSON.parse(latest.v) : null, stale: true, sync: 2 }, 409);
@@ -147,30 +144,6 @@ export default {
     }
     if (path === "/devices" && req.method === "DELETE") { await db.prepare("DELETE FROM dev WHERE tok != ?").bind(await sha(tok)).run(); return out({ ok: true }); }
 
-    if (path === "/v1/chat/completions" && req.method === "POST") {
-      if (!env.AI) return out({ error: { message: "PG Cloud needs a Workers AI binding named AI." } }, 500);
-      const b = await req.json(), model = /^@cf\//.test(b.model || "") ? b.model : MODEL;
-      const input = { messages: b.messages, max_tokens: b.max_tokens || b.max_completion_tokens || 700 };
-      for (const k of ["temperature"]) if (b[k] != null) input[k] = b[k];
-      try {
-        const r = await env.AI.run(model, input);
-        if (r?.choices) return out(r);
-        const c = r?.response ?? r?.output_text ?? r?.result?.response ?? "";
-        return out({ model, choices: [{ index: 0, message: { role: "assistant", content: typeof c === "string" ? c : JSON.stringify(c) } }] });
-      } catch (e) { return out({ error: { message: String(e?.message || e) } }, 502); }
-    }
-    // PG's voice: text in, natural speech (mp3) out
-    if (path === "/v1/tts" && req.method === "POST") {
-      if (!env.AI) return out({ error: { message: "PG Cloud needs a Workers AI binding named AI." } }, 500);
-      const b = await req.json().catch(() => ({})), text = String(b.text || "").slice(0, 1900);
-      if (!text.trim()) return out({ error: { message: "No text." } }, 400);
-      try {
-        let a = await env.AI.run("@cf/deepgram/aura-2-en", { text, speaker: VOICES.test(b.voice || "") ? b.voice : "orion", encoding: "mp3" });
-        if (a instanceof Response) a = a.body;
-        else if (a?.audio) a = Uint8Array.from(atob(a.audio), c => c.charCodeAt(0));
-        return new Response(a, { headers: { ...CORS, "content-type": "audio/mpeg", "cache-control": "no-store" } });
-      } catch (e) { return out({ error: { message: String(e?.message || e) } }, 502); }
-    }
     // PG's internet
     if (path === "/v1/web" && req.method === "POST") {
       const b = await req.json().catch(() => ({}));
@@ -194,25 +167,6 @@ export default {
       const u = new URL(req.url);
       const r = await fetch("https://api.open-meteo.com/v1/forecast" + u.search);
       return new Response(r.body, { status: r.status, headers: { ...CORS, "content-type": "application/json" } });
-    }
-    // PG's ears: recorded speech (wav) in, words out
-    if (path === "/v1/stt" && req.method === "POST") {
-      if (!env.AI) return out({ error: { message: "PG Cloud needs a Workers AI binding named AI." } }, 500);
-      const buf = await req.arrayBuffer(), type = req.headers.get("content-type") || "audio/wav";
-      if (buf.byteLength < 500 || buf.byteLength > 8e6) return out({ text: "" });
-      try {
-        const r = await env.AI.run("@cf/deepgram/nova-3", { audio: { body: new Response(buf).body, contentType: type }, smart_format: true, punctuate: true, language: "en" });
-        const t = r?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? r?.text;
-        if (typeof t === "string") return out({ text: t.trim(), by: "nova-3" });
-        throw new Error("no transcript");
-      } catch (e) {
-        try {
-          const u = new Uint8Array(buf); let bin = "";
-          for (let i = 0; i < u.length; i += 32768) bin += String.fromCharCode.apply(null, u.subarray(i, i + 32768));
-          const r = await env.AI.run("@cf/openai/whisper-large-v3-turbo", { audio: btoa(bin), language: "en" });
-          return out({ text: String(r?.text || "").trim(), by: "whisper" });
-        } catch (e2) { return out({ error: { message: String(e2?.message || e2) } }, 502); }
-      }
     }
     return out({ error: { message: "Not found" } }, 404);
   }

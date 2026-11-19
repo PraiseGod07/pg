@@ -13,7 +13,13 @@ export const status = () => !on() ? "Not connected to PG Cloud" : cloud().error
 let busy = () => false, changed = () => {}, revoked = () => {}, timer = 0, running = null, again = false;
 export function init(o) { busy = o.busy || busy; changed = o.changed || changed; revoked = o.revoked || revoked; }
 const copy = o => JSON.parse(JSON.stringify(o));
-const content = o => { const v = copy(o); delete v.dev; delete v.t; if (v.voice) delete v.voice.voiceURI; return v; };
+export const syncContent = o => {
+  const v = JSON.parse(JSON.stringify(o, (k, value) => /^(?:api[_-]?key|secret[_-]?key|search[_-]?key|access[_-]?token|password|credential)$/i.test(k) ? undefined : value));
+  delete v.dev; delete v.t; delete v.ai;
+  if (v.voice) for (const k of ["voiceURI", "handsFree", "alwaysOn", "speak", "natural", "cloudVoice"]) delete v.voice[k];
+  return v;
+};
+const content = syncContent;
 const shareable = () => content(S);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const deviceName = () => /iPhone|Android/.test(navigator.userAgent) ? "Phone" : "Laptop";
@@ -38,7 +44,7 @@ async function synchronize() {
       const st = await api("/state");
       if (inDraft()) return false;
       const remote = st.data ? content(st.data) : {};
-      const local = shareable(), base = cloud().baseline || null;
+      const local = shareable(), base = cloud().baseline ? content(cloud().baseline) : null;
       if (st.sync !== 2) {
         // Legacy last-write-wins servers are unsafe to upload to. Rescue their
         // existing records locally, but require the new Worker before writing.
@@ -54,7 +60,7 @@ async function synchronize() {
       if (!same(local, merged)) {
         adopt(merged, S.t); save(true); notified = true;
       }
-      if (!same(merged, remote)) {
+      if (!same(merged, remote) || st.data && (Object.hasOwn(st.data, "ai") || !same(content(st.data), st.data))) {
         // Worker v5 compares base in one atomic DB write.
         const revision = Math.max(Date.now(), (st.t || 0) + 1);
         const sent = copy(merged);
@@ -109,9 +115,11 @@ onSave(() => {
   if (!on()) return;
   clearTimeout(timer); timer = setTimeout(push, 250);
 });
-document.addEventListener("visibilitychange", () => {
-  clearTimeout(timer); if (on()) push();
-});
-window.addEventListener("online", () => push());
-window.addEventListener("pagehide", () => { if (on()) push(); });
-setInterval(() => { if (!document.hidden && on()) push(); }, 10000);
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    clearTimeout(timer); if (on()) push();
+  });
+  window.addEventListener("online", () => push());
+  window.addEventListener("pagehide", () => { if (on()) push(); });
+  setInterval(() => { if (!document.hidden && on()) push(); }, 10000);
+}

@@ -46,7 +46,8 @@ async function place(text) {
   if (!p || /^(?:the )?(?:morning|afternoon|evening|night|week|weekend|moment|hong ?kong|hk|here|home)$/i.test(p)) return HOME;
   let j = {}; try { j = await (await withTimeout(fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(p)}&count=1&language=en`), 6000)).json(); } catch {}
   const g = j.results?.[0];
-  return g ? { name: g.name + (g.country && g.name !== g.country ? `, ${g.country}` : ""), lat: g.latitude, lon: g.longitude } : HOME;
+  if (!g) throw new Error("Location not found");
+  return { name: g.name + (g.country && g.name !== g.country ? `, ${g.country}` : ""), lat: g.latitude, lon: g.longitude };
 }
 
 export async function weather(text) {
@@ -75,7 +76,7 @@ async function wiki(q) {
   return Object.values(ex.query?.pages || {}).map(p => ({ title: p.title + " - Wikipedia", url: "https://en.wikipedia.org/wiki/" + encodeURIComponent(p.title.replace(/ /g, "_")), snippet: "", text: String(p.extract || "").slice(0, 2000) }));
 }
 
-// Search the internet. Returns { text: facts for the AI, sources: [{title, url}] } or null.
+// Search the internet. Only the query is sent to the Worker.
 export async function search(q, news = /\b(?:news|headlines?|happening)\b/i.test(q)) {
   const y = new Date().getFullYear();
   q = String(q).replace(/[?!.]+$/g, "").replace(/\bthis year\b/gi, String(y)).replace(/\blast year\b/gi, String(y - 1)).trim();
@@ -90,7 +91,7 @@ export async function search(q, news = /\b(?:news|headlines?|happening)\b/i.test
   if (!results.length) { try { results = relevant(q, await withTimeout(wiki(q), 8000)); } catch (e) { console.warn(e); } }
   if (!results.length) return null;
   const text = results.slice(0, 8).map((x, i) => `[${i + 1}] ${x.title}${x.site ? ` (${x.site})` : ""}${x.date ? ` (${x.date})` : ""} ${x.url}\n${x.snippet || ""}${x.text ? `\nPage text: ${x.text}` : ""}`).join("\n\n");
-  return { text, sources: results.slice(0, 8).map(x => ({ title: x.title, url: x.url, site: x.site || "" })) };
+  return { text, sources: results.slice(0, 8).map(x => ({ title: x.title, url: x.url, site: x.site || "" })), cards: extractAnswers(q, results) };
 }
 
 // Keep only results that are actually about the question (drops junk like unrelated Microsoft pages).
@@ -100,6 +101,54 @@ export function relevant(q, list) {
   const k = words(q); if (!k.length) return list;
   const need = k.length >= 4 ? 2 : 1;
   return list.filter(x => { const t = `${x.title} ${x.snippet || ""} ${x.url}`.toLowerCase(); return k.filter(w => t.includes(w)).length >= need; });
+}
+export function webQuery(text) {
+  const q = String(text).trim();
+  const force = q.match(/^search (?:the )?web (?:for )?(.+)$/i);
+  if (force) return force[1];
+  if (/\b(?:i|me|my|mine)\b/i.test(q) || /^find\s+(?!out\b)/i.test(q)) return "";
+  const explicit = q.match(/^(?:search for|google|look up|find out)\s+(.+)$/i);
+  if (explicit) return explicit[1];
+  return /^(?:who|what|when|where|why|how|which|is|are|does|can|define|meaning of|news about|weather|scores?|price of|convert)\b/i.test(q) ? q : "";
+}
+const units = {
+  mm: ["length", .001], cm: ["length", .01], m: ["length", 1], km: ["length", 1000],
+  inch: ["length", .0254], inches: ["length", .0254], ft: ["length", .3048], feet: ["length", .3048], mile: ["length", 1609.344], miles: ["length", 1609.344],
+  g: ["mass", .001], kg: ["mass", 1], lb: ["mass", .45359237], lbs: ["mass", .45359237], oz: ["mass", .028349523125],
+  min: ["time", 60], minutes: ["time", 60], hour: ["time", 3600], hours: ["time", 3600], seconds: ["time", 1]
+};
+export function calculate(query) {
+  const t = String(query).trim().replace(/[?!.]+$/, "");
+  const conversion = t.match(/^(?:convert\s+)?(-?\d+(?:\.\d+)?)\s+([a-z]+)\s+(?:to|in)\s+([a-z]+)$/i);
+  let value, suffix = "";
+  if (conversion) {
+    const [, number, source, dest] = conversion, a = units[source.toLowerCase()], b = units[dest.toLowerCase()];
+    if (!a || !b || a[0] !== b[0]) return null;
+    value = +number * a[1] / b[1]; suffix = ` ${dest}`;
+  } else {
+    const math = t.match(/^(?:(?:calculate|what is)\s+)?(-?\d+(?:\.\d+)?)\s*([+*×/÷-])\s*(-?\d+(?:\.\d+)?)$/i);
+    if (!math) return null;
+    const [, a, op, b] = math;
+    value = op === "+" ? +a + +b : op === "-" ? +a - +b : /[*×]/.test(op) ? +a * +b : +a / +b;
+  }
+  return Number.isFinite(value) ? new Intl.NumberFormat("en-GB", { maximumSignificantDigits: 10 }).format(value) + suffix : null;
+}
+export function extractAnswers(q, pages) {
+  const keywords = new Set(words(q)), wantsNumber = /^(?:how (?:many|much)|when|what year)\b/i.test(q);
+  const cards = [];
+  for (const page of pages.slice(0, 8)) {
+    let url;
+    try { url = new URL(page.url); if (!["https:", "http:"].includes(url.protocol)) continue; } catch { continue; }
+    const candidates = `${page.snippet || ""}\n${page.text || ""}`.split(/(?<=[.!?])\s+(?=[A-Z0-9])|\n+/)
+      .map(text => text.trim().replace(/\s+/g, " ")).filter(text => text.length >= 24 && text.length <= 420)
+      .map(text => {
+        const seen = new Set(words(text));
+        const hits = [...keywords].filter(w => seen.has(w)).length;
+        return { text, score: hits * 3 + (hits && wantsNumber && /\d/.test(text) ? 2 : 0) };
+      }).filter(x => x.score).sort((a, b) => b.score - a.score);
+    if (candidates.length) cards.push({ title: page.title || url.hostname, site: page.site || url.hostname, url: url.href, ...candidates[0] });
+  }
+  return cards.sort((a, b) => b.score - a.score).filter((c, i, all) => all.findIndex(x => x.text === c.text) === i).slice(0, 3);
 }
 
 // Fixtures and results for big leagues, from TheSportsDB's free public feed.

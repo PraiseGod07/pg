@@ -50,8 +50,35 @@ export function describe(proposal) {
       const after = c.path.at(-1) === "blocks" ? c.after || [] : c.after?.blocks || [];
       for (const b of before) if (!after.some(x => x.id === b.id))
         lines.push(`Remove ${b.title} on ${c.path[1]}, ${sayTime(b.start)} to ${sayTime(b.end)}${b.routine ? " (daily routine)" : ""}`);
-      for (const b of after) if (!before.some(x => equal(x, b)))
-        lines.push(`${before.some(x => x.id === b.id) ? "Update" : "Add"} ${b.title} on ${c.path[1]}, ${sayTime(b.start)} to ${sayTime(b.end)}${b.continuation ? " (continuation from previous day)" : ""}${b.done ? ", completed" : ""}`);
+      for (const b of after) if (!before.some(x => equal(x, b))) {
+        const old = before.find(x => x.id === b.id);
+        const was = old && (old.start !== b.start || old.end !== b.end) ? ` (was ${sayTime(old.start)} to ${sayTime(old.end)})` : "";
+        const details = [b.venue && `Venue: ${b.venue}`, b.fixed || b.flex === false ? "Fixed" : b.flex ? "Flexible" : "",
+          b.priority && `Priority: ${["", "must", "normal", "if time"][b.priority] || "normal"}`].filter(Boolean);
+        lines.push(`${old ? "Update" : "Add"} ${b.title} on ${c.path[1]}, ${sayTime(b.start)} to ${sayTime(b.end)}${was}${b.continuation ? " (continuation from previous day)" : ""}${b.done ? ", completed" : ""}${details.length ? `. ${details.join(". ")}` : ""}`);
+      }
+    } else if (c.path[0] === "collections") {
+      const before = c.before || [], after = c.after || [];
+      for (const old of before) if (!after.some(x => x.id === old.id)) lines.push(`Remove category ${old.name} (${old.items.length} items)`);
+      for (const group of after) {
+        const old = before.find(x => x.id === group.id);
+        if (!old) lines.push(`Created category: ${group.name}`);
+        else if (old.name !== group.name) lines.push(`Rename ${old.name} to ${group.name}`);
+        for (const item of group.items) {
+          const was = old?.items.find(x => x.id === item.id);
+          if (!was) lines.push(`Added: ${item.text} in ${group.name}`);
+          else if (was.done !== item.done) lines.push(`${item.done ? "Done" : "Reopened"}: ${item.text} in ${group.name}`);
+        }
+        for (const item of old?.items || []) if (!group.items.some(x => x.id === item.id)) lines.push(`Remove ${item.text} from ${group.name}`);
+      }
+    } else if (c.path.join(".") === "school.tasks") {
+      const before = c.before || [], after = c.after || [];
+      for (const task of before) if (!after.some(x => x.id === task.id)) lines.push(`Remove assignment: ${task.title}`);
+      for (const task of after) if (!before.some(x => equal(x, task))) {
+        const old = before.find(x => x.id === task.id);
+        const when = task.due ? `, due ${task.due}${task.dueMin == null ? " (no time)" : ` at ${sayTime(task.dueMin)}`}` : ", no deadline";
+        lines.push(`${old ? task.done && !old.done ? "Completed assignment" : "Update assignment" : "Assignment saved"}: ${task.title}${when}${task.done ? "" : ". Pinned on Today"}`);
+      }
     } else if (Array.isArray(c.after) || Array.isArray(c.before)) {
       const before = Array.isArray(c.before) ? c.before : [], after = Array.isArray(c.after) ? c.after : [];
       for (const x of before) if (!after.some(y => equal(x, y))) lines.push(`Remove or replace ${x.title || x.text || x.n || x.name || x.ex || JSON.stringify(x)} in ${c.path.join(".")}`);
@@ -66,27 +93,13 @@ export function validateChanges(before, after, delta) {
     if (/\b(?:gym|workout|shopping|groceries|cooking|recipe|meal|church|bible|prayer|bass|vitamins?)\b/i.test(task.title)
       && !/\b(?:school|college|university|course|class|homework|coursework)\b/i.test(task.title))
       throw new Error("Nothing saved. School is only for schoolwork. Personal activities belong on the timetable.");
-    const linked = Object.values(after.days || {}).some(d => (d.blocks || []).some(b => b.tid === task.id || b.title.toLowerCase() === task.title.toLowerCase()));
-    if (!linked) throw new Error(`Nothing saved. What day, start time and end time should I put ${task.title} on the timetable? I'll add it to both School and the timetable.`);
   }
   const changedDates = new Set(delta.filter(c => c.path[0] === "days").map(c => c.path[1]));
-  const pairs = blocks => {
-    const found = new Map();
-    for (let i = 0; i < blocks.length; i++) for (let j = i + 1; j < blocks.length; j++) {
-      const a = blocks[i], b = blocks[j];
-      if (!a.skipped && !b.skipped && !a.studyWindow && !b.studyWindow && a.start < b.end && b.start < a.end)
-        found.set([a.id, b.id].sort().join("|"), [a, b]);
-    }
-    return found;
-  };
   for (const date of changedDates) {
     const blocks = after.days?.[date]?.blocks || [];
     if (!Array.isArray(blocks)) throw new Error("The generated timetable is invalid. Nothing saved.");
     for (const b of blocks) if (!b.title || !Number.isInteger(b.start) || !Number.isInteger(b.end) || b.start < 0 || b.end <= b.start || b.end > 1440)
       throw new Error(`Nothing saved. ${b.title || "An activity"} needs a valid date and start/end time.`);
-    const previous = pairs(before.days?.[date]?.blocks || []);
-    for (const [id, [a, b]] of pairs(blocks)) if (!previous.has(id))
-      throw new Error(`No, sir, this is not feasible. ${a.title} and ${b.title} overlap on ${date}, ${sayTime(Math.max(a.start, b.start))} to ${sayTime(Math.min(a.end, b.end))}. Which activity or time should change? Nothing saved.`);
   }
 }
 export function reconcileWindows(before, after) {

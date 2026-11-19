@@ -3,7 +3,7 @@ import { uid, addDays, sayTime } from "./util.js";
 import { DEFAULT_MIN } from "./library.js";
 
 const overlaps = (a, b) => a.start < b.end && b.start < a.end;
-const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+export const activityKey = s => String(s).split(" · ")[0].toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 
 export function firstGap(blocks, from, dur, until = 1440) {
   const sorted = blocks.filter(b => !b.skipped).slice().sort((a, b) => a.start - b.start);
@@ -24,7 +24,7 @@ export function placeItems(items, getDay, opts) {
     return [{ ...it, e: 1440, dur: 1440 - it.s, group, endDate: it.endDate || addDays(it.date, 1) },
       { ...it, date: it.endDate || addDays(it.date, 1), s: 0, e: it.e - 1440, dur: it.e - 1440, group, continuation: true, endDate: undefined }];
   });
-  const added = [], updated = [], unplaced = [];
+  const added = [], updated = [], unplaced = [], duplicates = [];
   let cursor = null, curDate = null;
   for (const it of items) {
     if (it.date !== curDate) { curDate = it.date; cursor = null; }
@@ -45,24 +45,20 @@ export function placeItems(items, getDay, opts) {
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > 1440)
       throw new Error(`Nothing saved. ${it.title} needs a valid start and end time.`);
     if (end > 1440) end = 1440;
-    // Same activity already at about the same time: update instead of duplicating
-    const dupe = day.blocks.find(b => !b.done && (norm(b.title) === norm(it.title) || ((it.cat === "gym" || it.cat === "band") && b.cat === it.cat)) && (overlaps(b, { start, end }) || flex || it.cat === "gym" || it.cat === "band"));
+    const dupe = day.blocks.find(b => !b.skipped && activityKey(b.title) === activityKey(it.title) && b.start === start && b.end === end);
     if (dupe) {
-      if (!flex || dupe.flex) { dupe.start = start; dupe.end = end; dupe.flex = flex && dupe.flex; }
-      updated.push(dupe);
+      duplicates.push(dupe);
       cursor = dupe.end;
       continue;
     }
-    const clash = day.blocks.find(b => !b.skipped && !b.studyWindow && overlaps(b, { start, end }));
-    if (clash) throw new Error(`No, sir, this is not feasible. ${it.title} overlaps ${clash.title} on ${it.date}, ${sayTime(Math.max(start, clash.start))} to ${sayTime(Math.min(end, clash.end))}. Which activity or time should change? Nothing saved.`);
-    const block = { id: uid(), title: it.title, cat: it.cat, start, end, flex, done: false, date: it.date, src: "voice",
+    const block = { id: uid(), title: it.title, cat: it.cat, start, end, flex, fixed: !flex, priority: it.priority || 2, venue: it.venue || "", done: false, date: it.date, src: "voice",
       ...(/^(?:assignments?|study|homework)$/i.test(it.title) ? { studyWindow: true } : {}),
       ...(it.group ? { group: it.group, continuation: !!it.continuation } : {}) };
     day.blocks.push(block);
     added.push(block);
     cursor = end;
   }
-  return { added, updated, unplaced };
+  return { added, updated, unplaced, duplicates };
 }
 
 export function conflicts(blocks) {
