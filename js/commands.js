@@ -79,6 +79,19 @@ export function describe(proposal) {
         const when = task.due ? `, due ${task.due}${task.dueMin == null ? " (no time)" : ` at ${sayTime(task.dueMin)}`}` : ", no deadline";
         lines.push(`${old ? task.done && !old.done ? "Completed assignment" : "Update assignment" : "Assignment saved"}: ${task.title}${when}${task.done ? "" : ". Pinned on Today"}`);
       }
+    } else if (c.path[0] === "goals") {
+      const before = c.before || [];
+      for (const goal of c.after || []) {
+        const was = before.find(g => g.id === goal.id);
+        if (equal(was, goal)) continue;
+        lines.push(`${!was ? "Added goal" : goal.status === "done" ? "Completed goal" : goal.status === "dropped" ? "Dropped goal" : "Updated goal"}: ${goal.text} · ${goal.due || "No date"}`);
+      }
+    } else if (c.path[0] === "goalHistory") {
+      continue;
+    } else if (c.path[0] === "reminders") {
+      for (const alarm of c.after || []) if (!(c.before || []).some(r => equal(r, alarm))) {
+        lines.push(`Saved reminder: ${alarm.title} · ${new Date(alarm.at).toLocaleString("en-GB", { timeZone: "Asia/Hong_Kong", dateStyle: "medium", timeStyle: "short" })} Hong Kong time`);
+      }
     } else if (Array.isArray(c.after) || Array.isArray(c.before)) {
       const before = Array.isArray(c.before) ? c.before : [], after = Array.isArray(c.after) ? c.after : [];
       for (const x of before) if (!after.some(y => equal(x, y))) lines.push(`Remove or replace ${x.title || x.text || x.n || x.name || x.ex || JSON.stringify(x)} in ${c.path.join(".")}`);

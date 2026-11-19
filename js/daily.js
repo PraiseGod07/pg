@@ -11,22 +11,23 @@ import * as M from "./brain.js";
 import * as LN from "./learn.js";
 import * as F from "./food.js";
 import { SPLITS } from "./library.js";
+import { activeGoals, parseGoal } from "./goals.js";
 
 const dl = () => (S.daily = S.daily || { reminded: {}, verses: [] });
-export const goals = () => (S.goals = S.goals || []);
-export function addGoal(text) {
-  text = String(text || "").trim().replace(/[.\s]+$/, "");
-  if (!text) return null;
-  text = text.charAt(0).toUpperCase() + text.slice(1);
-  const ex = goals().find(g => g.text.toLowerCase() === text.toLowerCase());
+export const goals = () => activeGoals(S);
+export function addGoal(text, qualifier) {
+  const draft = parseGoal(text, today(), S.profile.termEnd, S.profile.goalRemindEvery, qualifier);
+  if (!draft.text) return null;
+  const ex = goals().find(g => g.text.toLowerCase() === draft.text.toLowerCase());
   if (ex) return ex;
-  const g = { id: uid(), text, made: today() }; goals().push(g); save(); return g;
+  const g = { id: uid(), ...draft }; S.goals.push(g); save(); return g;
 }
-export function removeGoal(q) {
-  const w = String(q || "").toLowerCase();
-  const g = goals().find(x => x.id === q) || goals().find(x => x.text.toLowerCase().includes(w) || w.includes(x.text.toLowerCase()));
+export function finishGoal(id, status) {
+  const g = goals().find(x => x.id === id);
   if (!g) return null;
-  S.goals = goals().filter(x => x !== g); save(); return g;
+  g.status = status;
+  (S.goalHistory ||= []).push({ id, text: g.text, status, date: today() });
+  save(); return g;
 }
 
 const list = a => a.length <= 1 ? a.join("") : a.slice(0, -1).join(", ") + " and " + a.at(-1);

@@ -78,3 +78,15 @@ test("study allocation preserves fixed commitments and fails atomically when ful
   assert.equal(after.studyWindows[week], undefined);
   validateChanges(old, after, changes(old, after));
 });
+test("the weekly planner respects priority, deadlines, routine anchors and unplaced work", () => {
+  const week = weekOf(addDays(today(), 14));
+  S.routines = [{ id: "lessons", title: "Lessons", start: 540, minutes: 60, days: [1], from: today() }];
+  day(week).blocks.push({ id: "done", title: "Completed work", start: 660, end: 690, done: true, src: "weekly-plan" });
+  const result = planWeek({ weekStart: week, start: "09:00", end: "11:30", focusMinutes: 50, breakMinutes: 10, allowPartial: true,
+    tasks: [{ title: "Low", minutes: 50, days: [week], priority: 3 }, { title: "Must", minutes: 50, days: [week], priority: 1 },
+      { title: "Too late", minutes: 50, days: [week], priority: 1, due: addDays(week, -1) }] });
+  assert.deepEqual(result.placed.map(b => [b.title, b.start]), [["Must", 600]]);
+  assert.deepEqual(result.missing.map(b => [b.title, b.minutes]), [["Too late", 50], ["Low", 50]]);
+  assert.equal(day(week).blocks.find(b => b.id === "done").start, 660);
+  assert.equal(day(week).blocks.find(b => b.routine === "lessons").start, 540);
+});

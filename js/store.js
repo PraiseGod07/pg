@@ -1,5 +1,9 @@
 // Local-first storage. Everything stays on the device (browser Cache Storage). Falls back to memory if blocked.
 import { today, uid } from "./util.js";
+import { alarmDefaults } from "./alarms.js";
+import { normalizeGoal } from "./goals.js";
+import { onRoutineDay } from "./routines.js";
+import { appearanceDefaults } from "./appearance.js";
 
 const KEY = "pg.assistant.v2";
 const BOX = "pg-data";
@@ -33,7 +37,7 @@ export async function hydrate() {
 
 export const DEFAULTS = () => ({
   v: 2,
-  profile: { address: "sir", name: "", dayStart: 420, dayEnd: 1380 },
+  profile: { address: "sir", name: "", dayStart: 420, dayEnd: 1380, termStart: "", termEnd: "", goalRemindEvery: 14 },
   voice: { autoSend: false, alarmSpeech: false, voiceURI: "", rate: 1, alerts: true, heads: 5, keepAwake: false },
   days: {},            // { "YYYY-MM-DD": { blocks: [...] } }
   inbox: [],           // unscheduled tasks
@@ -46,6 +50,9 @@ export const DEFAULTS = () => ({
   food: { kg: null, week: null, list: [], made: null },
   chat: [],
   routines: [], phrases: [], reminders: [], collections: [], goals: [],
+  alarms: alarmDefaults(), history: {},
+  goalHistory: [],
+  ui: appearanceDefaults(),
   t: 0,                // last change, used to keep devices in sync
   dev: { trusted: false, cloud: { url: "", token: "", last: 0 } }   // this device only, never synced
 });
@@ -85,6 +92,7 @@ export function retireAI(state) {
 }
 export function migrate(state) {
   retireAI(state);
+  state.goals = (state.goals || []).map(normalizeGoal);
   for (const v of Object.values(state.days || {})) for (const b of v.blocks || []) {
     b.fixed ??= b.flex === false;
     b.priority ??= 2;
@@ -147,8 +155,7 @@ export function adopt(o, t) {
 export function wipe() { const fresh = DEFAULTS(); for (const k of Object.keys(S)) delete S[k]; Object.assign(S, fresh); S.dev.seen = 1; save(true); }
 export function day(d = today()) {
   const value = (S.days[d] = S.days[d] || { blocks: [] });
-  const weekday = new Date(`${d}T12:00:00Z`).getUTCDay();
-  for (const r of (S.routines || []).filter(r => !r.disabled && Number.isFinite(r.start) && (!r.from || r.from <= d) && (!r.days?.length || r.days.includes(weekday)))) {
+  for (const r of (S.routines || []).filter(r => Number.isFinite(r.start) && onRoutineDay(r, d))) {
     const id = `routine:${r.id}:${d}`;
     if (!value.blocks.some(b => b.id === id)) value.blocks.push({
       id, routine: r.id, title: r.title, cat: r.cat || "other", start: r.start,

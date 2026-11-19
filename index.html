@@ -13,11 +13,15 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="preconnect" href="https://api.fontshare.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600&display=swap" rel="stylesheet">
+<script>
+try {
+  const a = JSON.parse(localStorage.getItem("pg-appearance") || "{}");
+  if (["auto","light","dark"].includes(a.theme)) document.documentElement.dataset.theme = a.theme;
+  if (Number.isFinite(a.fontScale) && a.fontScale >= .8 && a.fontScale <= 1.6) document.documentElement.style.setProperty("--font-scale", a.fontScale);
+  const accents = { blue:"#79BDF4",green:"#79C9A8",rose:"#E5A0BA" };
+  if (Object.hasOwn(accents,a.accent)) document.documentElement.style.setProperty("--user-accent", accents[a.accent]);
+} catch {}
+</script>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -83,6 +87,7 @@
 
 <div class="scrim" id="scrim" hidden></div>
 <dialog class="sheet" id="sheet"></dialog>
+<dialog id="ring" aria-labelledby="ring-title"></dialog>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">

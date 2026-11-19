@@ -25,7 +25,11 @@ import { weekOf, planWeek, planSummary } from "./timetable.js";
 import { today, addDays, nowMin, uid, esc, fmtTime, sayTime, fmtDur, sayDur, fmtDay, pad } from "./util.js";
 import { commandText, PHRASES } from "./phrasebook.js";
 import { carriedTasks, planCarryover, untimedTasks } from "./carryover.js";
-import { collectionCommand, findCollection, reservedCollection, saveCollection } from "./collections.js";
+import { collectionCommand, collectionTotals, findCollection, mergeCollections, reservedCollection, saveCollection } from "./collections.js";
+import { archiveDays, calendarFile, hkAt, isQuiet, occurrences, pendingAlarms, readTime, reviewDay, timeValue } from "./alarms.js";
+import { daysLeft, goalCommand, goalDeadline } from "./goals.js";
+import { anchorCommand, clearFutureInstances, exactClock, onRoutineDay, WEEKDAYS } from "./routines.js";
+import { accents, appearanceValues, applyAppearance, loadWallpaper, removeWallpaper, setWallpaper } from "./appearance.js";
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -33,6 +37,8 @@ const ui = { view: "today", date: today(), openEx: null, playing: new Set(), aut
 
 await hydrate();
 load();
+applyAppearance(S.ui);
+loadWallpaper();
 C.syncCustom();
 BS.bass(); B.bible(); M.notes(); LN.tracks();
 const addr = () => S.profile.address || "sir";
@@ -146,6 +152,7 @@ function applyAction(p) {
     .flatMap(c => (c.after || []).filter(t => !(c.before || []).some(b => b.id === t.id)));
   if (added.length === 1) ui.lastAddedTask = added[0].id;
   save(); C.syncCustom(); render(); receipt(p);
+  if (p.changes.some(c => c.path[0] === "ui")) applyAppearance(S.ui);
   if (document.hidden) systemNotice(p.summary.join("; "));
 }
 function undoAction(id) {
@@ -153,7 +160,7 @@ function undoAction(id) {
   if (!p) { reply("There’s no recent action to undo."); return; }
   try {
     applyProposal(S, { id: uid(), changes: p.changes.map(c => ({ path: c.path, before: c.after, after: c.before })) });
-    p.undone = true; save(); C.syncCustom(); render(); reply("Undone. The previous values were restored."); toast("Undone.");
+    p.undone = true; save(); C.syncCustom(); applyAppearance(S.ui); render(); reply("Undone. The previous values were restored."); toast("Undone.");
   } catch { reply("Can’t undo safely because part of that entry has changed. Edit the current entry instead."); }
 }
 function needsConfirmation(text, delta) {
@@ -218,7 +225,9 @@ async function run(raw, spoken = false) {
     const delta = changes(before, after);
     validateChanges(before, after, delta);
     if (delta.length) {
-      const p = { id: uid(), original: text, changes: delta, summary: describe({ changes: delta }) };
+      const merge = collectionCommand(text);
+      const p = { id: uid(), original: text, changes: delta, summary: merge?.op === "merge" && delta.some(c => c.path[0] === "collections")
+        ? [`Merge ${merge.name} into ${merge.to}. All items will be kept.`] : describe({ changes: delta }) };
       if (needsConfirmation(text, delta)) {
         ui.proposal = p;
         const label = `Confirm: ${p.summary.join("; ")}`;
@@ -252,8 +261,8 @@ function unrecognized(text) {
   if (inDraft()) ui.logMiss = original;
   return reply("I didn’t understand. Nothing was saved.", { html: `<div>I didn’t understand. Nothing was saved.</div><div class="row"><button class="btn" data-act="fallback-note" data-text="${esc(original)}">Save as a note</button><button class="btn" data-act="fallback-category" data-text="${esc(original)}">Save in a new category…</button><button class="btn" data-act="fallback-web" data-text="${esc(original)}">Run as a search</button></div>` });
 }
-function previewNote(text) {
-  return reply("Review this note before saving.", { html: `<div>Review this note before saving:</div><p>${esc(text)}</p><button class="btn" data-act="fallback-note" data-text="${esc(text)}">Review and save</button>` });
+function previewNote(text, folder = "") {
+  return reply("Review this note before saving.", { html: `<div>Review this note before saving:</div><p>${esc(text)}</p><button class="btn" data-act="fallback-note" data-text="${esc(text)}" data-folder="${esc(folder)}">Review and save</button>` });
 }
 function openHandbook(filter = "") {
   const sh = $("#sheet");
@@ -266,7 +275,8 @@ function openHandbook(filter = "") {
 }
 function openCollections(id) {
   const c = S.collections.find(x => x.id === id), sh = $("#sheet");
-  sh.innerHTML = c ? `<h3>${esc(c.name)}</h3><div class="list">${c.items.map(x => `<div class="set-row"><span>${x.done ? "Done: " : ""}${esc(x.text)}</span><div class="row wrap"><button class="btn" data-act="collection-tick" data-group="${esc(c.id)}" data-id="${esc(x.id)}" aria-label="${x.done ? "Uncheck" : "Complete"} ${esc(x.text)}">${x.done ? "Uncheck" : "Done"}</button><button class="btn" data-act="collection-item-edit" data-group="${esc(c.id)}" data-id="${esc(x.id)}" aria-label="Edit ${esc(x.text)}">Edit</button></div></div>`).join("")}</div><form data-form="collection" class="field"><input type="hidden" name="group" value="${esc(c.name)}"><label class="field"><span>New item</span><input required class="input" name="entry"></label><button class="btn primary">Add item</button></form><div class="row wrap"><button class="btn" data-act="collections">All collections</button><button class="btn danger" data-say="${esc(`Delete category ${c.name}`)}" data-act="collection-delete">Delete category</button><button class="btn" data-act="close-sheet">Close</button></div>`
+  const totals = c ? collectionTotals(c) : [];
+  sh.innerHTML = c ? `<h3>${esc(c.name)}</h3><p class="note">${c.items.length} items${totals.length ? ` · Total: ${esc(totals.join(", "))}` : ""}</p><div class="list">${c.items.map(x => `<div class="set-row"><span>${x.done ? "Done: " : ""}${esc(x.text)}${x.date ? `<span class="sub">${esc(fmtDay(x.date))}${x.remindMin == null ? "" : ` · Reminder at ${fmtTime(x.remindMin)}`}</span>` : ""}</span><div class="row wrap"><button class="btn" data-act="collection-tick" data-group="${esc(c.id)}" data-id="${esc(x.id)}" aria-label="${x.done ? "Uncheck" : "Complete"} ${esc(x.text)}">${x.done ? "Uncheck" : "Done"}</button><button class="btn" data-act="collection-item-edit" data-group="${esc(c.id)}" data-id="${esc(x.id)}" aria-label="Edit ${esc(x.text)}">Edit</button></div></div>`).join("")}</div><form data-form="collection" class="field"><input type="hidden" name="group" value="${esc(c.name)}"><label class="field"><span>New item</span><input required class="input" name="entry"></label><button class="btn primary">Add item</button></form><div class="row wrap"><button class="btn" data-act="collections">All collections</button><button class="btn danger" data-say="${esc(`Delete category ${c.name}`)}" data-act="collection-delete">Delete category</button><button class="btn" data-act="close-sheet">Close</button></div>`
     : `<h3>Collections</h3>${S.collections.map(x => `<button class="btn" data-act="collections" data-id="${esc(x.id)}">${esc(x.name)} (${x.items.length})</button>`).join("") || "<p>No custom collections yet.</p>"}<form data-form="collection" class="field"><label class="field"><span>New collection</span><input class="input" name="group" required></label><button class="btn primary">Create</button></form><button class="btn" data-act="close-sheet">Close</button>`;
   if (!sh.open) sh.showModal();
 }
@@ -280,6 +290,11 @@ function handleCollection(text) {
   } else if (!c) return false;
   else if (p.op === "show") reply(`${c.name}: ${c.items.map(x => x.text).join("; ") || "Empty"}.`, { html: `<strong>${esc(c.name)}</strong><button class="btn" data-act="collections" data-id="${esc(c.id)}">Open collection</button>` });
   else if (p.op === "delete") S.collections = S.collections.filter(x => x.id !== c.id);
+  else if (p.op === "merge") {
+    const target = findCollection(S.collections, p.to);
+    if (!target || target === c) return reply("Give the names of two different existing collections."), true;
+    S.collections = mergeCollections(S.collections, c, target);
+  }
   else if (p.op === "rename") {
     if (reservedCollection(p.to) || findCollection(S.collections, p.to)) return reply("That name is already in use."), true;
     c.aliases = [...new Set([...(c.aliases || []), c.name])]; c.name = ucf(p.to);
@@ -354,17 +369,28 @@ async function daily(text, bare, spoken) {
   const b = bare.replace(/^(?:(?:ok(?:ay)?|so|hey|pg|please|and|also)[ ,]+)+/, "");
   if (REPORT_RE.test(b) && b.split(" ").length <= 14) return doReport(spoken), true;
   let m;
-  if ((m = text.match(/^\s*(?:(?:ok(?:ay)?|so|pg|and|also)[ ,]+)*(?:(?:one of )?my (?:new |main |big |biggest )?goals?(?: for (?:this|the) (?:year|month|week|semester|term))? (?:is|are|will be)|(?:add|set|save|make) (?:a |another |new )*goal(?: for me)?(?: to| that| of|:)?|i(?:'ve| have) (?:a|got a) (?:new )?goal(?: to| of|:)?)\s*(?:to\s+)?(.{3,})$/i))) {
-    const g = D.addGoal(m[1]);
-    return reply(`Got it, ${addr()}. Your goal: ${g.text}. I'll remind you of it when you ask for an update.`), true;
+  const draft = goalCommand(text);
+  if (draft) {
+    const g = D.addGoal(draft.text, draft.qualifier);
+    if (g) reply(`Goal: ${g.text} · ${goalLabel(g)}`);
+    return true;
   }
-  if ((m = b.match(/^(?:remove|delete|drop|take off|i finished|i achieved|i reached) (?:the |my )?goal(?: to| about| of)? (.+)$/))) {
-    const g = D.removeGoal(m[1]);
-    return reply(g ? `Done. I took off ${g.text}.` : `I couldn't find that goal. Your goals are: ${D.goals().map(x => x.text).join(", ") || "none yet"}.`), true;
+  if ((m = b.match(/^(?:(goal done):\s*|(remove|delete|drop|take off|i finished|i achieved|i reached) (?:the |my )?goal(?: to| about| of)? )(.+)$/))) {
+    const [g, ...rest] = namedBlocks(m[3], D.goals().map(g => ({ ...g, title: g.text })));
+    if (!g || rest.length) return reply(rest.length ? "More than one goal matches. Say its full title." : "No matching goal."), true;
+    const status = m[1] || m[2]?.startsWith("i ") ? "done" : "dropped";
+    changeGoalStatus(g.id, status); reply(`${status === "done" ? "Completed" : "Dropped"}: ${g.text}.`); return true;
   }
-  if (/\b(?:what are my goals|(?:remind me of|tell me|list|read) my goals|my goals\??$)/.test(b)) {
-    const g = D.goals();
-    return reply(g.length ? `Your goals are: ${g.map(x => x.text).join(". ")}.` : "You haven't told me any goals yet. Say, my goal is, and I'll save it."), true;
+  if ((m = b.match(/^change (?:the |my )?goal(?: (.+?))? deadline to (.+)$/))) {
+    const list = m[1] ? namedBlocks(m[1], D.goals().map(g => ({ ...g, title: g.text }))) : D.goals();
+    const due = goalDeadline(m[2], today(), S.profile.termEnd);
+    if (list.length !== 1 || !due) return reply(list.length !== 1 ? "Give the goal's title to change its deadline." : "Give an exact goal deadline."), true;
+    const g = S.goals.find(g => g.id === list[0].id), old = g.due;
+    g.due = due; reply(`${g.text}: ${old || "No date"} → ${due}`); return true;
+  }
+  if (/\b(?:how are my goals going|(?:what are|remind me (?:of|about)|tell me|list|read|show) my (?:long[- ]term |short[- ]term )?goals|my goals$)/.test(b)) {
+    const term = /long[- ]term/.test(b) ? "long" : /short[- ]term/.test(b) ? "short" : "";
+    return reply(D.goals().filter(g => !term || g.term === term).map(g => `${g.text} · ${goalLabel(g)}`).join("; ") || "No active goals."), true;
   }
   if (/\bteach me (?:some |one |two |2 |a few |more )?(?:cantonese|canto)\b|\bcantonese (?:lesson|sentences?) (?:now|please)\b/.test(b)) {
     const c = D.teachDaily();
@@ -389,11 +415,27 @@ function openCanto() {
     <div class="sheet-actions"><button class="btn" data-act="canto-more">Practise today's sentence</button><button class="btn ghost" data-act="close-sheet">Close</button></div>`;
   if (!sh.open) sh.showModal();
 }
-function openGoals() {
-  const g = D.goals(), sh = $("#sheet");
-  sh.innerHTML = `<h3>Your goals</h3><p class="note" style="margin:0 0 8px">PG reminds you of these when you ask for an update.</p>
-    ${g.length ? `<ul class="goal-list">${g.map(x => `<li><span>${esc(x.text)}</span><button class="btn sm ghost" data-act="goal-del" data-id="${x.id}">Remove</button></li>`).join("")}</ul>` : ""}
-    <form data-form="goal" class="row"><input class="input" name="g" placeholder="Add a goal" aria-label="New goal" autocomplete="off"><button class="btn primary" type="submit">Add</button></form>
+function goalLabel(g) {
+  if (!g.due) return "No date";
+  const n = daysLeft(g.due, today());
+  return `${fmtDay(g.due)} · ${n === 0 ? "Due today" : n < 0 ? `${-n} day${n === -1 ? "" : "s"} overdue` : `${n} day${n === 1 ? "" : "s"} left`}`;
+}
+function changeGoalStatus(id, status) {
+  const g = D.finishGoal(id, status);
+  if (!g) return;
+  if (inDraft()) return;
+  const row = S.goalHistory.at(-1);
+  toast(`${status === "done" ? "Completed" : "Dropped"}: ${g.text}`, "Undo", () => {
+    g.status = "active"; S.goalHistory = S.goalHistory.filter(x => x !== row); save(); render(); if ($("#sheet").open) openGoals();
+  });
+}
+function openGoals(editId = "") {
+  const g = D.goals(), sh = $("#sheet"), edit = g.find(x => x.id === editId);
+  const history = (S.goalHistory || []).slice(-20).reverse();
+  sh.innerHTML = `<h3>Your goals</h3>
+    ${["short","long"].map(term => `<h4>${term === "short" ? "Short-term" : "Long-term"}</h4>${g.filter(x => x.term === term).map(x => `<div class="set-row"><span>${esc(x.text)}<span class="sub">${esc(goalLabel(x))}</span></span><div class="row wrap"><button class="btn sm" data-act="goal-edit" data-id="${esc(x.id)}">${x.due ? "Edit / Push date" : "Set date / Edit"}</button><button class="btn sm" data-act="goal-status" data-id="${esc(x.id)}" data-status="done">Done</button><button class="btn sm ghost" data-act="goal-status" data-id="${esc(x.id)}" data-status="dropped">Drop</button></div></div>`).join("") || "<p class=\"note\">None</p>"}`).join("")}
+    ${edit ? `<form class="field" data-form="goal-edit" data-id="${esc(edit.id)}"><label class="field">Goal<input class="input" name="g" required value="${esc(edit.text)}"></label><div class="grid2"><label class="field">Due date<input class="input" name="due" type="date" value="${esc(edit.due || "")}"></label><label class="field">Type<select class="input" name="term"><option value="short" ${edit.term === "short" ? "selected" : ""}>Short-term</option><option value="long" ${edit.term === "long" ? "selected" : ""}>Long-term</option></select></label></div><label class="field">Remind every (days; 0 turns off repeats)<input class="input" name="period" type="number" min="0" max="365" required value="${edit.remindEvery}"></label><label class="field">Notes<textarea class="input" name="notes">${esc(edit.notes)}</textarea></label><button class="btn primary">Save goal</button></form>` : `<form data-form="goal" class="row"><input class="input" name="g" placeholder="Add a goal" aria-label="New goal" autocomplete="off" required><button class="btn primary" type="submit">Add</button></form>`}
+    ${history.length ? `<details><summary>Goal history</summary>${history.map(x => `<p class="note">${esc(x.date)} · ${x.status === "done" ? "Completed" : "Dropped"}: ${esc(x.text)}</p>`).join("")}</details>` : ""}
     <div class="sheet-actions"><span></span><button class="btn ghost" data-act="close-sheet">Close</button></div>`;
   if (!sh.open) sh.showModal();
 }
@@ -565,6 +607,36 @@ function schoolReply(res, head, spoken) { render(); return reply((head ? head + 
 
 async function handle(text, spoken) {
   const bare0 = normalize(text).replace(/[^a-z0-9: ']/g, " ").replace(/\s+/g, " ").trim();
+  const theme = bare0.match(/^(?:switch to|use|set) (?:a |the )?(light|dark|auto) theme$/i);
+  const font = bare0.match(/^(?:make (?:the )?font|make (?:the )?text) (bigger|smaller)$/i);
+  if (theme || font) {
+    S.ui = appearanceValues({ ...S.ui, ...(theme ? { theme: theme[1] } : { fontScale: S.ui.fontScale + (font[1] === "bigger" ? .1 : -.1) }) });
+    return reply("Appearance updated.");
+  }
+  if (/^(?:set|change|add) (?:this picture as |a |my )?(?:wallpaper)$/.test(bare0)) return reply("Open More → Appearance and choose a wallpaper image.");
+  if (/^(?:show |open )?(?:my )?(?:evening review|daily review)[.!?]?$/i.test(text)) { openReview(today()); return reply("Evening review opened."); }
+  if (/^(?:show |open |list )?(?:my )?(?:alarms|reminders)[.!?]?$/i.test(text)) { openReminders(); return reply("Reminders opened."); }
+  if (/^what did i miss yesterday[.!?]?$/i.test(text)) {
+    const d = addDays(today(), -1), missed = S.history[d]?.missed || reviewDay(S, d).missed;
+    return reply(missed.length ? `Not completed yesterday: ${missed.map(x => x.title).join(", ")}.` : "No missed tasks were recorded yesterday.");
+  }
+  if (/^how was my week[.!?]?$/i.test(text)) {
+    const d = today(), dates = Array.from({ length: 7 }, (_, i) => addDays(d, i - 6));
+    return reply(dates.map(day => { const r = day === d ? reviewDay(S, day) : S.history[day] || reviewDay(S, day); return `${fmtDay(day)}: ${r.done.length} of ${r.planned.length} done`; }).join("; ") + ".");
+  }
+  const alarmAsk = text.match(/^(?:remind me (?:to|about)|set an alarm for|alert me to|wake me for) (.+?) at (.+)$/i);
+  if (alarmAsk && !/\b(?:every day|daily)\b/i.test(text)) {
+    const date = calendarDate(text, today()) || today();
+    const time = normalize(alarmAsk[2]).match(/\b(\d{1,2}(?::\d\d)?\s*(?:am|pm)|(?:[01]?\d|2[0-3]):[0-5]\d|noon|midnight)\b/i)?.[1];
+    const minute = time ? exactClock(time) : null;
+    if (minute == null || minute >= 1440) return reply("No reminder saved. Give an exact time, for example “remind me to call Mum at 6 PM”.");
+    const at = hkAt(date, minute);
+    if (at <= Date.now()) return reply("That time has passed. Include “tomorrow” or choose another date.");
+    const title = alarmAsk[1].replace(/\b(?:today|tomorrow|tonight)\b/gi, "").trim();
+    if (!title) return reply("Add what you want to be reminded about.");
+    S.reminders.push({ id: uid(), title, text: title, kind: "custom", at, done: false });
+    return reply(`Reminder saved: ${title}, ${fmtDay(date)} at ${fmtTime(minute)}.${S.alarms.enabled ? "" : " Turn alarms on in More to hear it."}`);
+  }
   const forced = text.match(/^search (?:the )?web (?:for )?(.+)$/i);
   if (forced) return showSearch(forced[1]);
   const calculated = WEB.calculate(text);
@@ -573,7 +645,7 @@ async function handle(text, spoken) {
   if (remember) {
     const pending = remember[1].trim() || [...S.chat].reverse().filter(m => m.who === "me")[1]?.text || "";
     return pending && !/^\s*(?:save this|remember (?:this|that))[.!?]?\s*$/i.test(pending)
-      ? previewNote(pending) : reply("No note text yet. Try “save this: bring the spare cable”.");
+      ? previewNote(pending, /^\s*(?:PG[, ]+)?remember that\b/i.test(ui.original || text) ? "about" : "") : reply("No note text yet. Try “save this: bring the spare cable”.");
   }
   if (/^(?:brief me|read it)[.!?]?$/i.test(text) && ui.lastSearch) return reply(ui.lastSearch, { readAloud: true });
   if (/^(?:brief me|what'?s my day)[.!?]?$/i.test(text)) {
@@ -584,6 +656,24 @@ async function handle(text, spoken) {
     return reply([`Today, ${fmtDay(date, true)}.`, entries.length ? entries.join("; ") + "." : "No timed activities.", due.length ? `Due: ${due.join("; ")}.` : "", untimed.length ? `No time yet: ${untimed.join(", ")}.` : ""].filter(Boolean).join(" "), { readAloud: /^brief me/i.test(text), view: "today", date });
   }
   if (handleCollection(text)) return;
+  const pin = text.match(/^don['’]t move (.+?)[.!]?$/i);
+  const field = text.match(/^(.+?) is (flexible|top priority)[.!]?$/i);
+  const venueEdit = text.match(/^(.+?) (?:venue is|venue:) (.+?)[.!]?$/i);
+  if (pin || field || venueEdit) {
+    const title = (pin || field || venueEdit)[1], date = calendarDate(title, today()) || ui.date || today();
+    const [match, ...rest] = namedBlocks(title.replace(/\b(?:on )?(?:today|tomorrow|(?:next |this )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|\d{4}-\d{2}-\d{2})\b/gi, "").trim(), day(date).blocks.filter(b => !b.skipped && !b.routine));
+    if (!match || rest.length) return reply(rest.length ? "More than one block matches. Give the full title and date." : "No matching timetable block.");
+    if (pin || field?.[2].toLowerCase() === "flexible") { match.fixed = !!pin; match.flex = !pin; }
+    if (field?.[2].toLowerCase() === "top priority") match.priority = 1;
+    if (venueEdit) match.venue = venueEdit[2].slice(0, 120).trim();
+    return reply(`Updated ${match.title}.`);
+  }
+  const anchor = anchorCommand(text);
+  if (anchor) {
+    if (S.routines.some(r => !r.disabled && r.title.toLowerCase() === anchor.title.toLowerCase())) return reply("That routine already exists. Edit it in Everyday tasks.");
+    S.routines.push({ id: uid(), ...anchor, fixed: true, cat: "other", from: today() }); save();
+    return reply(`Added ${anchor.title}, ${fmtTime(anchor.start)} to ${fmtTime(anchor.start + anchor.minutes)} ${anchor.days.length === 7 ? "every day" : anchor.days.length === 5 ? "on weekdays" : "on weekends"}.`, { view: "today", date: today() });
+  }
   const everyday = text.match(/^(?:for (?:my )?(?:everyday|daily) tasks(?:[, ]+))?(?:add|include|put) (.+?)(?: (?:to|in) (?:my )?(?:everyday|daily) tasks)?[.!]?$/i);
   if (everyday && /\b(?:everyday|daily) tasks\b/i.test(text)) {
     const ops = everyday[1].split(/\s+(?:and|also)\s+|,\s*/i).map(title => ({ op: "add_routine", title }));
@@ -1293,6 +1383,8 @@ function viewToday() {
     h += `<p class="note" aria-label="Up next">Next: ${esc(nx.title)}, ${fmtTime(nx.start)} to ${fmtTime(nx.end)} · in ${fmtDur(nx.start - n)}. ${coachLink(nx)}</p>`;
   }
   const unscheduled = [...untimedTasks(S, d, today(), carrySince()), ...(isT ? carryList() : [])];
+  const dueGoals = D.goals().filter(g => g.due && (g.due === d || isT && g.due < d));
+  if (dueGoals.length) h += `<h2 class="sec"><span>Goals due</span></h2><div class="card">${dueGoals.map(g => `<button class="btn" data-act="goal-edit" data-id="${esc(g.id)}">${esc(g.text)} · ${esc(goalLabel(g))}</button>`).join("")}</div>`;
   if (isT) {
     const c = D.dailyCanto(d, ui.cantoDay === d ? ui.cantoOffset : 0);
     h += `<section class="card"><h2 class="sec"><span>Cantonese today</span></h2><div lang="zh-HK" class="canto-phrase">${esc(c.zh)}</div><p class="note">${esc(c.jp)} · ${esc(c.en)}</p><div class="row wrap"><button class="btn" data-act="canto-play" data-zh="${esc(c.zh)}">Hear it</button><button class="btn" data-act="canto-skip">Another one</button><button class="btn" data-act="canto-learn" data-id="${c.i}">Learned</button></div></section>`;
@@ -1309,7 +1401,7 @@ function viewToday() {
       const isLive = isT && b.start <= n && n < b.end && !b.done;
       h += `<div class="tl-row"><div class="tl-time">${fmtTime(b.start)}<small>${fmtTime(b.end)}</small></div>
         <div><div class="blk ${b.done ? "done" : ""} ${isLive ? "live" : ""}" style="${catVar(b.cat)}" role="button" tabindex="0" data-act="edit" data-id="${b.id}" aria-label="${esc(b.title)}, ${fmtTime(b.start)} to ${fmtTime(b.end)}">
-          <div class="blk-title">${esc(b.title)}</div>
+          <div class="blk-title">${esc(b.title)}${b.fixed ? ' <small class="faint">Fixed</small>' : ""}</div>
           <button class="check" data-act="toggle" data-id="${b.id}" aria-label="${b.done ? "Mark not done" : "Mark done"}"><svg><use href="#i-check"/></svg></button>
           <div class="blk-meta"><span class="tag cat" style="${catVar(b.cat)}">${esc((CATS[b.cat] || CATS.other).label)}</span><span class="tnum">${fmtDur(b.end - b.start)}</span>${b.carriedFrom ? `<span class="tag">Carried over</span>` : ""}${b.venue ? `<span>${esc(b.venue)}</span>` : ""}${cf.has(b.id) ? `<span class="tag warn">Overlaps</span>` : ""}${coachLink(b)}</div>
         </div></div></div>`;
@@ -1323,11 +1415,11 @@ function viewToday() {
       <button class="tile" data-view="bass" style="${catVar("bass")}"><span class="eyebrow">Bass · ${BS.finished() ? "Done" : "Lesson " + BS.lessonNo()}</span><b>${esc(BS.finished() ? "Course complete" : ls.t)}</b>${bar(BS.pct())}</button>
       <button class="tile" data-view="bible" style="${catVar("bible")}"><span class="eyebrow">Bible${st ? " · " + st.pct + "%" : ""}</span><b>${esc(st ? (B.todays().doneToday ? "Done for today" : bibleRef()) : "Choose a book")}</b>${bar(st ? st.pct : 0)}</button></div>`;
   }
-  const routines = (S.routines || []).filter(r => !r.disabled && r.start == null);
-  if (routines.length) h += `<h2 class="sec"><span>Everyday tasks</span></h2><div class="card"><p class="note">Checking one off only completes it for this day.</p>${routines.map(r => {
+  const routines = (S.routines || []).filter(r => r.start == null && onRoutineDay(r, d) && !S.routineSkip?.[`${r.id}:${d}`]);
+  h += `<h2 class="sec"><span>Everyday tasks</span><button class="btn sm ghost" data-act="routines-open">Edit routines</button></h2>${routines.length ? `<div class="card"><p class="note">Checking one off only completes it for this day.</p>${routines.map(r => {
     const done = S.routineDone?.[`${r.id}:${d}`];
     return `<div class="set-row"><span>${esc(r.title)}</span><button class="btn sm" data-act="routine-check" data-id="${esc(r.id)}" aria-pressed="${!!done}">${done ? "Done today" : "Mark done"}</button></div>`;
-  }).join("")}</div>`;
+  }).join("")}</div>` : ""}`;
   return h;
 }
 function weeklyTable(date) {
@@ -1354,6 +1446,7 @@ function weeklyTable(date) {
       </div>
     </div>
     <div class="week-legend">${categories.map(c => `<span style="${catVar(c)}"><i></i>${esc((CATS[c] || CATS.other).label)}</span>`).join("")}<span>Blank space is free, not a scheduled break.</span></div>
+    ${D.goals().filter(g => dates.includes(g.due)).map(g => `<button class="btn sm" data-act="goal-edit" data-id="${esc(g.id)}">Goal: ${esc(g.text)} · ${esc(fmtDay(g.due))}</button>`).join("")}
     ${!entries.length ? `<p class="note">Your week is open. Add commitments or press Plan week to allocate tasks and rest.</p>` : ""}
     ${pending.length ? `<p class="week-warning">Unallocated: ${pending.map(t => `${esc(t.title)} (${t.minutes} minutes)`).join(", ")}. Rebuild with more time or fewer tasks.</p>` : ""}
     <p class="note week-hint">Scroll for more hours or days. Tap an item to edit it; use the checklist to mark it done.</p>
@@ -1370,8 +1463,9 @@ function openWeekPlanner() {
     <div class="grid2"><label class="field"><span>Available from</span><input class="input" type="time" name="from" value="${time(previous?.start ?? S.profile.dayStart)}" required></label><label class="field"><span>Finish by</span><input class="input" type="time" name="until" value="${time(previous?.end ?? S.profile.dayEnd)}" required></label></div>
     <fieldset class="week-days"><legend>Allowed days</legend>${days.map((d, i) => `<label><input type="checkbox" name="days" value="${i}" ${!previous || previous.tasks.some(t => t.days.includes(d)) ? "checked" : ""}>${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][i]}</label>`).join("")}</fieldset>
     <div class="grid2"><label class="field"><span>Work session, minutes</span><input class="input" name="focus" type="number" min="10" max="120" value="${previous?.focusMinutes || 50}" required></label><label class="field"><span>Rest after each, minutes</span><input class="input" name="rest" type="number" min="1" max="60" value="${previous?.breakMinutes || 10}" required></label></div>
-    <label class="field"><span>Tasks and total minutes, one per line</span><textarea class="input" name="tasks" rows="5" placeholder="History revision, 90&#10;Practice bass, 30" required>${esc((previous?.tasks || []).map(t => `${t.title}, ${t.minutes}`).join("\n"))}</textarea></label>
-    <p class="note">Minutes are the total for the week, not every day. Sessions are spread across your chosen days. Already-started sessions stay in place.</p>
+    <label class="field"><span>Tasks and total minutes, one per line</span><textarea class="input" name="tasks" rows="5" placeholder="History revision, 90, 1&#10;Practice bass, 30, 3" required>${esc((previous?.tasks || []).map(t => `${t.title}, ${t.minutes}, ${t.priority || 2}${t.due ? `, ${t.due}` : ""}`).join("\n"))}</textarea></label>
+    <p class="note">Format: activity, minutes, optional priority (1 must, 2 should, 3 if time), optional date (YYYY-MM-DD). Minutes are for the whole week.</p>
+    <label class="alarm-check"><input type="checkbox" name="partial" ${previous?.allowPartial ? "checked" : ""}>Fit what can fit and list unplaced work</label>
     <p class="note">Planning principles: fixed commitments first, realistic time, manageable sessions and breaks. <a href="https://learningcenter.unc.edu/tips-and-tools/using-planners" target="_blank" rel="noopener">UNC planning guide</a> · <a href="https://lsc.cornell.edu/how-to-study/studying-for-and-taking-exams/guidelines-for-creating-a-study-schedule/" target="_blank" rel="noopener">Cornell study guide</a>.</p>
     <p class="note week-warning" data-week-error role="alert"></p>
     <div class="row"><button class="btn primary" type="submit">Build timetable</button><button class="btn" type="button" data-act="close-sheet">Cancel</button></div>
@@ -1549,7 +1643,7 @@ function viewNotes() {
   }
   h += `<h2 class="sec"><span>Folders</span></h2><div class="split-chips">${[["all", "All", all.length], ...Object.entries(M.FOLDERS).map(([k, v]) => [k, v.short || v.label, c[k] || 0])].map(([k, l, n]) => `<button class="chip ${ui.folder === k ? "on" : ""}" data-act="folder" data-k="${k}">${esc(l)} <span class="faint">${n}</span></button>`).join("")}</div>
     <input class="input search" data-act="note-q" type="search" placeholder="Search" value="${esc(ui.q)}" aria-label="Search notes">`;
-  if (ui.folder === "about") h += `<h2 class="sec"><span>Learned things about PraiseGod</span></h2><p class="note">PG saves lasting things here by itself: who you are, the people in your life, likes and dislikes, food rules, habits, goals, skills you're building, your values, and how you want PG to act. If you keep asking about the same topic on different days, PG saves that too. One-off questions, today's plans and passing moods are not saved. You can add your own, like: remember that I focus best after a walk.</p>`;
+  if (ui.folder === "about") h += `<h2 class="sec"><span>Learned things about PraiseGod</span></h2><p class="note">PG can save direct statements like “I prefer studying at night” and show progress from your saved records. It uses fixed rules, not AI. Say “remember that…” to preview a note before saving it.</p>`;
   h += list.length ? list.map(noteCard).join("") : `<p class="note">${all.length ? "Nothing here yet." : "Nothing saved yet."}</p>`;
   return h;
 }
@@ -1614,7 +1708,7 @@ async function connectCloud(address, code, done) {
     toast(r.adopted ? "Connected. This device now has your PG data." : r.first ? "PG Cloud is set up. Your passcode is saved." : "Connected. This device's data is now in PG Cloud.");
   } catch (e) { done?.(e); }
 }
-function afterSync() { C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); if (!ui.pinDate) ui.date = today(); initCarryover(); paintLock(); paintChat(); render(); }
+function afterSync() { applyAppearance(S.ui); C.syncCustom(); BS.bass(); B.bible(); M.notes(); LN.tracks(); if (!ui.pinDate) ui.date = today(); initCarryover(); paintLock(); paintChat(); render(); }
 function paintLock() {
   let el = $("#lock");
   if (!SY.locked()) { el?.remove(); document.body.classList.remove("locked"); return; }
@@ -1644,6 +1738,7 @@ function viewSettings() {
   return `<h1 class="title">More <span class="faint" style="font-size:var(--text-xs);font-family:inherit;font-weight:400">v${PG_VERSION}</span></h1>
   <div class="tiles"><button class="tile wide" data-act="about-folder" style="${catVar("learn")}"><span class="eyebrow">Learned things about PraiseGod</span><b>${M.facts().length} thing${M.facts().length === 1 ? "" : "s"} PG knows about you</b></button><button class="tile" data-view="notes" style="${catVar("learn")}"><span class="eyebrow">Notes</span><b>${M.notes().length} saved</b></button><button class="tile" data-view="school" style="${catVar("study")}"><span class="eyebrow">School</span><b>${SC.pending().length} due</b></button><button class="tile" data-act="goals-open" style="${catVar("gym")}"><span class="eyebrow">Goals</span><b>${D.goals().length ? D.goals().length + " goal" + (D.goals().length > 1 ? "s" : "") : "Add your goals"}</b></button><button class="tile" data-act="canto-open" style="${catVar("social")}"><span class="eyebrow">Cantonese</span><b>${D.learned().length} learned</b></button></div>
   ${cloudSettings()}
+  ${alarmSettings()}${appearanceSettings()}
   <h2 class="sec"><span>Voice setup</span></h2><div class="card">
     <div class="set-row"><div class="lbl">Send automatically after recording</div>${sw("autosend", S.voice.autoSend, "Send automatically after recording")}</div>
     <div class="set-row"><div class="lbl">Timetable notifications</div>${sw("alerts", S.voice.alerts, "Timetable notifications")}</div>
@@ -1665,7 +1760,7 @@ function viewSettings() {
     <div class="grid2"><label class="field"><span>Gym split</span><select class="input" data-act="split">${Object.entries(SPLITS).map(([k, v]) => `<option value="${k}" ${S.gym.split === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label>
     <label class="field"><span>Bible version</span><select class="input" data-act="version">${["NKJV", "KJV", "NIV", "ESV", "NLT", "AMP"].map(v => `<option ${B.bible().version === v ? "selected" : ""}>${v}</option>`).join("")}</select></label></div></div>
   <h2 class="sec"><span>Data</span></h2><div class="card"><div class="row">
-    <button class="btn" data-act="collections">Collections</button><button class="btn" data-act="handbook">What can I say?</button><button class="btn" data-act="missed-export">Export missed phrases</button>
+    <button class="btn" data-act="collections">Collections</button><button class="btn" data-act="routines-open">Everyday tasks</button><button class="btn" data-act="handbook">What can I say?</button><button class="btn" data-act="missed-export">Export missed phrases</button>
     <button class="btn sm" data-act="backup">Back up</button><button class="btn sm" data-act="restore">Restore</button><button class="btn sm" data-act="clear-chat">Clear chat</button><button class="btn sm danger" data-act="reset">Erase all</button>
     <input type="file" id="restoreFile" accept="application/json,.json" hidden></div>
     <p class="note">Web search sends the query to PG Cloud and search providers. It does not send your timetable, notes, goals or collections.</p>
@@ -1680,20 +1775,35 @@ function viewSettings() {
 function openEditor(id) {
   const d = ui.date;
   const b = id ? day(d).blocks.find(x => x.id === id) : null;
+  if (b?.routine && S.routines.some(r => r.id === b.routine && !r.disabled)) return openRoutines(b.routine);
   const n = nowMin();
   const start = b ? b.start : (firstGap(day(d).blocks, d === today() ? Math.ceil(n / 15) * 15 : S.profile.dayStart, 60) ?? 540);
   const end = b ? b.end : start + 60;
   const tm = m => pad(Math.floor(m / 60) % 24) + ":" + pad(m % 60);
   const sh = $("#sheet");
   sh.innerHTML = `<form method="dialog" data-form="block" data-id="${b ? b.id : ""}"><h3>${b ? "Edit" : "New"}</h3>
+    <p class="note">${esc(fmtDay(d, true))}</p>
     <label class="field"><span>Title</span><input class="input" name="title" value="${esc(b ? b.title : "")}" required></label>
     <div class="grid3"><label class="field"><span>Start</span><input class="input" type="time" name="start" value="${tm(start)}" required></label>
     <label class="field"><span>End</span><input class="input" type="time" name="end" value="${tm(Math.min(end, 1439))}" required></label>
     <label class="field"><span>Type</span><select class="input" name="cat">${Object.entries(CATS).map(([k, v]) => `<option value="${k}" ${(b ? b.cat : "other") === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></label></div>
+    <div class="grid2"><label class="field">Venue<input class="input" name="venue" value="${esc(b?.venue || "")}"></label><label class="field">Priority<select class="input" name="priority">${["Must","Should","If time"].map((name,i) => `<option value="${i + 1}" ${(b?.priority || 2) === i + 1 ? "selected" : ""}>${name}</option>`).join("")}</select></label></div><label class="alarm-check"><input type="checkbox" name="fixed" ${b?.fixed !== false ? "checked" : ""}>Keep this time fixed</label>
     <div class="sheet-actions">${b ? `<button type="button" class="btn danger" data-act="del-block" data-id="${b.id}">Delete</button>` : "<span></span>"}
     <span class="row"><button type="button" class="btn ghost" data-act="close-sheet">Cancel</button><button class="btn primary" value="save">Save</button></span></div></form>`;
   sh.showModal();
   setTimeout(() => sh.querySelector("input[name=title]").focus(), 30);
+}
+function openRoutines(id = "", confirmDelete = false) {
+  const sh = $("#sheet"), list = S.routines.filter(r => !r.disabled), r = list.find(r => r.id === id), timed = r?.start != null;
+  const label = r => !r.days?.length || r.days.length === 7 ? "Every day" : r.days.map(d => WEEKDAYS[d].slice(0,3)).join(", ");
+  sh.innerHTML = `<h3>Everyday tasks</h3>${confirmDelete && r ? `<p>Remove the repeating task ${esc(r.title)}? Past entries are kept.</p><div class="row"><button class="btn danger" data-act="routines-delete" data-id="${esc(r.id)}">Yes, remove</button><button class="btn" data-act="routines-open">Cancel</button></div>` : `
+    ${list.map(x => `<div class="set-row"><span>${esc(x.title)}<span class="sub">${label(x)}${x.start == null ? "" : ` · ${fmtTime(x.start)} to ${fmtTime(x.start + x.minutes)}`}</span></span><button class="btn sm" data-act="routines-open" data-id="${esc(x.id)}" aria-label="Edit ${esc(x.title)}">Edit</button></div>`).join("")}
+    <form class="field" data-form="routine-edit" data-id="${esc(r?.id || "")}"><h4>${r ? "Edit routine" : "Add routine"}</h4><label class="field">Activity<input class="input" name="titleText" maxlength="100" value="${esc(r?.title || "")}" required></label>
+    <div class="grid2"><label class="field">Start (optional)<input class="input" type="time" name="start" value="${timed ? timeValue(r.start) : ""}"></label><label class="field">End (optional)<input class="input" type="time" name="end" value="${timed ? timeValue(Math.min(1439, r.start + r.minutes)) : ""}"></label></div>
+    <label class="field">Venue<input class="input" name="venue" maxlength="120" value="${esc(r?.venue || "")}"></label>
+    <fieldset><legend>Repeat on</legend>${[1,2,3,4,5,6,0].map(i => `<label class="alarm-check"><input type="checkbox" name="weekday" value="${i}" ${(!r?.days?.length || r.days.includes(i)) ? "checked" : ""}>${WEEKDAYS[i]}</label>`).join("")}</fieldset>
+    <div class="row wrap"><button class="btn primary">${r ? "Save routine" : "Add routine"}</button>${r ? `<button class="btn danger" type="button" data-act="routines-confirm" data-id="${esc(r.id)}">Remove routine</button><button class="btn" type="button" data-act="routines-open">New routine</button>` : ""}</div></form><button class="btn" data-act="close-sheet">Close</button>`}`;
+  if (!sh.open) sh.showModal();
 }
 
 // ================= Events =================
@@ -1706,6 +1816,30 @@ document.addEventListener("click", e => {
   const a = el.dataset.act, id = el.dataset.id;
   const d = ui.date;
   switch (a) {
+    case "alarms-open": openReminders(); break;
+    case "review-open": openReview(today()); break;
+    case "review-date": openReview(el.dataset.date); break;
+    case "review-action": reviewAction(el.dataset.date, id, el.dataset.kind, el.dataset.choice); break;
+    case "alarm-test": unlockSound().then(() => openRing({ id: "test", title: "Test alarm", text: "This is how a PG alarm sounds.", kind: "test", at: Date.now() })); break;
+    case "alarm-enable-sound": unlockSound().then(ok => toast(ok ? "Alarm sound is ready on this device." : "Sound is unavailable here; calendar reminders still work.")); break;
+    case "alarm-notifications": {
+      if (!("Notification" in window)) { toast("Notifications are unavailable here."); break; }
+      Notification.requestPermission().then(p => toast(p === "granted" ? "Notifications allowed." : "Notifications aren’t enabled. Check browser settings.")).catch(() => toast("Could not enable notifications."));
+      break;
+    }
+    case "ring-action": settleRing(el.dataset.choice); break;
+    case "alarm-calendar": {
+      const t = el.dataset.kind === "assignment" ? SC.tasks().find(x => x.id === id) : S.reminders.find(x => x.id === id);
+      if (!t) break;
+      const at = el.dataset.kind === "assignment" && t.due && t.dueMin != null ? hkAt(t.due, t.dueMin) : t.at;
+      exportCalendar({ id, title: t.title || t.text, text: t.text || t.title, at, leads: el.dataset.kind === "assignment" ? S.alarms.assignmentLeads : [0] });
+      break;
+    }
+    case "alarm-remove": {
+      const t = S.reminders.find(x => x.id === id);
+      if (t) { S.reminders = S.reminders.filter(x => x !== t); save(); openReminders(); toast("Reminder removed.", "Undo", () => { S.reminders.push(t); save(); openReminders(); }); }
+      break;
+    }
     case "handbook": openHandbook(); break;
     case "try-phrase": {
       const t = commandText(HR.clean(el.dataset.text)), it = intent(t);
@@ -1724,17 +1858,18 @@ document.addEventListener("click", e => {
       const c = S.collections.find(x => x.id === el.dataset.group), item = c?.items.find(x => x.id === id);
       if (!item) break;
       if (a === "collection-tick") { item.done = !item.done; save(); openCollections(c.id); break; }
-      $("#sheet").innerHTML = `<form data-form="collection-item" data-id="${esc(id)}" data-group="${esc(c.id)}"><h3>Edit item</h3><textarea class="input" name="entry" required aria-label="Item text">${esc(item.text)}</textarea><div class="row wrap"><button class="btn danger" name="choice" value="remove">Remove item</button><button class="btn primary" name="choice" value="save">Save item</button><button type="button" class="btn" data-act="collections" data-id="${esc(c.id)}">Cancel</button></div></form>`;
+      $("#sheet").innerHTML = `<form data-form="collection-item" data-id="${esc(id)}" data-group="${esc(c.id)}"><h3>Edit item</h3><textarea class="input" name="entry" required aria-label="Item text">${esc(item.text)}</textarea><div class="grid2"><label class="field">Date<input class="input" type="date" name="date" value="${esc(item.date || "")}"></label><label class="field">Reminder time (optional)<input class="input" type="time" name="reminder" value="${item.remindMin == null ? "" : timeValue(item.remindMin)}"></label><label class="field">Amount<input class="input" type="number" step="any" name="amount" value="${esc(item.amount ?? "")}"></label><label class="field">Unit<input class="input" name="unit" maxlength="25" value="${esc(item.unit || "")}"></label></div><div class="row wrap"><button class="btn danger" name="choice" value="remove">Remove item</button><button class="btn primary" name="choice" value="save">Save item</button><button type="button" class="btn" data-act="collections" data-id="${esc(c.id)}">Cancel</button></div></form>`;
       break;
     }
     case "fallback-note":
     case "fallback-category": {
       const sh = $("#sheet"), cat = a === "fallback-category";
-      sh.innerHTML = `<form data-form="${cat ? "collection" : "note-preview"}"><h3>${cat ? "Save to a category" : "Save as a note"}</h3>${cat ? `<label class="field"><span>Category name</span><input class="input" name="group" value="${esc(el.dataset.text.trim().split(/\s+/).slice(0, 4).join(" "))}" required></label>` : ""}<label class="field"><span>Text to save</span><textarea class="input" name="entry" required>${esc(el.dataset.text)}</textarea></label><div class="row wrap"><button class="btn primary">Save</button><button type="button" class="btn" data-act="close-sheet">Cancel</button></div></form>`;
+      sh.innerHTML = `<form data-form="${cat ? "collection" : "note-preview"}" data-folder="${esc(el.dataset.folder || "")}"><h3>${cat ? "Save to a category" : "Save as a note"}</h3>${cat ? `<label class="field"><span>Category name</span><input class="input" name="group" value="${esc(el.dataset.text.trim().split(/\s+/).slice(0, 4).join(" "))}" required></label>` : ""}<label class="field"><span>Text to save</span><textarea class="input" name="entry" required>${esc(el.dataset.text)}</textarea></label><div class="row wrap"><button class="btn primary">Save</button><button type="button" class="btn" data-act="close-sheet">Cancel</button></div></form>`;
       if (!sh.open) sh.showModal();
       break;
     }
     case "fallback-web": showSearch(el.dataset.text); break;
+    case "wallpaper-remove": removeWallpaper().then(() => toast("Wallpaper removed.")).catch(() => toast("Wallpaper could not be removed.")); break;
     case "missed-export": {
       const phrases = S.dev.missed || [];
       if (!phrases.length) { toast("No missed phrases to export."); break; }
@@ -1766,7 +1901,17 @@ document.addEventListener("click", e => {
     case "go": e.stopPropagation(); go(el.dataset.v); break;
     case "close-sheet": $("#sheet").close(); break;
     case "goals-open": openGoals(); break;
-    case "goal-del": D.removeGoal(el.dataset.id); openGoals(); render(); break;
+    case "routines-open": openRoutines(id); break;
+    case "routines-confirm": openRoutines(id, true); break;
+    case "routines-delete": {
+      const r = S.routines.find(r => r.id === id);
+      if (!r) break;
+      archiveDays(S, today());
+      clearFutureInstances(S, id, today(), nowMin()); S.routines = S.routines.filter(x => x !== r);
+      save(); render(); openRoutines(); toast(`Removed ${r.title}.`, "Undo", () => { S.routines.push(r); save(); render(); openRoutines(); }); break;
+    }
+    case "goal-edit": openGoals(el.dataset.id); break;
+    case "goal-status": changeGoalStatus(el.dataset.id, el.dataset.status); openGoals(); render(); break;
     case "canto-open": openCanto(); break;
     case "canto-play": sayCanto(el.dataset.zh); break;
     case "canto-learn":
@@ -1833,7 +1978,7 @@ document.addEventListener("click", e => {
     case "folder": ui.folder = el.dataset.k; render(); break;
     case "cloud-sync": SY.push().then(ok => { render(); toast(ok ? "Saved to PG Cloud." : SY.status()); }); break;
     case "cloud-others": if (confirm("Sign out every other device? They'll need the passcode again, and their copy of PG is cleared.")) SY.signOutOthers().then(() => toast("Other devices are signed out."), e => toast(e.message)); break;
-    case "cloud-off": SY.disconnect(); if (S.ai.provider === "cloudflare") S.ai.ok = false; save(true); render(); toast("This device stopped syncing."); break;
+    case "cloud-off": SY.disconnect(); save(true); render(); toast("This device stopped syncing."); break;
     case "about-folder": ui.folder = "about"; ui.q = ""; go("notes"); break;
     case "learn-done": { const tr = LN.tracks().find(t => t.id === id); const r = LN.complete(tr); render(); if (r) { toast(r.next ? `Next: ${r.next.t}` : `${tr.topic} complete.`); } break; }
     case "learn-del": confirmSheet("Remove this learning plan?", "", "Remove", () => { LN.remove(id); render(); }); break;
@@ -1854,6 +1999,10 @@ document.addEventListener("keydown", e => {
 });
 document.addEventListener("change", e => {
   const el = e.target, a = el.dataset.act;
+  if (a === "wallpaper") {
+    if (el.files[0]) setWallpaper(el.files[0]).then(() => toast("Wallpaper saved on this device.")).catch(() => toast("Could not open that image. Try a JPEG or PNG."));
+    el.value = ""; return;
+  }
   if (!a) { if (el.id === "restoreFile") restoreFrom(el.files[0]); return; }
   const v = el.value;
   switch (a) {
@@ -1881,6 +2030,47 @@ document.addEventListener("input", e => {
 });
 document.addEventListener("submit", e => {
   const f = e.target;
+  if (f.dataset.form === "appearance") {
+    e.preventDefault(); S.ui = appearanceValues(Object.fromEntries(new FormData(f)));
+    applyAppearance(S.ui); save(); toast("Appearance saved."); return;
+  }
+  if (f.dataset.form === "routine-edit") {
+    e.preventDefault(); const v = new FormData(f), title = String(v.get("titleText")).trim(), id = f.dataset.id;
+    const start = readTime(v.get("start")), end = readTime(v.get("end")), days = v.getAll("weekday").map(Number);
+    if (!title || !days.length || (start == null) !== (end == null) || start != null && end <= start) return toast("Enter an activity and repeat days. Leave both times blank or set an end after the start.");
+    if (S.routines.some(r => !r.disabled && r.id !== id && r.title.toLowerCase() === title.toLowerCase())) return toast("That routine already exists.");
+    const r = S.routines.find(r => r.id === id);
+    archiveDays(S, today());
+    const data = { title, days, start, minutes: start == null ? 5 : end - start, fixed: true, venue: String(v.get("venue")).trim() };
+    if (r) { clearFutureInstances(S, id, today(), nowMin()); Object.assign(r, data); }
+    else S.routines.push({ id: uid(), from: today(), cat: "other", ...data });
+    save(); initCarryover(); render(); openRoutines(); toast(`Saved ${title}.`); return;
+  }
+  if (f.dataset.form === "alarms-settings") {
+    e.preventDefault();
+    const v = new FormData(f), k = S.alarms;
+    const termStart = String(v.get("termStart")), termEnd = String(v.get("termEnd"));
+    if (termStart && termEnd && termStart > termEnd) return toast("Term end must be on or after term start.");
+    for (const x of ["enabled", "vibrate", "speak", "morning", "morningSpeak", "evening", "goals", "goalsSpeak"]) k[x] = v.has(x);
+    for (const x of ["quietStart", "quietEnd"]) k[x] = String(v.get(x) || "");
+    k.tone = ["chime", "pulse", "bell"].includes(v.get("tone")) ? v.get("tone") : "chime";
+    k.volume = Math.max(0, Math.min(100, +v.get("volume")));
+    k.snooze = Math.max(1, Math.min(120, +v.get("snooze") || 10));
+    k.repeat = Math.max(0, Math.min(120, +v.get("repeat") || 0));
+    k.morningTime = readTime(v.get("morningTime")) ?? 390; k.eveningTime = readTime(v.get("eveningTime")) ?? 1260;
+    k.assignmentLeads = [1440, 180, 60, 0].filter(x => v.has(`lead${x}`));
+    Object.assign(S.profile, { termStart, termEnd, goalRemindEvery: +v.get("goalRemindEvery") });
+    k.goalReviewTime = readTime(v.get("goalReviewTime")) ?? 1080; k.goalReviewDay = +v.get("goalReviewDay");
+    save(); render(); toast("Alarm settings saved."); tick(); return;
+  }
+  if (f.dataset.form === "alarm-new") {
+    e.preventDefault();
+    const title = f.titleText.value.trim(), minute = readTime(f.whenTime.value);
+    const at = minute == null ? NaN : hkAt(f.whenDate.value, minute);
+    if (!title || !Number.isFinite(at) || at <= Date.now()) return toast("Choose a future date and time.");
+    S.reminders.push({ id: uid(), kind: "custom", title, text: title, at, done: false });
+    save(); openReminders(); toast(S.alarms.enabled ? "Reminder saved." : "Saved. Turn on alarms in More to hear it."); return;
+  }
   if (f.dataset.form === "handbook") { e.preventDefault(); openHandbook(f.q.value); return; }
   if (f.dataset.form === "phrase") {
     e.preventDefault();
@@ -1897,13 +2087,18 @@ document.addEventListener("submit", e => {
     const entry = String(values.get("entry") || "").trim();
     if (f.dataset.form === "note-preview") {
       if (!entry) return;
-      M.add(entry, { exact: true }); $("#sheet").close(); render(); toast("Note saved."); return;
+      M.add(entry, { exact: true, folder: f.dataset.folder }); $("#sheet").close(); render(); toast("Note saved."); return;
     }
     if (f.dataset.form === "collection-item") {
       const c = S.collections.find(x => x.id === f.dataset.group), item = c?.items.find(x => x.id === f.dataset.id);
       if (!item) return;
       if (e.submitter?.value === "remove") c.items = c.items.filter(x => x !== item);
-      else if (entry) { item.text = entry; delete item.amount; delete item.unit; }
+      else if (entry) {
+        const date = values.get("date"), min = readTime(values.get("reminder")), amount = values.get("amount"), unit = String(values.get("unit")).trim().toLowerCase();
+        if (min != null && !date) return toast("Set the date for this reminder.");
+        if ((amount !== "") !== !!unit) return toast("Enter both an amount and unit or leave both empty.");
+        Object.assign(item, { text: entry, date: date || null, remindMin: min, amount: amount === "" ? null : +amount, unit });
+      }
       save(); openCollections(c.id); return;
     }
     try {
@@ -1932,14 +2127,18 @@ document.addEventListener("submit", e => {
       const values = new FormData(f), week = values.get("week");
       const days = values.getAll("days").map(i => addDays(week, +i));
       const tasks = String(values.get("tasks")).split("\n").filter(s => s.trim()).map(line => {
-        const match = line.trim().match(/^(.+),\s*(\d+)\s*$/);
-        if (!match) throw new Error("Use one task per line with minutes, for example: History revision, 90");
+        const match = line.trim().match(/^(.+?),\s*(\d+)(?:,\s*([123]))?(?:,\s*(\d{4}-\d{2}-\d{2}))?\s*$/);
+        if (!match) throw new Error("Use: Activity, minutes, optional priority, optional deadline.");
         const title = match[1].trim(), old = S.weekPlans?.[week]?.tasks.find(t => t.title === title);
         const cat = old?.cat || (/\bbass\b/i.test(title) ? "bass" : /\b(?:gym|workout)\b/i.test(title) ? "gym" : /\b(?:bible|prayer)\b/i.test(title) ? "bible" : /\b(?:rest|break)\b/i.test(title) ? "rest" : "study");
-        return { title, minutes: +match[2], days, cat };
+        return { title, minutes: +match[2], priority: +(match[3] || 2), due: match[4], days, cat };
       });
+      if (S.weekPlans?.[week] && !f.dataset.replace) {
+        f.dataset.replace = "yes"; f.querySelector("[data-week-error]").textContent = "This replaces the saved plan for that week. Press Confirm rebuild to continue.";
+        f.querySelector('button[type="submit"]').textContent = "Confirm rebuild"; return;
+      }
       const result = planWeek({ weekStart: week, start: values.get("from"), end: values.get("until"),
-        focusMinutes: +values.get("focus"), breakMinutes: +values.get("rest"), tasks });
+        focusMinutes: +values.get("focus"), breakMinutes: +values.get("rest"), allowPartial: values.has("partial"), tasks });
       $("#sheet").close(); go("today", days.find(d => d >= today()) || week);
       pushMsg("pg", planSummary(result)); return;
     } catch (error) { f.querySelector("[data-week-error]").textContent = error.message; return; }
@@ -1959,6 +2158,12 @@ document.addEventListener("submit", e => {
     return;
   }
   if (f.dataset.form === "goal") { e.preventDefault(); const t = f.g.value.trim(); if (t) { D.addGoal(t); openGoals(); render(); } return; }
+  if (f.dataset.form === "goal-edit") {
+    e.preventDefault(); const g = D.goals().find(x => x.id === f.dataset.id), text = f.g.value.trim();
+    if (!g || !text) return;
+    Object.assign(g, { text, due: f.due.value || null, term: f.term.value, remindEvery: +f.period.value, notes: f.notes.value.trim() });
+    save(); openGoals(); render(); toast("Goal updated."); return;
+  }
   if (f.dataset.form === "pantry") {
     e.preventDefault(); ui.pantryInput = f.ingredients.value.trim();
     ui.pantryResult = F.pantryMatches(ui.pantryInput); render(); return;
@@ -1982,9 +2187,10 @@ document.addEventListener("submit", e => {
     const s = toM(fd.get("start")), en = toM(fd.get("end"));
     if (!Number.isInteger(s) || !Number.isInteger(en) || en <= s) { toast("Choose an end time after the start. For overnight entries, tell PG the next-day finish."); return; }
     const clash = day(d).blocks.find(b => b.id !== f.dataset.id && !b.skipped && !b.studyWindow && s < b.end && b.start < en);
-    const data = { title: String(fd.get("title")).trim() || "Untitled", cat: fd.get("cat"), start: s, end: en };
-    if (f.dataset.id) Object.assign(day(d).blocks.find(x => x.id === f.dataset.id), data, { flex: false });
-    else day(d).blocks.push({ id: uid(), ...data, flex: false, done: false, date: d, src: "manual" });
+    const fixed = fd.has("fixed");
+    const data = { title: String(fd.get("title")).trim() || "Untitled", cat: fd.get("cat"), start: s, end: en, venue: String(fd.get("venue")).trim(), priority: +fd.get("priority"), fixed, flex: !fixed };
+    if (f.dataset.id) Object.assign(day(d).blocks.find(x => x.id === f.dataset.id), data);
+    else day(d).blocks.push({ id: uid(), ...data, done: false, date: d, src: "manual" });
     if (SC.academic(data.title)) {
       const [task] = SC.add([{ title: data.title, kind: "assignment", due: null, dueMin: null, est: null }]);
       const b = day(d).blocks.find(b => b.id === f.dataset.id) || day(d).blocks.at(-1); b.tid = task.id;
@@ -2032,12 +2238,180 @@ function toast(msg, action, fn) {
 }
 
 // ================= Reminders & wake lock =================
+function appearanceSettings() {
+  const a = appearanceValues(S.ui);
+  return `<h2 class="sec"><span>Appearance</span></h2><div class="card">
+    <form data-form="appearance"><div class="grid2">
+      <label class="field">Theme<select class="input" name="theme">${["dark","light","auto"].map(t => `<option ${t === a.theme ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+      <label class="field">Accent<select class="input" name="accent">${Object.keys(accents).map(t => `<option ${t === a.accent ? "selected" : ""}>${t}</option>`).join("")}</select></label></div>
+      <label class="field">Text size (1 is normal)<input class="input" name="fontScale" type="number" min="0.8" max="1.6" step="0.05" value="${a.fontScale}" required></label>
+      <button class="btn primary">Save appearance</button></form>
+    <p class="note">Wallpaper is stored only on this device.</p>
+    <label class="field">Choose a wallpaper<input type="file" class="input" accept="image/*" data-act="wallpaper"></label><button class="btn" data-act="wallpaper-remove">Remove wallpaper</button></div>`;
+}
+function alarmSettings() {
+  const a = S.alarms, check = (k, t) => `<label class="alarm-check"><input type="checkbox" name="${k}" ${a[k] ? "checked" : ""}>${t}</label>`;
+  const field = (label, name, type, value, extra = "") => `<label class="field"><span>${label}</span><input class="input" type="${type}" name="${name}" value="${esc(value)}" ${extra}></label>`;
+  return `<h2 class="sec"><span>Alarms and daily reviews</span></h2><div class="card">
+    <div class="row wrap"><button class="btn" data-act="alarms-open">Reminders</button><button class="btn" data-act="review-open">Evening review</button><button class="btn" data-act="alarm-test">Test alarm</button></div>
+    <form data-form="alarms-settings">
+      ${check("enabled", "Enable alarms")}${check("speak", "Speak reminder messages")}${check("vibrate", "Vibrate if supported")}
+      <div class="grid2"><label class="field"><span>Sound</span><select class="input" name="tone">${["chime","pulse","bell"].map(v => `<option ${v === a.tone ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+      ${field("Volume", "volume", "range", a.volume, 'min="0" max="100"')}</div>
+      <div class="grid2">${field("Snooze minutes", "snooze", "number", a.snooze, 'min="1" max="120"')}${field("Repeat minutes (0 = off)", "repeat", "number", a.repeat, 'min="0" max="120"')}</div>
+      <div class="grid2">${field("Quiet starts (Hong Kong)", "quietStart", "time", a.quietStart)}${field("Quiet ends (Hong Kong)", "quietEnd", "time", a.quietEnd)}</div>
+      <fieldset><legend>Assignment alerts</legend>${[[1440,"24 hours before"],[180,"3 hours before"],[60,"1 hour before"],[0,"At the deadline"]].map(([n,label]) => `<label class="alarm-check"><input type="checkbox" name="lead${n}" ${a.assignmentLeads.includes(n) ? "checked" : ""}>${label}</label>`).join("")}</fieldset>
+      <div class="grid2"><div>${check("morning", "Morning briefing")}${field("Briefing time", "morningTime", "time", timeValue(a.morningTime))}${check("morningSpeak", "Speak the briefing")}</div>
+      <div>${check("evening", "Evening review")}${field("Review time", "eveningTime", "time", timeValue(a.eveningTime))}</div></div>
+      <fieldset><legend>Goals</legend>${check("goals", "Goal reminders and weekly check")}${check("goalsSpeak", "Speak goal reminders")}<div class="grid2"><label class="field">Weekly check day<select class="input" name="goalReviewDay">${["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"].map((d,i) => `<option value="${i}" ${i === a.goalReviewDay ? "selected" : ""}>${d}</option>`).join("")}</select></label>${field("Weekly check time", "goalReviewTime", "time", timeValue(a.goalReviewTime))}${field("Default goal reminder interval (days)", "goalRemindEvery", "number", S.profile.goalRemindEvery, 'min="0" max="365" required')}${field("Term starts", "termStart", "date", S.profile.termStart)}${field("Term ends", "termEnd", "date", S.profile.termEnd)}</div></fieldset>
+      <button class="btn primary">Save alarm settings</button>
+    </form>
+    <div class="row wrap"><button class="btn" data-act="alarm-enable-sound">Enable sound</button><button class="btn" data-act="alarm-notifications">Allow notifications</button></div>
+    <p class="note">Sound: ${audio?.state === "running" ? "enabled" : "tap Enable sound"} · Notifications: ${"Notification" in window ? Notification.permission : "not supported"} · Keep screen awake: ${S.voice.keepAwake ? "on" : "off"}.</p>
+    <p class="note">Times use Hong Kong time. These alarms need PG running. Browsers may pause a background tab or block sound. Export to your phone calendar for reminders when PG is closed.</p>
+  </div>`;
+}
+const hkLabel = at => new Date(at).toLocaleString("en-GB", { timeZone: "Asia/Hong_Kong", dateStyle: "medium", timeStyle: "short" });
+function openReminders() {
+  const sh = $("#sheet");
+  const items = S.reminders.filter(x => !x.done).sort((a, b) => a.at - b.at);
+  const assignments = SC.pending().filter(x => x.due && x.dueMin != null);
+  sh.innerHTML = `<h3>Reminders</h3><p class="note">Hong Kong time</p>${[...items, ...assignments].map(t => {
+    const a = items.includes(t) ? "custom" : "assignment", at = a === "custom" ? t.at : hkAt(t.due, t.dueMin);
+    return `<div class="set-row"><div>${esc(t.title || t.text)}<div class="sub">${esc(hkLabel(at))}</div></div><div class="row wrap"><button class="btn" data-act="alarm-calendar" data-id="${esc(t.id)}" data-kind="${a}" aria-label="Add ${esc(t.title || t.text)} to phone calendar">Calendar</button>${a === "custom" ? `<button class="btn" data-act="alarm-remove" data-id="${esc(t.id)}" aria-label="Remove ${esc(t.title)}">Remove</button>` : ""}</div></div>`;
+  }).join("") || "<p>No timed reminders yet.</p>"}<form class="field" data-form="alarm-new"><label class="field"><span>Reminder</span><input class="input" name="titleText" required></label><div class="grid2"><label class="field"><span>Date</span><input class="input" name="whenDate" type="date" value="${today()}" required></label><label class="field"><span>Time</span><input class="input" name="whenTime" type="time" required></label></div><button class="btn primary">Add reminder</button></form><button class="btn" data-act="close-sheet">Close</button>`;
+  if (!sh.open) sh.showModal();
+}
+function exportCalendar(data) {
+  try {
+    const url = URL.createObjectURL(new Blob([calendarFile(data)], { type: "text/calendar;charset=utf-8" }));
+    const a = document.createElement("a"); a.href = url; a.download = "pg-reminder.ics"; a.click(); setTimeout(() => URL.revokeObjectURL(url), 15000);
+    toast("Open the downloaded file in your calendar and check its alert.");
+  } catch (err) { toast(err.message); }
+}
+function briefText(d) {
+  const events = live(d).map(b => `${b.title}, ${sayTime(b.start)} to ${sayTime(b.end)}${b.venue ? ` at ${b.venue}` : ""}`);
+  const due = SC.pending().filter(t => t.due && t.due <= d).map(t => `${t.title}${t.dueMin == null ? "" : ` at ${sayTime(t.dueMin)}`}`);
+  const habits = reviewDay(S, d).planned.filter(x => x.kind === "routine").map(x => x.title);
+  const canto = D.dailyCanto(d);
+  return [`Today is ${fmtDay(d, true)}.`, events.length ? events.join("; ") + "." : "No timed activities.",
+    due.length && `Assignments due: ${due.join("; ")}.`, habits.length && `Everyday tasks: ${habits.join(", ")}.`,
+    `Cantonese: ${canto.jp}. ${canto.en}`].filter(Boolean).join(" ");
+}
+function openReview(date) {
+  const sh = $("#sheet"), r = date === today() ? reviewDay(S, date) : S.history[date] || reviewDay(S, date);
+  const buttons = x => date === today() && (x.kind !== "block" || !day(date).blocks.find(b => b.id === x.id)?.routine)
+    ? `<div class="row wrap">${[["done","Done now"],["skip","Skip"],...(x.movable ? [["move","Move to tomorrow"]] : [])].map(([choice,label]) => `<button class="btn" data-act="review-action" data-date="${date}" data-id="${esc(x.id)}" data-choice="${choice}" data-kind="${x.kind}" aria-label="${label}: ${esc(x.title)}">${label}</button>`).join("")}</div>` : "";
+  sh.innerHTML = `<h3>Evening review</h3><div class="row wrap"><button class="btn" data-act="review-date" data-date="${addDays(date, -1)}">Previous day</button>${date < today() ? `<button class="btn" data-act="review-date" data-date="${addDays(date, 1)}">Next day</button>` : ""}</div><p>${esc(fmtDay(date, true))}: ${r.done.length} of ${r.planned.length} complete.</p>${r.missed.filter(x => !r.moved.some(y => y.id === x.id)).map(x => `<div class="set-row"><span>${esc(x.title)}</span>${buttons(x)}</div>`).join("") || "<p>Nothing left to review.</p>"}${r.moved.map(x => `<p class="sub">Carried forward: ${esc(x.title)}</p>`).join("")}<button class="btn" data-act="close-sheet">Close</button>`;
+  if (!sh.open) sh.showModal();
+}
+function reviewAction(date, id, kind, choice) {
+  if (date !== today()) return;
+  const x = reviewDay(S, date).missed.find(x => x.id === id && x.kind === kind);
+  if (!x || x.moved || choice === "move" && !x.movable) return;
+  if (kind === "routine") {
+    const map = choice === "done" ? (S.routineDone ||= {}) : (S.routineSkip ||= {});
+    map[`${x.linkId}:${date}`] = true;
+    const b = day(date).blocks.find(b => b.id === x.id);
+    if (b) { if (choice === "done") b.done = true; else b.skipped = true; }
+  } else {
+    const t = (kind === "block" ? day(date).blocks : S.inbox).find(t => t.id === id);
+    if (!t || t.routine) return;
+    if (choice === "done") { t.done = true; if (t.tid) SC.noteDone(t); }
+    if (choice === "skip") t.skipped = true;
+    if (choice === "move") {
+      if (kind === "block") { t.carryResolved = true; t.movedByReview = true; }
+      else { t.skipped = true; t.movedByReview = true; }
+      const dest = addDays(date, 1);
+      S.inbox.push({ id: uid(), date: dest, title: t.title, cat: t.cat, dur: t.dur || t.end - t.start || 60, venue: t.venue, tid: t.tid, carryOnDate: true });
+    }
+  }
+  archiveDays(S, date, true); save(); render(); openReview(date);
+}
+let audio, ringTimer, ringItem;
+async function unlockSound() {
+  try {
+    const Context = window.AudioContext || window.webkitAudioContext;
+    if (!Context) return false;
+    audio ||= new Context();
+    await audio.resume();
+    keepAwake();
+    return audio.state === "running";
+  } catch { return false; }
+}
+function tone() {
+  if (audio?.state !== "running" || !S.alarms.volume) return;
+  const patterns = { chime: [587, 784, 988], pulse: [700, 700, 700], bell: [523, 1046] };
+  (patterns[S.alarms.tone] || patterns.chime).forEach((hz, i) => {
+    const at = audio.currentTime + i * 0.18, osc = audio.createOscillator(), gain = audio.createGain();
+    osc.frequency.value = hz; gain.gain.value = 0.001; gain.gain.setValueAtTime(.001, at);
+    gain.gain.exponentialRampToValueAtTime(.16 * S.alarms.volume / 100 + .001, at + .025);
+    gain.gain.exponentialRampToValueAtTime(.001, at + .16);
+    osc.connect(gain).connect(audio.destination); osc.start(at); osc.stop(at + .17);
+  });
+}
+function openRing(item) {
+  if (ringItem || SY.locked()) return;
+  const dlg = $("#ring"), d = today();
+  ringItem = item;
+  const text = item.kind === "brief" ? briefText(d) : item.kind === "review" ? (() => { const r = reviewDay(S, d); return `${r.done.length} of ${r.planned.length} complete.${r.missed.length ? ` Still open: ${r.missed.map(x => x.title).join(", ")}.` : ""}`; })() : item.text || item.title;
+  dlg.innerHTML = `<div class="ring-inner"><div class="eyebrow">PG reminder</div><h2 id="ring-title">${esc(item.title)}</h2><p>${esc(text)}</p>
+    <div class="row wrap"><button class="btn primary" data-act="ring-action" data-choice="done">Dismiss</button>${item.kind === "test" ? "" : `<button class="btn" data-act="ring-action" data-choice="snooze">Snooze ${S.alarms.snooze} min</button><button class="btn" data-act="ring-action" data-choice="open">Open</button>`}</div>
+    ${item.kind === "brief" ? `<button class="btn" data-act="ring-action" data-choice="read">Read briefing</button>` : ""}</div>`;
+  dlg.showModal();
+  const started = Date.now(), repeat = (item.repeat || S.alarms.repeat || 0) * 60000;
+  const play = () => {
+    const elapsed = Date.now() - started;
+    if ((repeat ? elapsed % repeat : elapsed) >= 45000) return;
+    tone(); if (S.alarms.vibrate && !document.hidden) navigator.vibrate?.([160, 80, 160]);
+  };
+  play(); ringTimer = setInterval(play, 2800);
+  if ((item.kind === "brief" ? S.alarms.morningSpeak : item.kind === "goal" ? S.alarms.goalsSpeak : item.kind !== "review" && S.alarms.speak) && voice.mode === "off") voice.say(speakable(text));
+  if (item.kind !== "test") systemNotice(text);
+}
+function settleRing(choice) {
+  if (!ringItem) return;
+  const item = ringItem;
+  if (choice === "read") { voice.say(speakable(briefText(today()))); return; }
+  clearInterval(ringTimer); navigator.vibrate?.(0); voice.hush(); $("#ring").close(); ringItem = null;
+  if (item.kind !== "test") {
+    const receipts = S.dev.alarmReceipts ||= {};
+    receipts[item.id] = choice === "snooze" ? { until: Date.now() + S.alarms.snooze * 60000, stamp: Date.now() } : { done: true, stamp: Date.now() };
+    if (choice !== "snooze" && item.kind === "custom") {
+      const t = S.reminders.find(r => r.id === item.id);
+      if (t) { t.done = true; save(); }
+    }
+    if (choice !== "snooze" && item.kind === "goal" && item.linkId) {
+      const g = S.goals.find(g => g.id === item.linkId);
+      if (g) { g.lastRemind = today(); save(); }
+    }
+    save(true);
+  }
+  if (choice === "open") {
+    if (item.kind === "review") openReview(today());
+    else if (item.kind === "assignment") go("school");
+    else if (item.kind === "brief") go("today", today());
+    else if (item.kind === "goal") openGoals();
+    else if (item.kind === "collection") openCollections(item.linkId);
+    else openReminders();
+  }
+}
+function alarmTick(date, minute, archive = true) {
+  const a = S.alarms;
+  if (archive && archiveDays(S, date, a.evening && minute >= a.eveningTime)) save();
+  if (!a.enabled || ringItem || voice.mode !== "off" || isQuiet(a, minute)) return;
+  const receipts = S.dev.alarmReceipts ||= {};
+  for (const [key, r] of Object.entries(receipts)) if (r.stamp < Date.now() - 7 * 86400e3) delete receipts[key];
+  const next = pendingAlarms(occurrences(S, date, a), receipts, Date.now())[0];
+  if (next) openRing(next);
+}
 const alerted = new Set();
 let lastCalendarDay = today();
 function tick() {
   if (SY.locked() || inDraft() || ui.running) return;
   initCarryover();
   const n = nowMin(), d = today();
+  alarmTick(d, n);
   if (lastCalendarDay !== d) {
     if (ui.date === lastCalendarDay && !ui.pinDate) ui.date = d;
     lastCalendarDay = d;
@@ -2066,12 +2440,12 @@ function tick() {
 }
 function notify(msg) {
   pushMsg("pg", msg);
-  if (S.voice.alarmSpeech) voice.say(speakable(msg));
+  if (S.voice.alarmSpeech && !isQuiet(S.alarms, nowMin()) && !ringItem) voice.say(speakable(msg));
   systemNotice(msg);
 }
 function systemNotice(msg) {
   if (!document.hidden || !("Notification" in window) || Notification.permission !== "granted") return;
-  navigator.serviceWorker?.getRegistration().then(reg => reg?.showNotification("PG", { body: msg, icon: "icon-192.png" })).catch(() => {});
+  navigator.serviceWorker?.getRegistration().then(reg => reg?.showNotification("PG", { body: msg, icon: "icon-192.png", requireInteraction: true })).catch(() => {});
 }
 let lock = null;
 async function keepAwake() {
@@ -2087,11 +2461,13 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) voice
 renameCoachBlocks(today());
 paintChat(); render(); paintVoice("off"); paintLock();
 requestAnimationFrame(() => setTimeout(() => {
-  Promise.resolve(SY.pull()).finally(() => { if (initCarryover()) render(); });
+  if (!SY.locked()) alarmTick(today(), nowMin(), false);
+  Promise.resolve(SY.pull()).finally(() => { if (initCarryover()) render(); tick(); });
   if (!SY.locked() && S.dev.aiRetired === "pending") {
     S.dev.aiRetired = "shown"; save(true); toast("AI removed. You can now delete your API keys.");
   }
 }, 0));
+$("#ring").addEventListener("cancel", e => { e.preventDefault(); settleRing("done"); });
 setInterval(tick, 20000);
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
   // Reload once when a new version arrives, but never while recording or typing.

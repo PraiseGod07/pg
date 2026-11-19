@@ -36,13 +36,18 @@ export function planWeek(input) {
     if (!Number.isInteger(amount) || amount < 1 || amount > 10080 || !days.length)
       throw new Error(`How many minutes does ${title} need, and on which days may I schedule it?`);
     names.add(key(title));
-    return { title, minutes: amount, days, cat: CATS[t.cat] ? t.cat : "study" };
-  });
+    const priority = [1, 2, 3].includes(+t.priority) ? +t.priority : 2;
+    const linked = (S.school?.tasks || []).find(x => !x.done && key(x.title) === key(title));
+    const due = t.due || linked?.due || null;
+    if (due && (!/^\d{4}-\d{2}-\d{2}$/.test(due) || !Number.isFinite(Date.parse(due)) || new Date(due).toISOString().slice(0, 10) !== due))
+      throw new Error(`Give ${title} a valid deadline in YYYY-MM-DD format.`);
+    return { title, minutes: amount, days, cat: CATS[t.cat] ? t.cat : "study", priority, due, dueMin: linked?.due === due ? linked?.dueMin ?? null : null };
+  }).sort((a, b) => a.priority - b.priority || (a.due || "9999").localeCompare(b.due || "9999") || (a.dueMin ?? 1440) - (b.dueMin ?? 1440));
   // Build off to the side. Validation/fitting never partially clears a week.
   const work = Object.fromEntries(dates.map(d => {
     const savedWindows = S.studyWindows?.[d] || [];
     const blocks = day(d).blocks.filter(b => !savedWindows.some(w => b.containerId === w.id)).filter(b =>
-      b.src !== "weekly-plan" || b.done || d < today() || d === today() && b.start < nowMin()).map(b => ({ ...b }));
+      b.src !== "weekly-plan" || b.fixed || b.done || d < today() || d === today() && b.start < nowMin()).map(b => ({ ...b }));
     for (const w of savedWindows) if (!blocks.some(b => b.id === w.id)) blocks.push({ ...w });
     return [d, blocks];
   }));
@@ -53,13 +58,14 @@ export function planWeek(input) {
     // Keep completed/already-started sessions, including their completion history.
     const kept = Object.values(work).flat().filter(b => b.src === "weekly-plan" && b.planTask === taskKey);
     let remaining = Math.max(0, task.minutes - kept.reduce((n, b) => n + b.end - b.start, 0)), part = 0;
-    const eligible = task.days.filter(d => d >= today());
+    const eligible = task.days.filter(d => d >= today() && (!task.due || d <= task.due));
     let progress = true;
     while (remaining > 0 && progress) {
       progress = false;
       for (const date of eligible) {
         if (!remaining) break;
         const cursor = date === today() ? Math.max(start, Math.ceil(nowMin() / 5) * 5) : start;
+        const endBy = task.due === date && task.dueMin != null ? Math.min(end, task.dueMin) : end;
         const duration = Math.min(remaining, focus);
         const containers = windows[date];
         const occupied = work[date].filter(b => !containers.some(w => w.id === b.id));
@@ -67,16 +73,16 @@ export function planWeek(input) {
         const studyTask = ["study", "work"].includes(task.cat);
         if (containers.length && studyTask) {
           for (const window of containers) {
-            at = firstGap(occupied, Math.max(cursor, window.start), duration + rest, Math.min(end, window.end));
+            at = firstGap(occupied, Math.max(cursor, window.start), duration + rest, Math.min(endBy, window.end));
             if (at != null) break;
           }
-        } else at = firstGap(work[date], cursor, duration + rest, end);
+        } else at = firstGap(work[date], cursor, duration + rest, endBy);
         if (at == null) continue;
         let id;
         do { id = `week:${week}:${encodeURIComponent(taskKey)}:${part++}`; }
         while (Object.values(work).some(bs => bs.some(b => b.id === id)));
         const block = { id, title: task.title, cat: task.cat, start: at, end: at + duration,
-          date, done: false, flex: true, src: "weekly-plan", planTask: taskKey };
+          date, done: false, fixed: false, flex: true, priority: task.priority, src: "weekly-plan", planTask: taskKey };
         const pause = { id: id + ":rest", title: "Rest break", cat: "rest",
           start: block.end, end: block.end + rest, date, done: false, flex: true, src: "weekly-plan" };
         work[date].push(block, pause); placed.push(block); remaining -= duration; progress = true;
@@ -84,7 +90,7 @@ export function planWeek(input) {
     }
     if (remaining) missing.push({ title: task.title, minutes: remaining });
   }
-  if (missing.length) throw new Error("No, sir, this is not feasible. There is not enough time in the approved study windows for "
+  if (missing.length && !input.allowPartial) throw new Error("No, sir, this is not feasible. There is not enough time in the approved study windows for "
     + missing.map(t => `${t.title} (${t.minutes} minutes still needed)`).join(", ") + ". Nothing changed. Which duration or available time should change?");
   for (const date of dates) {
     // Keep the container as allocation metadata, not an overlapping appointment.
@@ -113,7 +119,7 @@ export function planWeek(input) {
     for (const blocks of Object.values(work)) for (const b of blocks)
       if (b.planTask === key(task.title)) b.tid = record.id;
   }
-  S.weekPlans[week] = { weekStart: week, start, end, focusMinutes: focus, breakMinutes: rest, tasks, missing, updated: Date.now() };
+  S.weekPlans[week] = { weekStart: week, start, end, focusMinutes: focus, breakMinutes: rest, tasks, missing, allowPartial: !!input.allowPartial, updated: Date.now() };
   save();
   return { week, placed, missing };
 }

@@ -13,6 +13,7 @@ export function collectionCommand(text) {
     return { op: "add", name, text: m[2], kind: /^(log|record)$/i.test(m[1]) ? "tracker" : "list" };
   }
   if ((m = t.match(/^(?:rename) (?:my )?(.+?) (?:category )?to (.+)$/i))) return { op: "rename", name: key(m[1]), to: key(m[2]) };
+  if ((m = t.match(/^merge (?:my )?(.+?) into (?:my )?(.+)$/i))) return { op: "merge", name: key(m[1]), to: key(m[2]) };
   if ((m = t.match(/^(?:delete|remove) (?:the |my )?(?:category|list|tracker) (.+)$/i))) return { op: "delete", name: key(m[1]) };
   if ((m = t.match(/^(remove|delete|tick off|mark done) (.+?) (?:from|in|on) (?:my )?(.+)$/i))) return { op: /tick|done/i.test(m[1]) ? "done" : "remove", name: key(m[3]), text: m[2] };
   if ((m = t.match(/^(?:what(?:'s|’s| is) in|show|read) (?:my )?(.+?)\??$/i))) return { op: "show", name: key(m[1]) };
@@ -20,6 +21,17 @@ export function collectionCommand(text) {
 }
 export const findCollection = (list, name) => list.find(c => [c.name, ...(c.aliases || [])].some(n => key(n) === key(name)));
 export const reservedCollection = name => !key(name) || builtIn.test(key(name));
+export const collectionTotals = collection => Object.entries(collection.items.reduce((totals, item) => {
+  if (Number.isFinite(item.amount) && item.unit) totals[item.unit] = (totals[item.unit] || 0) + item.amount;
+  return totals;
+}, Object.create(null))).map(([unit, amount]) => `${+amount.toFixed(6)} ${unit}`);
+export function mergeCollections(list, source, target) {
+  if (source === target || !list.includes(source) || !list.includes(target)) throw new Error("Choose two different collections.");
+  const ids = new Set(target.items.map(i => i.id));
+  for (const item of source.items) target.items.push(ids.has(item.id) ? { ...item, id: uid() } : item);
+  target.aliases = [...new Set([...(target.aliases || []), source.name, ...(source.aliases || [])])];
+  return list.filter(c => c !== source);
+}
 export function saveCollection(list, name, text, kind = "list") {
   name = key(name);
   if (reservedCollection(name)) throw new Error("That name is already used by a built-in section.");

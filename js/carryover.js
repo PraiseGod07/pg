@@ -2,18 +2,18 @@
 import { firstGap } from "./scheduler.js";
 const TASK_CATS = new Set(["study", "work", "gym", "bass", "bible", "learn", "other"]);
 const APPOINTMENT = /\b(?:appointment|meeting|interview|reservation|flight|ceremony)\b|^(?:lecture|class|exam|test|quiz|presentation|shift)\b/i;
+export const canCarry = b => !b.routine && !b.group && !b.partial && TASK_CATS.has(b.cat) && (b.tid || !APPOINTMENT.test(b.title));
 
 export function carriedTasks(state, date, since) {
   return Object.entries(state.days).filter(([d]) => d >= since && d < date).flatMap(([d, day]) =>
-    day.blocks.filter(b => !b.done && !b.skipped && !b.routine && b.src !== "routine" && !b.carryResolved && !b.group && !b.partial
-      && TASK_CATS.has(b.cat) && (b.tid || !APPOINTMENT.test(b.title))
+    day.blocks.filter(b => !b.done && !b.skipped && b.src !== "routine" && !b.carryResolved && canCarry(b)
       && (!b.tid || (state.school?.tasks || []).some(t => t.id === b.tid && !t.done)))
       .map(b => ({ id: `carry:${d}:${b.id}`, title: b.title, date: d, cat: b.cat, venue: b.venue, dur: b.end - b.start, source: b }))
   ).sort((a, b) => a.date.localeCompare(b.date));
 }
 
 export function untimedTasks(state, date, current, since) {
-  return state.inbox.filter(t => !t.done && (t.date === date || date === current && (!t.date || t.date >= since && t.date < date)));
+  return state.inbox.filter(t => !t.done && !t.skipped && (t.date === date || date === current && (!t.date || t.date >= since && t.date < date)));
 }
 
 export function planCarryover(state, date, since, blocks, now) {
@@ -22,13 +22,13 @@ export function planCarryover(state, date, since, blocks, now) {
   const displaced = [];
   for (let i = blocks.length - 1; i >= 0; i--) {
     const b = blocks[i];
-    if (b.src !== "carryover" || !b.flex || b.done || b.start < now || b.skipped) continue;
+    if (b.src !== "carryover" || b.fixed || !b.flex || b.done || b.start < now || b.skipped) continue;
     const collision = blocks.some(x => x !== b && !x.skipped && x.src !== "carryover" && x.start < b.end && x.end > b.start);
     if (!collision) continue;
     blocks.splice(i, 1);
     displaced.push({ id: b.carryOrigin, title: b.title, cat: b.cat, date: b.carriedFrom, venue: b.venue, tid: b.tid, dur: b.end - b.start, priority: b.priority, retry: true });
   }
-  const candidates = [...displaced, ...carriedTasks(state, date, since), ...untimedTasks(state, date, date, since).filter(t => t.date && t.date < date)]
+  const candidates = [...displaced, ...carriedTasks(state, date, since), ...untimedTasks(state, date, date, since).filter(t => t.date && (t.date < date || t.carryOnDate && t.date === date))]
     .sort((a, b) => (a.source?.priority || a.priority || 2) - (b.source?.priority || b.priority || 2)
       || (due.get(a.source?.tid || a.tid)?.due || "9999").localeCompare(due.get(b.source?.tid || b.tid)?.due || "9999")
       || a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
